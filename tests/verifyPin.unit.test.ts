@@ -10,6 +10,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * proof that runDummyPinVerification performs a genuine Argon2id
  * verification and that its underlying hash is memoized, not regenerated.
  *
+ * Under V1's PIN-only identification design there is no per-employee
+ * failed-attempt/lockout state (see verifyPin.ts): a lookup either finds no
+ * active app_user at all (dummy Argon2, always "invalid_pin") or finds
+ * exactly the account the submitted PIN belongs to, in which case Argon2
+ * verification against pin_hash either succeeds (issues a kiosk token) or
+ * -- only in the anomalous case where pin_hash and pin_lookup_hash have
+ * gone out of sync for that account -- fails closed as a credential-
+ * integrity mismatch, still reporting the same generic "invalid_pin".
+ *
  * Both vi.mock calls below wrap the REAL implementations (so verifyPinCore
  * still runs actual argon2/rate-limit logic here, just observably) rather
  * than replacing them with fakes -- these are spies, not stubs, except for
@@ -45,15 +54,14 @@ interface FakeSupabaseOptions {
 }
 
 function createFakeSupabase({ lookupData, lookupError = null }: FakeSupabaseOptions) {
-  const rpc = vi.fn().mockResolvedValue({ data: [{ failed_pin_attempts: 1, locked_until: null }], error: null });
-  const updateEq = vi.fn().mockResolvedValue({ data: null, error: null });
-  const update = vi.fn().mockReturnValue({ eq: updateEq });
   const maybeSingle = vi.fn().mockResolvedValue({ data: lookupData, error: lookupError });
-  const selectEq2 = vi.fn().mockReturnValue({ maybeSingle });
+  // Chain is .select(...).eq("organization_id", ...).eq("pin_lookup_hash", ...).eq("is_active", true).maybeSingle()
+  const selectEq3 = vi.fn().mockReturnValue({ maybeSingle });
+  const selectEq2 = vi.fn().mockReturnValue({ eq: selectEq3 });
   const selectEq1 = vi.fn().mockReturnValue({ eq: selectEq2 });
   const select = vi.fn().mockReturnValue({ eq: selectEq1 });
-  const from = vi.fn().mockReturnValue({ select, update });
-  return { client: { from, rpc } as unknown as SupabaseClient, rpc, update, updateEq };
+  const from = vi.fn().mockReturnValue({ select });
+  return { client: { from } as unknown as SupabaseClient, selectEq3 };
 }
 
 beforeEach(() => {
@@ -61,8 +69,8 @@ beforeEach(() => {
 });
 
 describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
-  it("no matching employee: calls runDummyPinVerification once, never verifyPinHash", async () => {
-    const { client } = createFakeSupabase({ lookupData: null });
+  it("no matching PIN (unknown, or belonging to an inactive app_user): calls runDummyPinVerification once, never verifyPinHash", async () => {
+    const { client, selectEq3 } = createFakeSupabase({ lookupData: null });
 
     const result = await verifyPinCore(client, {
       pin: "123456",
@@ -75,48 +83,27 @@ describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
     expect(result).toEqual({ ok: false, reason: "invalid_pin" });
     expect(runDummyPinVerification).toHaveBeenCalledTimes(1);
     expect(verifyPinHash).toHaveBeenCalledTimes(0);
+    // The lookup filters out inactive app_users at the query level, not as a separate branch.
+    expect(selectEq3).toHaveBeenCalledWith("is_active", true);
   });
 
-  it("locked employee: calls runDummyPinVerification once, never verifyPinHash", async () => {
+  it("credential-integrity mismatch (pin_lookup_hash matched but Argon2 fails): calls verifyPinHash once, never runDummyPinVerification, and fails closed", async () => {
+    // A pin_hash that does NOT correspond to the submitted PIN, even though
+    // the lookup already matched this app_user by pin_lookup_hash -- only
+    // reachable in practice via account data corruption, never a plain
+    // mistyped PIN (see the top-of-file comment).
+    const mismatchedHash = await hashPinForStorage("999999");
     const { client } = createFakeSupabase({
       lookupData: {
         id: "app-user-1",
-        pin_hash: "irrelevant",
-        failed_pin_attempts: 5,
-        locked_until: new Date(Date.now() + 60_000).toISOString(),
+        pin_hash: mismatchedHash,
         employee_id: "emp-1",
         employees: { first_name: "Test", last_name: "Employee" },
       },
     });
 
     const result = await verifyPinCore(client, {
-      pin: "123456",
-      organizationId: ORG_ID,
-      sourceIdentifier: "src-1",
-      pinPepper: PIN_PEPPER,
-      kioskTokenSecret: KIOSK_TOKEN_SECRET,
-    });
-
-    expect(result).toEqual({ ok: false, reason: "locked" });
-    expect(runDummyPinVerification).toHaveBeenCalledTimes(1);
-    expect(verifyPinHash).toHaveBeenCalledTimes(0);
-  });
-
-  it("wrong PIN for a real, unlocked employee: calls verifyPinHash once, never runDummyPinVerification, and registers the failure atomically", async () => {
-    const realHash = await hashPinForStorage("999999");
-    const { client, rpc } = createFakeSupabase({
-      lookupData: {
-        id: "app-user-1",
-        pin_hash: realHash,
-        failed_pin_attempts: 0,
-        locked_until: null,
-        employee_id: "emp-1",
-        employees: { first_name: "Test", last_name: "Employee" },
-      },
-    });
-
-    const result = await verifyPinCore(client, {
-      pin: "111111", // wrong
+      pin: "111111",
       organizationId: ORG_ID,
       sourceIdentifier: "src-1",
       pinPepper: PIN_PEPPER,
@@ -126,19 +113,15 @@ describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
     expect(result).toEqual({ ok: false, reason: "invalid_pin" });
     expect(verifyPinHash).toHaveBeenCalledTimes(1);
     expect(runDummyPinVerification).toHaveBeenCalledTimes(0);
-    // Failure bookkeeping goes through the atomic RPC, not a read-then-write update.
-    expect(rpc).toHaveBeenCalledWith("register_pin_verification_failure", { p_app_user_id: "app-user-1" });
   });
 
-  it("correct PIN for a real, unlocked employee: calls verifyPinHash once, never runDummyPinVerification, and resets attempts", async () => {
+  it("correct PIN for a real, active app_user: calls verifyPinHash once, never runDummyPinVerification, and issues a kiosk token", async () => {
     const realPin = "424242";
     const realHash = await hashPinForStorage(realPin);
-    const { client, update, updateEq } = createFakeSupabase({
+    const { client } = createFakeSupabase({
       lookupData: {
         id: "app-user-1",
         pin_hash: realHash,
-        failed_pin_attempts: 3,
-        locked_until: null,
         employee_id: "emp-1",
         employees: { first_name: "Test", last_name: "Employee" },
       },
@@ -153,13 +136,14 @@ describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
     });
 
     expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.appUserId).toBe("app-user-1");
+    }
     expect(verifyPinHash).toHaveBeenCalledTimes(1);
     expect(runDummyPinVerification).toHaveBeenCalledTimes(0);
-    expect(update).toHaveBeenCalledWith({ failed_pin_attempts: 0, locked_until: null });
-    expect(updateEq).toHaveBeenCalledWith("id", "app-user-1");
   });
 
-  it("no returned message distinguishes 'no such employee' from 'wrong PIN for a real employee' -- both report the same generic reason", async () => {
+  it("no returned reason distinguishes 'no such PIN' from a credential-integrity mismatch -- both report the same generic reason", async () => {
     const notFound = await verifyPinCore(createFakeSupabase({ lookupData: null }).client, {
       pin: "123456",
       organizationId: ORG_ID,
@@ -168,14 +152,12 @@ describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });
 
-    const realHash = await hashPinForStorage("999999");
-    const wrongForReal = await verifyPinCore(
+    const mismatchedHash = await hashPinForStorage("999999");
+    const credentialMismatch = await verifyPinCore(
       createFakeSupabase({
         lookupData: {
           id: "app-user-2",
-          pin_hash: realHash,
-          failed_pin_attempts: 0,
-          locked_until: null,
+          pin_hash: mismatchedHash,
           employee_id: "emp-2",
           employees: { first_name: "Test", last_name: "Employee" },
         },
@@ -189,7 +171,7 @@ describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
       }
     );
 
-    expect(notFound).toEqual(wrongForReal);
+    expect(notFound).toEqual(credentialMismatch);
     expect(notFound).toEqual({ ok: false, reason: "invalid_pin" });
   });
 });

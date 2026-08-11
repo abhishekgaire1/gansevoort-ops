@@ -2,14 +2,15 @@ import crypto from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * Server-side rate limiting for PIN verification attempts, in front of the
- * app_users.failed_pin_attempts counter. That counter alone can't blunt
- * brute-forcing the 6-digit PIN space itself, because a guessed PIN that
- * matches no employee has no app_users row to attach a counter to. Backed
- * by the pin_verify_rate_limits table (serverless deployment rules out an
- * in-memory limiter). Takes an already-authenticated service-role
- * SupabaseClient as a parameter rather than constructing its own -- keeps
- * this module framework-agnostic and directly testable.
+ * Server-side rate limiting for PIN verification attempts. Under V1's
+ * PIN-only identification design (pin_lookup_hash keyed directly on the
+ * submitted PIN, no per-employee failed-attempt counter -- see
+ * verifyPin.ts), this is the sole throttle blunting brute-forcing of the
+ * 6-digit PIN space itself. Backed by the pin_verify_rate_limits table
+ * (serverless deployment rules out an in-memory limiter). Takes an
+ * already-authenticated service-role SupabaseClient as a parameter rather
+ * than constructing its own -- keeps this module framework-agnostic and
+ * directly testable.
  */
 
 const WINDOW_SECONDS = 300;

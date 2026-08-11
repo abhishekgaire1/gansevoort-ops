@@ -12,16 +12,26 @@ import { issueKioskToken } from "@/app/lib/auth/kioskToken";
  * here, mirroring the split already used for the withdrawal RPC
  * (app/lib/inventory/withdrawal.ts vs. app/actions/withdrawal.ts).
  *
+ * V1 authentication design (product decision): the PIN is both the kiosk
+ * identifier and the credential -- there is no employee-name/code selection
+ * step before PIN entry. pin_lookup_hash is HMAC-SHA256(PIN, PIN_PEPPER), so
+ * an app_users row is only ever found when the submitted PIN already equals
+ * the one the account was set up with. An incorrect PIN can therefore never
+ * be attributed to a specific employee, only to "no match" in general --
+ * there is intentionally no per-employee failed-attempt counter or lockout
+ * in V1. Brute-forcing the PIN space is blunted only by the source-based
+ * rate limiter (rateLimit.ts / pin_verify_rate_limits).
+ *
  * Every terminal path below performs exactly one Argon2id verification --
- * real for a found/unlocked app_user, a precomputed dummy for "no match"
- * and "locked" -- so those two fast paths cannot be distinguished from a
- * real wrong-PIN attempt by response latency (account-enumeration timing
- * side channel).
+ * real for a found/active app_user, a precomputed dummy for "no match" (no
+ * row, or a row belonging to an inactive app_user) -- so that path cannot be
+ * distinguished from a real wrong-PIN attempt by response latency
+ * (account-enumeration timing side channel).
  */
 
 export type VerifyPinResult =
   | { ok: true; appUserId: string; organizationId: string; employeeDisplayName: string; kioskToken: string }
-  | { ok: false; reason: "invalid_pin" | "locked" | "rate_limited" };
+  | { ok: false; reason: "invalid_pin" | "rate_limited" };
 
 export interface VerifyPinCoreInput {
   pin: string;
@@ -51,9 +61,10 @@ export async function verifyPinCore(
 
   const { data: appUser, error: lookupError } = await supabase
     .from("app_users")
-    .select("id, pin_hash, failed_pin_attempts, locked_until, employee_id, employees(first_name, last_name)")
+    .select("id, pin_hash, employee_id, employees(first_name, last_name)")
     .eq("organization_id", organizationId)
     .eq("pin_lookup_hash", pinLookupHash)
+    .eq("is_active", true)
     .maybeSingle();
 
   if (lookupError) {
@@ -61,50 +72,35 @@ export async function verifyPinCore(
   }
 
   if (!appUser) {
-    // No matching employee. Nothing to increment -- the rate limit check
-    // above is the only thing throttling this case. Still runs a real
-    // Argon2id verification (against a precomputed dummy hash) so this
-    // path isn't distinguishable from a real wrong-PIN attempt by timing.
+    // No matching employee, or a matching PIN belonging to an inactive
+    // app_user -- both are intentionally indistinguishable from the
+    // outside. The rate limit check above is the only thing throttling
+    // this case. Still runs a real Argon2id verification (against a
+    // precomputed dummy hash) so this path isn't distinguishable from a
+    // real wrong-PIN attempt by timing.
     await runDummyPinVerification();
     return { ok: false, reason: "invalid_pin" };
   }
 
-  const now = new Date();
-  const lockedUntil = appUser.locked_until ? new Date(appUser.locked_until) : null;
-  const isCurrentlyLocked = lockedUntil !== null && lockedUntil > now;
-
-  if (isCurrentlyLocked) {
-    // Same timing-normalization reasoning as the "no match" branch above --
-    // this intentionally still costs one Argon2id verification, just
-    // against the dummy hash instead of skipping straight to a fast return.
-    await runDummyPinVerification();
-    return { ok: false, reason: "locked" };
-  }
-
   const isValid = await verifyPinHash(pin, appUser.pin_hash);
 
-  if (isValid) {
-    await supabase.from("app_users").update({ failed_pin_attempts: 0, locked_until: null }).eq("id", appUser.id);
-
-    const kioskToken = issueKioskToken({ appUserId: appUser.id, organizationId }, kioskTokenSecret);
-    const employee = Array.isArray(appUser.employees) ? appUser.employees[0] : appUser.employees;
-    const employeeDisplayName = employee ? `${employee.first_name} ${employee.last_name}` : "";
-
-    return { ok: true, appUserId: appUser.id, organizationId, employeeDisplayName, kioskToken };
+  if (!isValid) {
+    // Reaching this point means pin_lookup_hash already matched this exact
+    // submitted PIN to this app_user's row, so under the V1 identification
+    // design an Argon2 mismatch here is not an ordinary mistyped PIN (that
+    // case never finds a row at all -- see the !appUser branch above). It
+    // means pin_hash and pin_lookup_hash have gone out of sync for this
+    // account, which should never happen in normal operation. Fail closed
+    // and report the same generic reason rather than authenticating.
+    console.error(
+      `PIN credential-integrity mismatch for app_user ${appUser.id}: pin_lookup_hash matched but Argon2 verification failed`
+    );
+    return { ok: false, reason: "invalid_pin" };
   }
 
-  // Wrong PIN. Bookkeeping (fresh-cycle-after-expiry / increment / lockout
-  // threshold) is a single atomic Postgres statement
-  // (register_pin_verification_failure), not a JS read-then-write -- this
-  // is what makes it race-free under concurrent wrong-PIN requests against
-  // the same app_user. The DB re-evaluates locked_until against now() at
-  // update time, not against the possibly-stale value read moments ago.
-  const { error: failureError } = await supabase.rpc("register_pin_verification_failure", {
-    p_app_user_id: appUser.id,
-  });
-  if (failureError) {
-    throw new Error(`failed to register PIN verification failure: ${failureError.message}`);
-  }
+  const kioskToken = issueKioskToken({ appUserId: appUser.id, organizationId }, kioskTokenSecret);
+  const employee = Array.isArray(appUser.employees) ? appUser.employees[0] : appUser.employees;
+  const employeeDisplayName = employee ? `${employee.first_name} ${employee.last_name}` : "";
 
-  return { ok: false, reason: "invalid_pin" };
+  return { ok: true, appUserId: appUser.id, organizationId, employeeDisplayName, kioskToken };
 }

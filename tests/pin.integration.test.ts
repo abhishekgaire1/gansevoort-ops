@@ -15,8 +15,17 @@ import { verifyPinCore } from "@/app/lib/auth/verifyPin";
  * append-only tables (see withdrawal.rpc.test.ts).
  *
  * Uses its own dedicated fixture employee (isolated from
- * testFixtures.ts/withdrawal.rpc.test.ts) so lockout state produced here
- * can never make the withdrawal RPC tests flaky.
+ * testFixtures.ts/withdrawal.rpc.test.ts) so state produced here can never
+ * make the withdrawal RPC tests flaky.
+ *
+ * V1 authentication design (product decision): the PIN is both the kiosk
+ * identifier and the credential -- no employee-name/code selection step
+ * before PIN entry. pin_lookup_hash is HMAC-SHA256(PIN, PIN_PEPPER), so an
+ * app_users row is only ever found when the submitted PIN already equals
+ * the one the account was set up with; an incorrect PIN can never be
+ * attributed to a specific employee. There is intentionally no
+ * per-employee failed-attempt counter or lockout -- brute-forcing the PIN
+ * space is blunted only by the source-based rate limiter, covered below.
  */
 
 const PIN = "483920";
@@ -28,14 +37,26 @@ let appUserId: string;
 let pinPepper: string;
 const kioskTokenSecret = "test-pin-integration-kiosk-secret";
 
+// Computed once in beforeAll and reused by resetFixtureState() so every
+// test can cheaply restore the fixture to its known-good state without
+// re-running Argon2id per reset.
+let canonicalPinLookupHash: string;
+let canonicalPinHash: string;
+
 async function resetFixtureState(): Promise<void> {
-  await supabase.from("app_users").update({ failed_pin_attempts: 0, locked_until: null }).eq("id", appUserId);
+  await supabase
+    .from("app_users")
+    .update({ is_active: true, pin_lookup_hash: canonicalPinLookupHash, pin_hash: canonicalPinHash })
+    .eq("id", appUserId);
 }
 
 beforeAll(async () => {
   supabase = getServiceRoleClient();
   pinPepper = process.env.PIN_PEPPER!;
   if (!pinPepper) throw new Error("PIN_PEPPER is not set");
+
+  canonicalPinLookupHash = hashPinLookup(PIN, pinPepper);
+  canonicalPinHash = await hashPinForStorage(PIN);
 
   const { data: org, error: orgError } = await supabase.from("organizations").select("id").eq("name", "Gansevoort").single();
   if (orgError) throw orgError;
@@ -68,8 +89,8 @@ beforeAll(async () => {
       .insert({
         organization_id: organizationId,
         employee_id: employeeId,
-        pin_lookup_hash: hashPinLookup(PIN, pinPepper),
-        pin_hash: await hashPinForStorage(PIN),
+        pin_lookup_hash: canonicalPinLookupHash,
+        pin_hash: canonicalPinHash,
       })
       .select("id")
       .single();
@@ -81,10 +102,7 @@ beforeAll(async () => {
 });
 
 describe("verifyPinCore", () => {
-  it("succeeds with the correct PIN and resets attempt state", async () => {
-    // Seed a nonzero attempt count first to prove success actually resets it.
-    await supabase.from("app_users").update({ failed_pin_attempts: 2 }).eq("id", appUserId);
-
+  it("succeeds with the correct PIN and issues a kiosk token", async () => {
     const result = await verifyPinCore(supabase, {
       pin: PIN,
       organizationId,
@@ -97,15 +115,11 @@ describe("verifyPinCore", () => {
     if (result.ok) {
       expect(result.appUserId).toBe(appUserId);
     }
-
-    const { data: row } = await supabase.from("app_users").select("failed_pin_attempts, locked_until").eq("id", appUserId).single();
-    expect(row!.failed_pin_attempts).toBe(0);
-    expect(row!.locked_until).toBeNull();
-
-    await resetFixtureState();
   });
 
-  it("rejects a PIN matching no employee, without touching any app_users row", async () => {
+  it("rejects an unknown PIN and does not modify the app_users row", async () => {
+    const { data: before } = await supabase.from("app_users").select("*").eq("id", appUserId).single();
+
     const result = await verifyPinCore(supabase, {
       pin: "000111",
       organizationId,
@@ -114,98 +128,44 @@ describe("verifyPinCore", () => {
       kioskTokenSecret,
     });
     expect(result).toEqual({ ok: false, reason: "invalid_pin" });
+
+    const { data: after } = await supabase.from("app_users").select("*").eq("id", appUserId).single();
+    expect(after).toEqual(before);
   });
 
-  it("rejects a wrong PIN against the real fixture employee and increments failed_pin_attempts", async () => {
+  it("rejects a correct PIN belonging to an inactive app_user, with the same generic reason as an unknown PIN", async () => {
     await resetFixtureState();
-
-    const result = await verifyPinCore(supabase, {
-      pin: "999999",
-      organizationId,
-      sourceIdentifier: "test-source-wrong-pin",
-      pinPepper,
-      kioskTokenSecret,
-    });
-    expect(result).toEqual({ ok: false, reason: "invalid_pin" });
-
-    const { data: row } = await supabase.from("app_users").select("failed_pin_attempts").eq("id", appUserId).single();
-    expect(row!.failed_pin_attempts).toBe(1);
-
-    await resetFixtureState();
-  });
-
-  it("locks out after 5 consecutive failures, and the 6th attempt is rejected without running argon2 even with the correct PIN", async () => {
-    await resetFixtureState();
-
-    for (let i = 0; i < 5; i++) {
-      await verifyPinCore(supabase, {
-        pin: "999999",
-        organizationId,
-        sourceIdentifier: `test-source-lockout-${i}`,
-        pinPepper,
-        kioskTokenSecret,
-      });
-    }
-
-    const { data: rowAfterFive } = await supabase.from("app_users").select("failed_pin_attempts, locked_until").eq("id", appUserId).single();
-    expect(rowAfterFive!.failed_pin_attempts).toBe(5);
-    expect(rowAfterFive!.locked_until).not.toBeNull();
-
-    const result = await verifyPinCore(supabase, {
-      pin: PIN, // correct PIN
-      organizationId,
-      sourceIdentifier: "test-source-lockout-check",
-      pinPepper,
-      kioskTokenSecret,
-    });
-    expect(result).toEqual({ ok: false, reason: "locked" });
-
-    await resetFixtureState();
-  });
-
-  it("starts a fresh failure cycle after a lockout expires (one failure => 1, not an immediate re-lock)", async () => {
-    await resetFixtureState();
-    // Simulate an already-expired lockout directly, never a literal 5-minute sleep.
-    await supabase
-      .from("app_users")
-      .update({ failed_pin_attempts: 5, locked_until: new Date(Date.now() - 60_000).toISOString() })
-      .eq("id", appUserId);
-
-    const result = await verifyPinCore(supabase, {
-      pin: "999999",
-      organizationId,
-      sourceIdentifier: "test-source-fresh-cycle",
-      pinPepper,
-      kioskTokenSecret,
-    });
-    expect(result).toEqual({ ok: false, reason: "invalid_pin" });
-
-    const { data: row } = await supabase.from("app_users").select("failed_pin_attempts, locked_until").eq("id", appUserId).single();
-    expect(row!.failed_pin_attempts).toBe(1);
-    expect(row!.locked_until).toBeNull();
-
-    await resetFixtureState();
-  });
-
-  it("correct PIN after an expired lockout resets attempts/lockout to 0/null", async () => {
-    await resetFixtureState();
-    await supabase
-      .from("app_users")
-      .update({ failed_pin_attempts: 5, locked_until: new Date(Date.now() - 60_000).toISOString() })
-      .eq("id", appUserId);
+    await supabase.from("app_users").update({ is_active: false }).eq("id", appUserId);
 
     const result = await verifyPinCore(supabase, {
       pin: PIN,
       organizationId,
-      sourceIdentifier: "test-source-fresh-cycle-success",
+      sourceIdentifier: "test-source-inactive",
       pinPepper,
       kioskTokenSecret,
     });
-    expect(result.ok).toBe(true);
+    expect(result).toEqual({ ok: false, reason: "invalid_pin" });
 
-    const { data: row } = await supabase.from("app_users").select("failed_pin_attempts, locked_until").eq("id", appUserId).single();
-    expect(row!.failed_pin_attempts).toBe(0);
-    expect(row!.locked_until).toBeNull();
+    await resetFixtureState();
+  });
+
+  it("fails closed on a credential-integrity mismatch (pin_lookup_hash matches, Argon2 does not)", async () => {
+    await resetFixtureState();
+    // Corrupt only pin_hash, leaving pin_lookup_hash (and thus
+    // identification of this exact account by the correct PIN) intact --
+    // simulates the accounts' two credential fields having gone out of
+    // sync, not a mistyped PIN.
+    const mismatchedHash = await hashPinForStorage("111222");
+    await supabase.from("app_users").update({ pin_hash: mismatchedHash }).eq("id", appUserId);
+
+    const result = await verifyPinCore(supabase, {
+      pin: PIN,
+      organizationId,
+      sourceIdentifier: "test-source-credential-integrity",
+      pinPepper,
+      kioskTokenSecret,
+    });
+    expect(result).toEqual({ ok: false, reason: "invalid_pin" });
 
     await resetFixtureState();
   });

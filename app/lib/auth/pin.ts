@@ -60,8 +60,8 @@ const DUMMY_PIN_FOR_TIMING = "000000";
 // Computed once, lazily, on first use, and cached for the life of the
 // process -- never regenerated per request. Generating a fresh dummy hash
 // per request would itself be the expensive operation timing-normalization
-// is trying to keep off the "no match"/"locked" paths, so it must be
-// precomputed exactly once, not on demand per call.
+// is trying to keep off the "no match" path, so it must be precomputed
+// exactly once, not on demand per call.
 let dummyHashPromise: Promise<string> | null = null;
 
 /** Exposed (not just internal) so tests can verify memoization directly by
@@ -78,10 +78,9 @@ export function getDummyPinHash(): Promise<string> {
 
 /**
  * Runs a real Argon2id verification against a precomputed dummy hash, so
- * that the "no matching employee" and "locked employee" code paths in
- * verifyPinCore cost comparable time to the real-verification path,
- * instead of returning immediately and leaking which case occurred through
- * response latency.
+ * that the "no matching PIN" code path in verifyPinCore costs comparable
+ * time to the real-verification path, instead of returning immediately and
+ * leaking that no match was found through response latency.
  *
  * The boolean result is meaningless (it will always be true, since the
  * dummy hash was derived from this same fixed PIN) and MUST NOT be used

@@ -65,8 +65,6 @@ export async function createOrResetEmployeePin(
       pin_lookup_hash: pinLookupHash,
       pin_hash: pinHash,
       pin_set_at: new Date().toISOString(),
-      failed_pin_attempts: 0,
-      locked_until: null,
     })
     .eq("employee_id", employeeId)
     .eq("organization_id", authResult.manager.organizationId);
