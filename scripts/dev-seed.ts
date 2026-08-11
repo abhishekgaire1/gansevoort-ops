@@ -5,7 +5,8 @@ import { randomBytes, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import readline from "node:readline/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { hashPinForStorage, hashPinLookup } from "../app/lib/auth/pin";
+import { hashPinForStorage, hashPinLookup, isValidPinFormat } from "../app/lib/auth/pin";
+import { envOrGenerated } from "./lib/envOrGenerated";
 
 /**
  * Dev-only test-data seed. NOT a Supabase migration: migrations apply
@@ -191,8 +192,8 @@ async function ensureEmployee(
 
   let authUserId: string | null = null;
   if (spec.authEmail && spec.authPasswordEnvVar) {
-    const password = process.env[spec.authPasswordEnvVar] ?? randomPassword();
-    if (!process.env[spec.authPasswordEnvVar]) {
+    const { value: password, wasGenerated: passwordWasGenerated } = envOrGenerated(spec.authPasswordEnvVar, randomPassword);
+    if (passwordWasGenerated) {
       console.log(`  generated password for ${spec.authEmail}: ${password}  (not persisted anywhere, save it now)`);
     }
     authUserId = await findOrCreateAuthUser(supabase, spec.authEmail, password);
@@ -202,8 +203,14 @@ async function ensureEmployee(
   if (existingAppUser) {
     appUserId = existingAppUser.id as string;
   } else {
-    const pin = process.env[spec.pinEnvVar] ?? randomPin();
-    if (!process.env[spec.pinEnvVar]) {
+    const { value: pin, wasGenerated: pinWasGenerated } = envOrGenerated(spec.pinEnvVar, randomPin);
+    if (!isValidPinFormat(pin)) {
+      throw new Error(
+        `${spec.pinEnvVar} is set to "${pin}", which is not a valid PIN (must be exactly 6 digits). ` +
+          `Fix .env.local, or leave it blank to auto-generate one.`
+      );
+    }
+    if (pinWasGenerated) {
       console.log(`  generated PIN for ${spec.firstName} ${spec.lastName}: ${pin}  (not persisted anywhere, save it now)`);
     }
 
@@ -507,7 +514,7 @@ async function main(): Promise<void> {
       defaultStationName: null,
       autoResolveStation: false,
       canChangeStation: false,
-      authEmail: process.env.DEV_SEED_MANAGER_EMAIL ?? "dev-manager@gansevoort.local",
+      authEmail: envOrGenerated("DEV_SEED_MANAGER_EMAIL", () => "dev-manager@gansevoort.local").value,
       authPasswordEnvVar: "DEV_SEED_MANAGER_PASSWORD",
     },
   ];

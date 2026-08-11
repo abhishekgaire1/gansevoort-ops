@@ -5,13 +5,18 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "."),
+      // Vitest externalizes node_modules packages and resolves them via
+      // plain Node resolution, which ignores the "react-server" export
+      // condition -- so the real "server-only" package still throws
+      // ("cannot be imported from a Client Component module") even with
+      // `conditions: ["react-server"]` set below. Aliasing the specifier
+      // itself bypasses that externalized resolution and routes it to a
+      // no-op stub instead, for tests only. Production Next.js builds are
+      // untouched by this config and continue to import the real package.
+      "server-only": path.resolve(import.meta.dirname, "./tests/mocks/server-only.ts"),
     },
-    // Matches Next.js's own server-component module resolution so modules
-    // guarded with the "server-only" package (which throws under plain
-    // Node/browser resolution) can be imported directly by the manual
-    // integration tests. pin.unit.test.ts never touches these modules, so
-    // this only matters for tests/pin.integration.test.ts and
-    // tests/withdrawal.rpc.test.ts.
+    // Kept for other packages that branch on the "react-server" condition;
+    // no longer relied on for "server-only" itself (see alias above).
     conditions: ["react-server"],
   },
   test: {

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run tests/pin.unit.test.ts tests/verifyPin.unit.test.ts",
+    "test": "vitest run tests/pin.unit.test.ts tests/verifyPin.unit.test.ts tests/devSeedEnv.unit.test.ts",
     "test:integration": "vitest run tests/pin.integration.test.ts tests/withdrawal.rpc.test.ts",
     "db:seed:dev": "tsx scripts/dev-seed.ts"
   },
