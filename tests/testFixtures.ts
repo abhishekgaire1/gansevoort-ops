@@ -34,6 +34,11 @@ export interface RpcTestFixtures {
   changeableEmployeeAppUserId: string;
   changeableEmployeePin: string;
   inactiveEmployeeAppUserId: string;
+  /** auto_resolve_station=false -- the "must_pick" kiosk station branch
+   * (see app/kiosk/_lib/stationBranch.ts), not covered by lockedEmployee
+   * (branch 1) or changeableEmployee (branch 2). */
+  mustPickEmployeeAppUserId: string;
+  mustPickEmployeePin: string;
 }
 
 async function findOrgId(supabase: SupabaseClient): Promise<string> {
@@ -225,6 +230,14 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     isActive: false,
   });
 
+  const mustPickEmployeePin = "444444";
+  const mustPickEmployeeAppUserId = await ensureEmployeeAppUser("TEST-RPC-MUST-PICK", "TestMustPick", mustPickEmployeePin, {
+    defaultStationId: null,
+    autoResolveStation: false,
+    canChangeStation: false,
+    isActive: true,
+  });
+
   return {
     supabase,
     organizationId,
@@ -242,5 +255,7 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     changeableEmployeeAppUserId,
     changeableEmployeePin,
     inactiveEmployeeAppUserId,
+    mustPickEmployeeAppUserId,
+    mustPickEmployeePin,
   };
 }

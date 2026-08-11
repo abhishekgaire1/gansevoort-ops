@@ -11,6 +11,11 @@ export interface RecordWithdrawalInput {
   enteredUnitId: string;
   measuredBaseQuantity?: string | null;
   notes?: string | null;
+  /** Generated once client-side per withdrawal attempt and reused verbatim
+   * across retries of that same attempt -- see kioskReducer.ts's
+   * SUBMIT_ATTEMPT_STARTED action. Makes recordWithdrawal safe to retry
+   * after a network/server failure without risking a duplicate movement. */
+  clientRequestId: string;
 }
 
 export type RecordWithdrawalResult =
@@ -47,6 +52,7 @@ export async function recordWithdrawal(
       enteredUnitId: input.enteredUnitId,
       measuredBaseQuantity: input.measuredBaseQuantity ?? null,
       notes: input.notes ?? null,
+      clientRequestId: input.clientRequestId,
     });
     return { ok: true, result };
   } catch (err) {

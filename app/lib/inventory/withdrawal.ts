@@ -11,6 +11,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * returning them as strings avoids passing an exact Postgres NUMERIC
  * through a JS float64 unnecessarily (docs/DATABASE.md: quantities are
  * NUMERIC, not floating point).
+ *
+ * clientRequestId is required (not optional): the RPC itself rejects a null
+ * client_request_id for every new withdrawal it creates (see migration
+ * 20260811100015_withdrawal_idempotency.sql), so there is no valid call
+ * into this function without one. Reusing the same clientRequestId across
+ * retries of the same submission attempt makes retries safe -- a retry
+ * with an identical payload replays the original result (replayed: true,
+ * no new rows); a retry with the same id but a different payload fails
+ * closed instead of silently returning an unrelated withdrawal.
  */
 
 export interface RecordInventoryWithdrawalInput {
@@ -21,6 +30,7 @@ export interface RecordInventoryWithdrawalInput {
   enteredUnitId: string;
   measuredBaseQuantity?: string | null;
   notes?: string | null;
+  clientRequestId: string;
 }
 
 export interface RecordInventoryWithdrawalResult {
@@ -30,6 +40,7 @@ export interface RecordInventoryWithdrawalResult {
   baseUnitId: string;
   exceptionId: string | null;
   exceptionRaised: boolean;
+  replayed: boolean;
 }
 
 interface RecordInventoryWithdrawalRow {
@@ -39,6 +50,7 @@ interface RecordInventoryWithdrawalRow {
   base_unit_id: string;
   exception_id: string | null;
   exception_raised: boolean;
+  replayed: boolean;
 }
 
 export async function recordInventoryWithdrawal(
@@ -53,6 +65,7 @@ export async function recordInventoryWithdrawal(
     p_entered_unit_id: input.enteredUnitId,
     p_measured_base_quantity: input.measuredBaseQuantity ?? null,
     p_notes: input.notes ?? null,
+    p_client_request_id: input.clientRequestId,
   });
 
   if (error) {
@@ -72,5 +85,6 @@ export async function recordInventoryWithdrawal(
     baseUnitId: row.base_unit_id,
     exceptionId: row.exception_id,
     exceptionRaised: row.exception_raised,
+    replayed: row.replayed,
   };
 }

@@ -51,17 +51,33 @@ const ORG_ID = "org-1";
 interface FakeSupabaseOptions {
   lookupData: Record<string, unknown> | null;
   lookupError?: unknown;
+  /** Only consulted when lookupData's nested employees.default_station_id
+   * is non-null -- verifyPinCore issues a second lookup against "stations"
+   * only in that case. */
+  stationData?: Record<string, unknown> | null;
+  stationError?: unknown;
 }
 
-function createFakeSupabase({ lookupData, lookupError = null }: FakeSupabaseOptions) {
-  const maybeSingle = vi.fn().mockResolvedValue({ data: lookupData, error: lookupError });
+function createFakeSupabase({ lookupData, lookupError = null, stationData = null, stationError = null }: FakeSupabaseOptions) {
+  const appUsersMaybeSingle = vi.fn().mockResolvedValue({ data: lookupData, error: lookupError });
   // Chain is .select(...).eq("organization_id", ...).eq("pin_lookup_hash", ...).eq("is_active", true).maybeSingle()
-  const selectEq3 = vi.fn().mockReturnValue({ maybeSingle });
-  const selectEq2 = vi.fn().mockReturnValue({ eq: selectEq3 });
-  const selectEq1 = vi.fn().mockReturnValue({ eq: selectEq2 });
-  const select = vi.fn().mockReturnValue({ eq: selectEq1 });
-  const from = vi.fn().mockReturnValue({ select });
-  return { client: { from } as unknown as SupabaseClient, selectEq3 };
+  const appUsersEq3 = vi.fn().mockReturnValue({ maybeSingle: appUsersMaybeSingle });
+  const appUsersEq2 = vi.fn().mockReturnValue({ eq: appUsersEq3 });
+  const appUsersEq1 = vi.fn().mockReturnValue({ eq: appUsersEq2 });
+  const appUsersSelect = vi.fn().mockReturnValue({ eq: appUsersEq1 });
+
+  const stationsMaybeSingle = vi.fn().mockResolvedValue({ data: stationData, error: stationError });
+  // Chain is .select("name").eq("id", ...).maybeSingle()
+  const stationsEq = vi.fn().mockReturnValue({ maybeSingle: stationsMaybeSingle });
+  const stationsSelect = vi.fn().mockReturnValue({ eq: stationsEq });
+
+  const from = vi.fn((table: string) => {
+    if (table === "app_users") return { select: appUsersSelect };
+    if (table === "stations") return { select: stationsSelect };
+    throw new Error(`unexpected table: ${table}`);
+  });
+
+  return { client: { from } as unknown as SupabaseClient, from, appUsersEq3, stationsSelect, stationsEq };
 }
 
 beforeEach(() => {
@@ -70,7 +86,7 @@ beforeEach(() => {
 
 describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
   it("no matching PIN (unknown, or belonging to an inactive app_user): calls runDummyPinVerification once, never verifyPinHash", async () => {
-    const { client, selectEq3 } = createFakeSupabase({ lookupData: null });
+    const { client, appUsersEq3 } = createFakeSupabase({ lookupData: null });
 
     const result = await verifyPinCore(client, {
       pin: "123456",
@@ -84,7 +100,7 @@ describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
     expect(runDummyPinVerification).toHaveBeenCalledTimes(1);
     expect(verifyPinHash).toHaveBeenCalledTimes(0);
     // The lookup filters out inactive app_users at the query level, not as a separate branch.
-    expect(selectEq3).toHaveBeenCalledWith("is_active", true);
+    expect(appUsersEq3).toHaveBeenCalledWith("is_active", true);
   });
 
   it("credential-integrity mismatch (pin_lookup_hash matched but Argon2 fails): calls verifyPinHash once, never runDummyPinVerification, and fails closed", async () => {
@@ -173,5 +189,83 @@ describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
 
     expect(notFound).toEqual(credentialMismatch);
     expect(notFound).toEqual({ ok: false, reason: "invalid_pin" });
+  });
+});
+
+describe("verifyPinCore station config fields on success", () => {
+  it("returns defaultStationId/defaultStationName/autoResolveStation/canChangeStation from the employee row, looking up the station name separately", async () => {
+    const realPin = "424242";
+    const realHash = await hashPinForStorage(realPin);
+    const { client, from } = createFakeSupabase({
+      lookupData: {
+        id: "app-user-1",
+        pin_hash: realHash,
+        employee_id: "emp-1",
+        employees: {
+          first_name: "Maria",
+          last_name: "G.",
+          default_station_id: "station-1",
+          auto_resolve_station: true,
+          can_change_station: false,
+        },
+      },
+      stationData: { name: "Grill" },
+    });
+
+    const result = await verifyPinCore(client, {
+      pin: realPin,
+      organizationId: ORG_ID,
+      sourceIdentifier: "src-1",
+      pinPepper: PIN_PEPPER,
+      kioskTokenSecret: KIOSK_TOKEN_SECRET,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      appUserId: "app-user-1",
+      organizationId: ORG_ID,
+      employeeDisplayName: "Maria G.",
+      kioskToken: expect.any(String),
+      defaultStationId: "station-1",
+      defaultStationName: "Grill",
+      autoResolveStation: true,
+      canChangeStation: false,
+    });
+    expect(from).toHaveBeenCalledWith("stations");
+  });
+
+  it("does not query the stations table at all when the employee has no default station (must_pick branch)", async () => {
+    const realPin = "424242";
+    const realHash = await hashPinForStorage(realPin);
+    const { client, from } = createFakeSupabase({
+      lookupData: {
+        id: "app-user-1",
+        pin_hash: realHash,
+        employee_id: "emp-1",
+        employees: {
+          first_name: "Sam",
+          last_name: "T.",
+          default_station_id: null,
+          auto_resolve_station: false,
+          can_change_station: false,
+        },
+      },
+    });
+
+    const result = await verifyPinCore(client, {
+      pin: realPin,
+      organizationId: ORG_ID,
+      sourceIdentifier: "src-1",
+      pinPepper: PIN_PEPPER,
+      kioskTokenSecret: KIOSK_TOKEN_SECRET,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.defaultStationId).toBeNull();
+      expect(result.defaultStationName).toBeNull();
+      expect(result.autoResolveStation).toBe(false);
+    }
+    expect(from).not.toHaveBeenCalledWith("stations");
   });
 });

@@ -7,7 +7,13 @@ import {
   runDummyPinVerification,
   verifyPinHash,
 } from "@/app/lib/auth/pin";
-import { issueKioskToken, verifyKioskToken, KIOSK_TOKEN_TTL_SECONDS } from "@/app/lib/auth/kioskToken";
+import {
+  issueKioskToken,
+  refreshKioskToken,
+  verifyKioskToken,
+  KIOSK_SESSION_MAX_SECONDS,
+  KIOSK_TOKEN_TTL_SECONDS,
+} from "@/app/lib/auth/kioskToken";
 import { deriveRateLimitKey } from "@/app/lib/auth/rateLimit";
 import { extractTrustedClientIp, resolveRateLimitSource, UNKNOWN_RATE_LIMIT_SOURCE } from "@/app/lib/auth/rateLimitSource";
 
@@ -108,6 +114,96 @@ describe("kiosk token", () => {
     vi.setSystemTime(new Date(Date.now() + (KIOSK_TOKEN_TTL_SECONDS - 1) * 1000));
     const result = verifyKioskToken(token, secret);
     expect(result.ok).toBe(true);
+  });
+
+  it("a freshly issued token's sessionStartedAt equals its own issuedAt", () => {
+    const token = issueKioskToken({ appUserId: "user-1", organizationId: "org-1" }, secret);
+    const result = verifyKioskToken(token, secret);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.payload.sessionStartedAt).toBe(result.payload.issuedAt);
+    }
+  });
+
+  describe("absolute session ceiling (server-authoritative, independent of client-side pacing)", () => {
+    it("KIOSK_SESSION_MAX_SECONDS is well beyond KIOSK_TOKEN_TTL_SECONDS", () => {
+      expect(KIOSK_SESSION_MAX_SECONDS).toBe(600);
+      expect(KIOSK_SESSION_MAX_SECONDS).toBeGreaterThan(KIOSK_TOKEN_TTL_SECONDS);
+    });
+
+    it("rejects a token once the absolute session ceiling has elapsed, even though the token's own TTL is much shorter", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      let token = issueKioskToken({ appUserId: "user-1", organizationId: "org-1" }, secret);
+
+      // Refresh every 100s (safely under the 120s per-token TTL) so the
+      // token in hand always has a recent issuedAt, while total elapsed
+      // time since the original session climbs toward the 600s ceiling.
+      for (let i = 0; i < 5; i++) {
+        vi.setSystemTime(new Date(Date.now() + 100 * 1000));
+        const refreshed = refreshKioskToken(token, secret);
+        expect(refreshed.ok).toBe(true);
+        if (refreshed.ok) token = refreshed.token;
+      }
+      // Total elapsed: 500s. One more step crosses the 600s ceiling while
+      // this token's own issuedAt is still only ~100s old (well under its
+      // 120s TTL) -- isolates "session_expired" from "expired".
+      vi.setSystemTime(new Date(Date.now() + 101 * 1000));
+      expect(verifyKioskToken(token, secret)).toEqual({ ok: false, reason: "session_expired" });
+    });
+
+    it("refreshKioskToken preserves the original sessionStartedAt across multiple successive refreshes", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const originalToken = issueKioskToken({ appUserId: "user-1", organizationId: "org-1" }, secret);
+      const originalVerification = verifyKioskToken(originalToken, secret);
+      expect(originalVerification.ok).toBe(true);
+      const originalSessionStartedAt = originalVerification.ok ? originalVerification.payload.sessionStartedAt : null;
+
+      vi.setSystemTime(new Date(Date.now() + 80 * 1000));
+      const firstRefresh = refreshKioskToken(originalToken, secret);
+      expect(firstRefresh.ok).toBe(true);
+
+      vi.setSystemTime(new Date(Date.now() + 80 * 1000));
+      const secondRefresh = firstRefresh.ok ? refreshKioskToken(firstRefresh.token, secret) : null;
+      expect(secondRefresh?.ok).toBe(true);
+
+      const finalVerification = secondRefresh?.ok ? verifyKioskToken(secondRefresh.token, secret) : null;
+      expect(finalVerification?.ok).toBe(true);
+      if (finalVerification?.ok) {
+        expect(finalVerification.payload.sessionStartedAt).toBe(originalSessionStartedAt);
+        // issuedAt advanced with each refresh -- only sessionStartedAt is pinned.
+        expect(finalVerification.payload.issuedAt).toBeGreaterThan(originalSessionStartedAt!);
+      }
+    });
+
+    it("refreshKioskToken refuses once the absolute ceiling has passed, even when the token itself hasn't hit its own TTL", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      let token = issueKioskToken({ appUserId: "user-1", organizationId: "org-1" }, secret);
+
+      // Refresh every 100s (safely under the 120s per-token TTL) -- proves
+      // the ceiling isn't reachable by refreshing indefinitely.
+      for (let i = 0; i < 5; i++) {
+        vi.setSystemTime(new Date(Date.now() + 100 * 1000));
+        const refreshed = refreshKioskToken(token, secret);
+        expect(refreshed.ok).toBe(true);
+        if (refreshed.ok) token = refreshed.token;
+      }
+      // Total elapsed: 500s, still under the 600s ceiling. One more refresh
+      // pushes total elapsed to 601s -- past the ceiling, even though this
+      // token's own issuedAt is still only ~100s old.
+      vi.setSystemTime(new Date(Date.now() + 101 * 1000));
+      const finalRefresh = refreshKioskToken(token, secret);
+      expect(finalRefresh).toEqual({ ok: false, reason: "session_expired" });
+    });
+
+    it("refreshKioskToken passes through malformed/bad_signature/expired failures unchanged", () => {
+      expect(refreshKioskToken("not-a-real-token", secret)).toEqual({ ok: false, reason: "malformed" });
+
+      const token = issueKioskToken({ appUserId: "user-1", organizationId: "org-1" }, secret);
+      expect(refreshKioskToken(token, "wrong-secret")).toEqual({ ok: false, reason: "bad_signature" });
+    });
   });
 });
 

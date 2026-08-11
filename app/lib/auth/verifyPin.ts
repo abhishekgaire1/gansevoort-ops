@@ -30,7 +30,17 @@ import { issueKioskToken } from "@/app/lib/auth/kioskToken";
  */
 
 export type VerifyPinResult =
-  | { ok: true; appUserId: string; organizationId: string; employeeDisplayName: string; kioskToken: string }
+  | {
+      ok: true;
+      appUserId: string;
+      organizationId: string;
+      employeeDisplayName: string;
+      kioskToken: string;
+      defaultStationId: string | null;
+      defaultStationName: string | null;
+      autoResolveStation: boolean;
+      canChangeStation: boolean;
+    }
   | { ok: false; reason: "invalid_pin" | "rate_limited" };
 
 export interface VerifyPinCoreInput {
@@ -61,7 +71,9 @@ export async function verifyPinCore(
 
   const { data: appUser, error: lookupError } = await supabase
     .from("app_users")
-    .select("id, pin_hash, employee_id, employees(first_name, last_name)")
+    .select(
+      "id, pin_hash, employee_id, employees(first_name, last_name, default_station_id, auto_resolve_station, can_change_station)"
+    )
     .eq("organization_id", organizationId)
     .eq("pin_lookup_hash", pinLookupHash)
     .eq("is_active", true)
@@ -101,6 +113,37 @@ export async function verifyPinCore(
   const kioskToken = issueKioskToken({ appUserId: appUser.id, organizationId }, kioskTokenSecret);
   const employee = Array.isArray(appUser.employees) ? appUser.employees[0] : appUser.employees;
   const employeeDisplayName = employee ? `${employee.first_name} ${employee.last_name}` : "";
+  const defaultStationId: string | null = employee?.default_station_id ?? null;
+  const autoResolveStation = employee?.auto_resolve_station ?? false;
+  const canChangeStation = employee?.can_change_station ?? false;
 
-  return { ok: true, appUserId: appUser.id, organizationId, employeeDisplayName, kioskToken };
+  // Fetched only when there's a default station to name -- the locked and
+  // auto_changeable branches need a human-readable name to display without
+  // an extra client round trip to the station-list action; must_pick
+  // employees have no default station at all, so nothing to look up.
+  let defaultStationName: string | null = null;
+  if (defaultStationId) {
+    const { data: station, error: stationError } = await supabase
+      .from("stations")
+      .select("name")
+      .eq("id", defaultStationId)
+      .maybeSingle();
+
+    if (stationError) {
+      throw new Error(`default station lookup failed: ${stationError.message}`);
+    }
+    defaultStationName = (station?.name as string | undefined) ?? null;
+  }
+
+  return {
+    ok: true,
+    appUserId: appUser.id,
+    organizationId,
+    employeeDisplayName,
+    kioskToken,
+    defaultStationId,
+    defaultStationName,
+    autoResolveStation,
+    canChangeStation,
+  };
 }
