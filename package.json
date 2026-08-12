@@ -7,18 +7,21 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run tests/pin.unit.test.ts tests/verifyPin.unit.test.ts tests/devSeedEnv.unit.test.ts tests/kioskReducer.unit.test.ts tests/stationBranch.unit.test.ts tests/quantityEntry.unit.test.ts tests/itemFilter.unit.test.ts tests/sessionRefresh.unit.test.ts tests/stations.unit.test.ts tests/inventoryItems.unit.test.ts tests/withdrawalUnit.unit.test.ts",
+    "test": "vitest run tests/pin.unit.test.ts tests/verifyPin.unit.test.ts tests/devSeedEnv.unit.test.ts tests/kioskReducer.unit.test.ts tests/stationBranch.unit.test.ts tests/quantityEntry.unit.test.ts tests/itemFilter.unit.test.ts tests/sessionRefresh.unit.test.ts tests/stations.unit.test.ts tests/inventoryItems.unit.test.ts tests/withdrawalUnit.unit.test.ts tests/invoiceExtractionSchema.unit.test.ts tests/invoiceExtractionNormalize.unit.test.ts tests/invoiceExtractionValidate.unit.test.ts tests/geminiProvider.unit.test.ts tests/aiInvoiceExtractionAction.unit.test.ts",
     "test:integration": "vitest run tests/pin.integration.test.ts tests/withdrawal.rpc.test.ts",
+    "test:gemini": "vitest run tests/geminiExtraction.integration.test.ts",
     "db:seed:dev": "tsx scripts/dev-seed.ts"
   },
   "dependencies": {
+    "@google/genai": "^2.16.0",
     "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.112.3",
     "hash-wasm": "^4.12.0",
     "next": "16.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "server-only": "^0.0.1"
+    "server-only": "^0.0.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
