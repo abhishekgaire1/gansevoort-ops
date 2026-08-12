@@ -144,3 +144,122 @@ export function extractGeminiDebugMetadata(rawResponse: unknown): GeminiDebugMet
 function numberOrNull(value: unknown): number | null {
   return typeof value === "number" ? value : null;
 }
+
+/**
+ * Milestone 2A.1: the broader, DB-persisted counterpart to
+ * extractGeminiDebugMetadata above -- that function is scoped only to what
+ * the dev harness displays; this one captures what's worth keeping in
+ * document_extractions.provider_metadata for debugging/reprocessing a real
+ * extraction attempt without a re-call. Same defensive pattern (explicit
+ * allow-listed fields, typed guards, never a blind JSON.stringify of the
+ * whole SDK object) but broader: full usageMetadata (not just 6 fields),
+ * per-candidate finishReason + a safety-ratings summary, and the raw
+ * response text the extraction was parsed from. Still explicitly excludes
+ * sdkHttpResponse/any transport object and never stores secrets.
+ */
+export interface SanitizedGeminiModalityTokenCount {
+  modality: string | null;
+  tokenCount: number | null;
+}
+
+export interface SanitizedGeminiUsageMetadata {
+  promptTokenCount: number | null;
+  candidatesTokenCount: number | null;
+  totalTokenCount: number | null;
+  cachedContentTokenCount: number | null;
+  thoughtsTokenCount: number | null;
+  toolUsePromptTokenCount: number | null;
+  promptTokensDetails: SanitizedGeminiModalityTokenCount[] | null;
+  candidatesTokensDetails: SanitizedGeminiModalityTokenCount[] | null;
+}
+
+export interface SanitizedGeminiSafetyRating {
+  category: string | null;
+  probability: string | null;
+}
+
+export interface SanitizedGeminiCandidate {
+  finishReason: string | null;
+  safetyRatings: SanitizedGeminiSafetyRating[] | null;
+}
+
+export interface SanitizedGeminiResponse {
+  responseId: string | null;
+  modelVersion: string | null;
+  responseText: string | null;
+  usageMetadata: SanitizedGeminiUsageMetadata | null;
+  candidates: SanitizedGeminiCandidate[] | null;
+}
+
+function sanitizeModalityTokenCounts(value: unknown): SanitizedGeminiModalityTokenCount[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.map((entry) => {
+    const item = entry as { modality?: unknown; tokenCount?: unknown };
+    return {
+      modality: typeof item.modality === "string" ? item.modality : null,
+      tokenCount: numberOrNull(item.tokenCount),
+    };
+  });
+}
+
+export function sanitizeGeminiRawResponse(rawResponse: unknown): SanitizedGeminiResponse | null {
+  if (!rawResponse || typeof rawResponse !== "object") {
+    return null;
+  }
+
+  const response = rawResponse as {
+    responseId?: unknown;
+    modelVersion?: unknown;
+    text?: unknown;
+    usageMetadata?: {
+      promptTokenCount?: unknown;
+      candidatesTokenCount?: unknown;
+      totalTokenCount?: unknown;
+      cachedContentTokenCount?: unknown;
+      thoughtsTokenCount?: unknown;
+      toolUsePromptTokenCount?: unknown;
+      promptTokensDetails?: unknown;
+      candidatesTokensDetails?: unknown;
+    };
+    candidates?: unknown;
+  };
+
+  const usage = response.usageMetadata;
+  const candidatesArray = Array.isArray(response.candidates) ? response.candidates : null;
+
+  return {
+    responseId: typeof response.responseId === "string" ? response.responseId : null,
+    modelVersion: typeof response.modelVersion === "string" ? response.modelVersion : null,
+    responseText: typeof response.text === "string" ? response.text : null,
+    usageMetadata: usage
+      ? {
+          promptTokenCount: numberOrNull(usage.promptTokenCount),
+          candidatesTokenCount: numberOrNull(usage.candidatesTokenCount),
+          totalTokenCount: numberOrNull(usage.totalTokenCount),
+          cachedContentTokenCount: numberOrNull(usage.cachedContentTokenCount),
+          thoughtsTokenCount: numberOrNull(usage.thoughtsTokenCount),
+          toolUsePromptTokenCount: numberOrNull(usage.toolUsePromptTokenCount),
+          promptTokensDetails: sanitizeModalityTokenCounts(usage.promptTokensDetails),
+          candidatesTokensDetails: sanitizeModalityTokenCounts(usage.candidatesTokensDetails),
+        }
+      : null,
+    candidates: candidatesArray
+      ? candidatesArray.map((candidate) => {
+          const c = candidate as { finishReason?: unknown; safetyRatings?: unknown };
+          const safetyRatings = Array.isArray(c.safetyRatings)
+            ? c.safetyRatings.map((rating) => {
+                const r = rating as { category?: unknown; probability?: unknown };
+                return {
+                  category: typeof r.category === "string" ? r.category : null,
+                  probability: typeof r.probability === "string" ? r.probability : null,
+                };
+              })
+            : null;
+          return {
+            finishReason: typeof c.finishReason === "string" ? c.finishReason : null,
+            safetyRatings,
+          };
+        })
+      : null,
+  };
+}

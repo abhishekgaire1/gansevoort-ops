@@ -2,14 +2,16 @@ import { notFound } from "next/navigation";
 import { UploadAndExtract } from "./_components/UploadAndExtract";
 
 /**
- * TEMPORARY development test harness for invoice extraction quality --
- * NOT the real receiving UI (that doesn't exist yet). Every "Extract with
- * Gemini" click makes a real, paid API call, so this route requires
- * BOTH an explicit opt-in env flag AND a non-production environment --
- * this is not authentication, only a guard against an accidentally-exposed,
- * real-money endpoint. There is no manager login system yet (Milestone
- * 2A.0 deliberately doesn't build one); building real auth just to gate a
- * throwaway dev harness would be its own scope creep.
+ * TEMPORARY development test harness for invoice extraction quality/model
+ * comparison -- NOT the receiving UI (see /manager/receiving). Every
+ * "Extract with Gemini" click makes a real, paid API call, so this route
+ * still requires BOTH an explicit opt-in env flag AND a non-production
+ * environment on top of (not instead of) now living inside the
+ * app/manager/(app)/ route group, which means requireManagerOrAdmin() also
+ * gates it via the shared layout -- belt-and-suspenders: the env gate keeps
+ * it unreachable in any real deployment regardless of who's signed in, and
+ * the auth gate keeps a non-manager authenticated user out of it in a
+ * dev/staging environment where the flag happens to be on.
  *
  * Forced dynamic: without this, Next.js would statically prerender the
  * page at `next build` time and bake in whatever env vars happened to be

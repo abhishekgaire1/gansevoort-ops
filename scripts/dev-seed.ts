@@ -112,7 +112,15 @@ async function findOrInsertNamed(
 async function findOrCreateAuthUser(
   supabase: SupabaseClient,
   email: string,
-  password: string
+  password: string,
+  /** True only when the caller's password came from an explicitly-set env
+   * var, not envOrGenerated()'s random fallback. An existing auth user's
+   * password is a one-way hash we can never read back to compare against,
+   * so there's no way to detect "already matches" -- we only ever write it
+   * when the operator deliberately supplied a value to converge to,
+   * otherwise a re-run would silently reset a real password to a fresh
+   * random one every time. */
+  passwordWasExplicitlySupplied: boolean
 ): Promise<string> {
   const { data: created, error } = await supabase.auth.admin.createUser({
     email,
@@ -128,6 +136,18 @@ async function findOrCreateAuthUser(
   if (listError) throw listError;
   const existing = listData.users.find((u) => u.email === email);
   if (!existing) throw error ?? new Error(`Could not create or find auth user ${email}`);
+
+  if (passwordWasExplicitlySupplied) {
+    // Re-syncs an existing seeded auth user's password to match
+    // DEV_SEED_*_PASSWORD when it was set/changed after the user was
+    // originally created (e.g. the first seed run generated a random
+    // password that was never saved). Same auth user id/row throughout --
+    // never deleted or recreated. Never logs the password itself.
+    const { error: updateError } = await supabase.auth.admin.updateUserById(existing.id, { password });
+    if (updateError) throw updateError;
+    console.log(`  updated password for existing auth user: ${email}`);
+  }
+
   return existing.id;
 }
 
@@ -196,7 +216,7 @@ async function ensureEmployee(
     if (passwordWasGenerated) {
       console.log(`  generated password for ${spec.authEmail}: ${password}  (not persisted anywhere, save it now)`);
     }
-    authUserId = await findOrCreateAuthUser(supabase, spec.authEmail, password);
+    authUserId = await findOrCreateAuthUser(supabase, spec.authEmail, password, !passwordWasGenerated);
   }
 
   let appUserId: string;
