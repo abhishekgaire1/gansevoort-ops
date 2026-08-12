@@ -1,6 +1,6 @@
 import type { KioskStation } from "@/app/actions/stations";
 import type { KioskInventoryItem } from "@/app/actions/inventoryItems";
-import type { KioskItemUnitOption } from "@/app/actions/inventoryItemUnits";
+import type { WithdrawalUnit } from "@/app/actions/withdrawalUnit";
 import type { StationConfig } from "./stationBranch";
 
 /**
@@ -28,17 +28,25 @@ export interface KioskState {
   lastActivityAt: number;
   refreshing: boolean;
   employeeDisplayName: string | null;
+  employeeFirstName: string | null;
   stationConfig: StationConfig | null;
   selectedStationId: string | null;
   selectedStationName: string | null;
   stations: KioskStation[] | null;
   items: KioskInventoryItem[] | null;
   selectedItem: KioskInventoryItem | null;
-  itemUnits: KioskItemUnitOption[] | null;
-  baseUnitName: string | null;
-  selectedUnitId: string | null;
+  /** The item's single canonical withdrawal unit (its own base unit) --
+   * see app/lib/kiosk/withdrawalUnit.ts. There is no separate entry-unit
+   * selection under the withdrawal-unit simplification. */
+  withdrawalUnit: WithdrawalUnit | null;
+  /** Set when a selected item turns out not to have its base-unit identity
+   * mapping configured -- a master-data problem, not something the
+   * employee caused. The item catalog already excludes items in this state
+   * (see app/lib/kiosk/inventoryItems.ts), so reaching this is a rare
+   * residual/race case; it renders a small inline "Setup required" notice
+   * on the quantity screen itself rather than a large error banner. */
+  withdrawalUnitUnavailable: boolean;
   enteredQuantity: string;
-  measuredBaseQuantity: string | null;
   /** Generated once at the first submit tap, reused verbatim on retry (see
    * app/actions/withdrawal.ts's idempotency contract), cleared whenever the
    * employee edits inputs or the flow ends. */
@@ -57,17 +65,16 @@ export function createInitialKioskState(): KioskState {
     lastActivityAt: now,
     refreshing: false,
     employeeDisplayName: null,
+    employeeFirstName: null,
     stationConfig: null,
     selectedStationId: null,
     selectedStationName: null,
     stations: null,
     items: null,
     selectedItem: null,
-    itemUnits: null,
-    baseUnitName: null,
-    selectedUnitId: null,
+    withdrawalUnit: null,
+    withdrawalUnitUnavailable: false,
     enteredQuantity: "",
-    measuredBaseQuantity: null,
     clientRequestId: null,
     submitting: false,
     errorBanner: null,
@@ -81,6 +88,7 @@ export type KioskAction =
       type: "PIN_VERIFIED";
       kioskToken: string;
       employeeDisplayName: string;
+      employeeFirstName: string;
       stationConfig: StationConfig;
       nextStep: Extract<KioskStep, "station_resolving" | "station_picker">;
       autoSelectedStationId: string | null;
@@ -94,10 +102,9 @@ export type KioskAction =
   | { type: "ITEMS_LOAD_STARTED" }
   | { type: "ITEMS_LOADED"; items: KioskInventoryItem[] }
   | { type: "ITEM_SELECTED"; item: KioskInventoryItem }
-  | { type: "ITEM_UNITS_LOADED"; units: KioskItemUnitOption[]; defaultUnitId: string | null; baseUnitName: string }
-  | { type: "UNIT_CHANGED"; unitId: string }
+  | { type: "WITHDRAWAL_UNIT_LOADED"; unit: WithdrawalUnit }
+  | { type: "WITHDRAWAL_UNIT_UNAVAILABLE" }
   | { type: "QUANTITY_CHANGED"; value: string }
-  | { type: "MEASURED_QUANTITY_CHANGED"; value: string }
   | { type: "GO_TO_REVIEW" }
   | { type: "BACK_TO_QUANTITY" }
   | { type: "BACK_TO_ITEMS"; message?: string }
@@ -133,6 +140,7 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         sessionStartedAtClient: now,
         lastActivityAt: now,
         employeeDisplayName: action.employeeDisplayName,
+        employeeFirstName: action.employeeFirstName,
         stationConfig: action.stationConfig,
         selectedStationId: action.autoSelectedStationId,
         selectedStationName: action.autoSelectedStationName,
@@ -164,34 +172,20 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
       return {
         ...state,
         selectedItem: action.item,
-        itemUnits: null,
-        baseUnitName: null,
-        selectedUnitId: null,
+        withdrawalUnit: null,
+        withdrawalUnitUnavailable: false,
         enteredQuantity: "",
-        measuredBaseQuantity: null,
         step: "quantity_entry",
       };
 
-    case "ITEM_UNITS_LOADED":
-      return {
-        ...state,
-        itemUnits: action.units,
-        baseUnitName: action.baseUnitName,
-        selectedUnitId: action.defaultUnitId,
-        enteredQuantity: "",
-        measuredBaseQuantity: null,
-      };
+    case "WITHDRAWAL_UNIT_LOADED":
+      return { ...state, withdrawalUnit: action.unit, withdrawalUnitUnavailable: false, enteredQuantity: "" };
 
-    case "UNIT_CHANGED":
-      // A stale quantity carried across a unit switch would silently mean a
-      // different amount than what's displayed -- always reset.
-      return { ...state, selectedUnitId: action.unitId, enteredQuantity: "", measuredBaseQuantity: null };
+    case "WITHDRAWAL_UNIT_UNAVAILABLE":
+      return { ...state, withdrawalUnitUnavailable: true };
 
     case "QUANTITY_CHANGED":
       return { ...state, enteredQuantity: action.value };
-
-    case "MEASURED_QUANTITY_CHANGED":
-      return { ...state, measuredBaseQuantity: action.value };
 
     case "GO_TO_REVIEW":
       return { ...state, step: "review", errorBanner: null };
@@ -205,11 +199,9 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         ...state,
         step: "item_select",
         selectedItem: null,
-        itemUnits: null,
-        baseUnitName: null,
-        selectedUnitId: null,
+        withdrawalUnit: null,
+        withdrawalUnitUnavailable: false,
         enteredQuantity: "",
-        measuredBaseQuantity: null,
         clientRequestId: null,
         errorBanner: action.message ? { message: action.message } : null,
       };
@@ -226,7 +218,11 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
       return { ...state, submitting: false, errorBanner: { message: action.message } };
 
     case "SUBMIT_SUCCESS":
-      return { ...state, step: "success", submitting: false, clientRequestId: null, errorBanner: null };
+      // Full reset, not just a step change: employee/station identity must
+      // disappear completely on a successful withdrawal, the same as
+      // START_OVER/SESSION_EXPIRED -- SuccessState renders nothing
+      // employee/item-specific, so there is nothing this loses.
+      return { ...createInitialKioskState(), step: "success" };
 
     case "ACTIVITY_PING":
       return { ...state, lastActivityAt: Date.now() };

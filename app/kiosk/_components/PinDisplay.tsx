@@ -15,7 +15,7 @@ export function PinDisplay({ length, filled }: PinDisplayProps) {
         <span
           key={index}
           className={`h-5 w-5 rounded-full border-2 transition ${
-            index < filled ? "border-amber-400 bg-amber-400" : "border-zinc-600 bg-transparent"
+            index < filled ? "border-kiosk-amber bg-kiosk-amber" : "border-kiosk-border-strong bg-transparent"
           }`}
         />
       ))}

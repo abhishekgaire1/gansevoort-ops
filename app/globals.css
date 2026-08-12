@@ -24,3 +24,40 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/*
+ * Kiosk color system -- always dark, independent of system light/dark
+ * preference (the kiosk is a fixed operational surface, not a themed app
+ * page; see KioskShell). Semantic tokens, not raw zinc/amber/emerald
+ * utilities, so every kiosk component draws from one deliberate palette:
+ * warm charcoal surfaces at multiple elevations, warm off-white text, amber
+ * as the one brand/action color, and muted blue/green/coral reserved for
+ * informational/success/error meaning respectively -- never decoration.
+ * Soft tints are produced at call sites with Tailwind's opacity modifier
+ * (e.g. bg-kiosk-amber/10), not baked into separate tokens here.
+ */
+@theme {
+  --color-kiosk-bg: #171512;
+  --color-kiosk-surface: #201d19;
+  --color-kiosk-surface-raised: #2b2620;
+  --color-kiosk-border: #3a352d;
+  --color-kiosk-border-strong: #55503f;
+
+  --color-kiosk-text: #f6f1e6;
+  --color-kiosk-text-muted: #b6ad9c;
+  --color-kiosk-text-subtle: #857d6c;
+
+  --color-kiosk-amber: #e3a53f;
+  --color-kiosk-amber-strong: #f3ba5c;
+  --color-kiosk-amber-ink: #241a06;
+
+  --color-kiosk-blue: #8db4d9;
+  --color-kiosk-blue-strong: #a8c8e6;
+
+  --color-kiosk-green: #83c39a;
+  --color-kiosk-green-strong: #a0d6b3;
+
+  --color-kiosk-coral: #e08a76;
+  --color-kiosk-coral-strong: #ec9f8d;
+  --color-kiosk-coral-ink: #2a0f09;
+}

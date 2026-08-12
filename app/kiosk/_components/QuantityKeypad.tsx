@@ -13,7 +13,7 @@ const DIGIT_ROWS = [
 ];
 
 const KEY_CLASSES =
-  "aspect-square rounded-2xl bg-zinc-800 text-2xl font-medium text-zinc-50 transition active:bg-zinc-700 disabled:opacity-30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400";
+  "aspect-square rounded-2xl bg-kiosk-surface-raised text-2xl font-medium text-kiosk-text transition active:bg-kiosk-border-strong disabled:opacity-30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber";
 
 /**
  * Decimal-capable numeric input, reused for both package-count and
@@ -59,7 +59,7 @@ export function QuantityKeypad({ value, onChange, allowDecimal = true }: Quantit
         type="button"
         onClick={deleteLast}
         aria-label="Delete last character"
-        className="aspect-square rounded-2xl bg-zinc-900 text-lg font-medium text-zinc-400 transition active:bg-zinc-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400"
+        className="aspect-square rounded-2xl bg-kiosk-surface text-lg font-medium text-kiosk-text-muted transition active:bg-kiosk-surface-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber"
       >
         Del
       </button>

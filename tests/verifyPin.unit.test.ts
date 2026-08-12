@@ -225,6 +225,7 @@ describe("verifyPinCore station config fields on success", () => {
       appUserId: "app-user-1",
       organizationId: ORG_ID,
       employeeDisplayName: "Maria G.",
+      employeeFirstName: "Maria",
       kioskToken: expect.any(String),
       defaultStationId: "station-1",
       defaultStationName: "Grill",

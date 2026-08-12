@@ -4,21 +4,29 @@ import { useCallback, useEffect, useMemo, useReducer, useState, type ReactNode }
 import { verifyPin } from "@/app/actions/pin";
 import { listActiveStations } from "@/app/actions/stations";
 import { listActiveInventoryItems } from "@/app/actions/inventoryItems";
-import { listActiveItemUnits } from "@/app/actions/inventoryItemUnits";
+import { getWithdrawalUnit } from "@/app/actions/withdrawalUnit";
 import { refreshKioskSession } from "@/app/actions/kioskSession";
 import { recordWithdrawal } from "@/app/actions/withdrawal";
 import { createInitialKioskState, kioskReducer } from "@/app/kiosk/_lib/kioskReducer";
 import { resolveStationBranch } from "@/app/kiosk/_lib/stationBranch";
 import { decideSessionTick } from "@/app/kiosk/_lib/sessionRefresh";
-import { isQuantityEntryComplete, resolveQuantityEntryLayout } from "@/app/kiosk/_lib/quantityEntry";
+import { isValidWithdrawalQuantity } from "@/app/kiosk/_lib/quantityEntry";
+import { deriveItemCategories, filterItems } from "@/app/kiosk/_lib/itemFilter";
 import { KioskShell } from "./KioskShell";
+import { KioskScreen } from "./KioskScreen";
 import { KioskHeader } from "./KioskHeader";
+import { EmployeeStatusBar } from "./EmployeeStatusBar";
+import { ItemContextHeader } from "./ItemContextHeader";
 import { NumericKeypad } from "./NumericKeypad";
+import { QuantityKeypad } from "./QuantityKeypad";
 import { PinDisplay } from "./PinDisplay";
 import { StationCard } from "./StationCard";
 import { ItemSearch } from "./ItemSearch";
 import { ItemCard } from "./ItemCard";
-import { QuantityEntryForm } from "./QuantityEntryForm";
+import { ValueCard } from "./ValueCard";
+import { QuantityEntrySkeleton } from "./QuantityEntrySkeleton";
+import { SetupRequiredNotice } from "./SetupRequiredNotice";
+import { CardGridSkeleton } from "./CardGridSkeleton";
 import { ReviewCard } from "./ReviewCard";
 import { SuccessState } from "./SuccessState";
 import { ErrorState } from "./ErrorState";
@@ -99,6 +107,7 @@ export function KioskApp() {
           type: "PIN_VERIFIED",
           kioskToken: result.kioskToken,
           employeeDisplayName: result.employeeDisplayName,
+          employeeFirstName: result.employeeFirstName,
           stationConfig,
           nextStep: branch.kind === "must_pick" ? "station_picker" : "station_resolving",
           autoSelectedStationId: branch.kind === "must_pick" ? null : branch.stationId,
@@ -169,29 +178,40 @@ export function KioskApp() {
     };
   }, [state.step, state.items, state.kioskToken, retryTick]);
 
-  // ---- Item units fetch ---------------------------------------------------
+  // ---- Withdrawal unit fetch --------------------------------------------
+  // Under the withdrawal-unit simplification an employee always withdraws
+  // in the item's own base unit -- see app/lib/kiosk/withdrawalUnit.ts. The
+  // item catalog already excludes items missing that mapping (see
+  // app/lib/kiosk/inventoryItems.ts), so "unit_not_configured" here means a
+  // rare race (master data changed after the catalog was fetched but before
+  // this item was selected) -- shown as a small inline notice on this same
+  // screen, not a manager-facing configuration error banner.
   useEffect(() => {
-    if (state.step !== "quantity_entry" || !state.selectedItem || state.itemUnits !== null || !state.kioskToken) return;
+    if (
+      state.step !== "quantity_entry" ||
+      !state.selectedItem ||
+      state.withdrawalUnit !== null ||
+      state.withdrawalUnitUnavailable ||
+      !state.kioskToken
+    ) {
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
-        const result = await listActiveItemUnits(state.kioskToken!, state.selectedItem!.id);
+        const result = await getWithdrawalUnit(state.kioskToken!, state.selectedItem!.id);
         if (cancelled) return;
         if (!result.ok) {
           if (result.reason === "item_not_found") {
             dispatch({ type: "BACK_TO_ITEMS", message: "This item is no longer available. Please choose another." });
+          } else if (result.reason === "unit_not_configured") {
+            dispatch({ type: "WITHDRAWAL_UNIT_UNAVAILABLE" });
           } else {
             dispatch({ type: "SESSION_EXPIRED" });
           }
           return;
         }
-        const defaultUnit = result.units.find((unit) => unit.isDefaultEntryUnit) ?? result.units[0] ?? null;
-        dispatch({
-          type: "ITEM_UNITS_LOADED",
-          units: result.units,
-          defaultUnitId: defaultUnit?.unitId ?? null,
-          baseUnitName: result.baseUnitName,
-        });
+        dispatch({ type: "WITHDRAWAL_UNIT_LOADED", unit: result.unit });
       } catch {
         if (!cancelled) dispatch({ type: "SCREEN_ERROR", message: GENERIC_NETWORK_ERROR });
       }
@@ -199,7 +219,7 @@ export function KioskApp() {
     return () => {
       cancelled = true;
     };
-  }, [state.step, state.selectedItem, state.itemUnits, state.kioskToken, retryTick]);
+  }, [state.step, state.selectedItem, state.withdrawalUnit, state.withdrawalUnitUnavailable, state.kioskToken, retryTick]);
 
   // ---- Session refresh scheduler -------------------------------------------
   useEffect(() => {
@@ -250,48 +270,30 @@ export function KioskApp() {
   ]);
 
   // ---- Derived item-selection data ----------------------------------------
-  const categories = useMemo(() => {
-    if (!state.items) return [];
-    const map = new Map<string, string>();
-    for (const item of state.items) {
-      map.set(item.categoryId, item.categoryName);
-    }
-    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [state.items]);
+  const categories = useMemo(() => (state.items ? deriveItemCategories(state.items) : []), [state.items]);
 
-  const filteredItems = useMemo(() => {
-    if (!state.items) return [];
-    const query = itemQuery.trim().toLowerCase();
-    return state.items.filter((item) => {
-      const matchesQuery = query === "" || item.name.toLowerCase().includes(query);
-      const matchesCategory = activeCategoryId === null || item.categoryId === activeCategoryId;
-      return matchesQuery && matchesCategory;
-    });
-  }, [state.items, itemQuery, activeCategoryId]);
+  const filteredItems = useMemo(
+    () => (state.items ? filterItems(state.items, itemQuery, activeCategoryId) : []),
+    [state.items, itemQuery, activeCategoryId]
+  );
 
-  const selectedUnit = state.itemUnits?.find((unit) => unit.unitId === state.selectedUnitId) ?? null;
-  const quantityLayout = selectedUnit ? resolveQuantityEntryLayout(selectedUnit) : null;
-  const canContinueQuantity = quantityLayout
-    ? isQuantityEntryComplete(quantityLayout, state.enteredQuantity, state.measuredBaseQuantity)
-    : false;
+  const canContinueQuantity = isValidWithdrawalQuantity(state.enteredQuantity);
 
   // ---- Submit -------------------------------------------------------------
   const handleSubmit = useCallback(async () => {
-    if (!state.kioskToken || !state.selectedItem || !state.selectedUnitId || !state.selectedStationId || !selectedUnit) {
+    if (!state.kioskToken || !state.selectedItem || !state.withdrawalUnit || !state.selectedStationId) {
       return;
     }
     const requestId = state.clientRequestId ?? crypto.randomUUID();
     dispatch({ type: "SUBMIT_ATTEMPT_STARTED", clientRequestId: requestId });
-
-    const layout = resolveQuantityEntryLayout(selectedUnit);
 
     try {
       const result = await recordWithdrawal(state.kioskToken, {
         stationId: state.selectedStationId,
         inventoryItemId: state.selectedItem.id,
         enteredQuantity: state.enteredQuantity,
-        enteredUnitId: state.selectedUnitId,
-        measuredBaseQuantity: layout.kind === "actual_measurement" ? state.measuredBaseQuantity : null,
+        enteredUnitId: state.withdrawalUnit.baseUnitId,
+        measuredBaseQuantity: null,
         clientRequestId: requestId,
       });
 
@@ -311,12 +313,10 @@ export function KioskApp() {
   }, [
     state.kioskToken,
     state.selectedItem,
-    state.selectedUnitId,
+    state.withdrawalUnit,
     state.selectedStationId,
     state.clientRequestId,
     state.enteredQuantity,
-    state.measuredBaseQuantity,
-    selectedUnit,
   ]);
 
   // ---- Render ---------------------------------------------------------------
@@ -326,12 +326,12 @@ export function KioskApp() {
     content = (
       <div className="flex flex-1 flex-col items-center justify-center gap-10">
         <div className="text-center">
-          <h1 className="text-3xl font-semibold text-zinc-50">Gansevoort Liberty Market</h1>
-          <p className="mt-2 text-lg text-zinc-400">Enter your PIN to begin</p>
+          <h1 className="text-3xl font-semibold text-kiosk-text">Gansevoort Liberty Market</h1>
+          <p className="mt-2 text-lg text-kiosk-text-muted">Enter your PIN to begin</p>
         </div>
         <PinDisplay length={PIN_LENGTH} filled={pinDigits.length} />
         {state.errorBanner ? (
-          <p role="alert" className="max-w-xs text-center text-base font-medium text-amber-300">
+          <p role="alert" className="max-w-xs text-center text-base font-medium text-kiosk-coral-strong">
             {state.errorBanner.message}
           </p>
         ) : null}
@@ -341,13 +341,12 @@ export function KioskApp() {
   } else if (state.step === "station_resolving") {
     content = (
       <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
-        <p className="text-2xl text-zinc-300">Welcome, {state.employeeDisplayName}</p>
-        <p className="text-xl text-zinc-400">Station: {state.selectedStationName ?? "—"}</p>
+        <p className="text-xl text-kiosk-text-muted">Setting up your station…</p>
         {state.stationConfig?.canChangeStation ? (
           <button
             type="button"
             onClick={() => dispatch({ type: "REQUEST_CHANGE_STATION" })}
-            className="mt-2 rounded-full border border-zinc-700 px-6 py-3 text-base font-medium text-zinc-300 transition hover:bg-zinc-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400"
+            className="mt-2 rounded-full border border-kiosk-border px-6 py-3 text-base font-medium text-kiosk-text-muted transition hover:bg-kiosk-surface-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber"
           >
             Change station
           </button>
@@ -356,12 +355,20 @@ export function KioskApp() {
     );
   } else if (state.step === "station_picker") {
     content = (
-      <>
-        <KioskHeader title="Select your station" onStartOver={handleStartOver} />
-        {state.errorBanner && state.stations === null ? (
-          <ErrorState title={state.errorBanner.message} primaryAction={{ label: "Retry", onClick: handleRetry }} />
-        ) : state.stations === null ? (
-          <p className="text-lg text-zinc-400">Loading stations…</p>
+      <KioskScreen
+        header={
+          <>
+            <KioskHeader title="Select your station" />
+            {state.errorBanner && state.stations === null ? (
+              <div className="mb-4">
+                <ErrorState title={state.errorBanner.message} primaryAction={{ label: "Retry", onClick: handleRetry }} />
+              </div>
+            ) : null}
+          </>
+        }
+      >
+        {state.stations === null ? (
+          state.errorBanner ? null : <CardGridSkeleton cardMinHeightClassName="min-h-24" />
         ) : (
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
             {state.stations.map((station) => (
@@ -374,33 +381,37 @@ export function KioskApp() {
             ))}
           </div>
         )}
-      </>
+      </KioskScreen>
     );
   } else if (state.step === "item_select") {
     content = (
-      <>
-        <KioskHeader title="Select an item" onStartOver={handleStartOver} />
-        {state.errorBanner ? (
-          <div className="mb-4">
-            <ErrorState
-              title={state.errorBanner.message}
-              primaryAction={state.items === null ? { label: "Retry", onClick: handleRetry } : { label: "Dismiss", onClick: () => dispatch({ type: "DISMISS_SCREEN_ERROR" }) }}
+      <KioskScreen
+        header={
+          <>
+            {state.errorBanner ? (
+              <div className="mb-3">
+                <ErrorState
+                  title={state.errorBanner.message}
+                  primaryAction={state.items === null ? { label: "Retry", onClick: handleRetry } : { label: "Dismiss", onClick: () => dispatch({ type: "DISMISS_SCREEN_ERROR" }) }}
+                />
+              </div>
+            ) : null}
+            <ItemSearch
+              query={itemQuery}
+              onQueryChange={setItemQuery}
+              categories={categories}
+              activeCategoryId={activeCategoryId}
+              onCategoryChange={setActiveCategoryId}
             />
-          </div>
-        ) : null}
-        <ItemSearch
-          query={itemQuery}
-          onQueryChange={setItemQuery}
-          categories={categories}
-          activeCategoryId={activeCategoryId}
-          onCategoryChange={setActiveCategoryId}
-        />
+          </>
+        }
+      >
         {state.items === null ? (
-          <p className="text-lg text-zinc-400">Loading items…</p>
+          state.errorBanner ? null : <CardGridSkeleton cardMinHeightClassName="min-h-24" />
         ) : filteredItems.length === 0 ? (
-          <p className="text-lg text-zinc-400">No items match your search.</p>
+          <p className="text-lg text-kiosk-text-muted">No items match your search.</p>
         ) : (
-          <div className="grid flex-1 grid-cols-2 gap-4 overflow-y-auto sm:grid-cols-3">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
             {filteredItems.map((item) => (
               <ItemCard
                 key={item.id}
@@ -413,99 +424,125 @@ export function KioskApp() {
             ))}
           </div>
         )}
-      </>
+      </KioskScreen>
     );
   } else if (state.step === "quantity_entry") {
     content = (
-      <>
-        <KioskHeader
-          title={state.selectedItem?.name ?? ""}
-          onBack={() => dispatch({ type: "BACK_TO_ITEMS" })}
-          onStartOver={handleStartOver}
-        />
-        {state.errorBanner ? (
-          <div className="mb-4">
-            <ErrorState
-              title={state.errorBanner.message}
-              primaryAction={state.itemUnits === null ? { label: "Retry", onClick: handleRetry } : { label: "Dismiss", onClick: () => dispatch({ type: "DISMISS_SCREEN_ERROR" }) }}
+      <KioskScreen
+        centerBody
+        header={
+          <>
+            <ItemContextHeader
+              itemName={state.selectedItem?.name ?? ""}
+              trackingBasis={state.withdrawalUnit?.baseUnitType ?? ""}
+              baseUnitName={state.withdrawalUnit?.baseUnitName ?? ""}
+              onBack={() => dispatch({ type: "BACK_TO_ITEMS" })}
+            />
+            {!state.withdrawalUnitUnavailable ? (
+              <div className="mb-4 min-h-32">
+                {state.errorBanner ? (
+                  <ErrorState
+                    title={state.errorBanner.message}
+                    primaryAction={state.withdrawalUnit === null ? { label: "Retry", onClick: handleRetry } : { label: "Dismiss", onClick: () => dispatch({ type: "DISMISS_SCREEN_ERROR" }) }}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        }
+        footer={
+          <div className="flex justify-center">
+            <button
+              type="button"
+              disabled={!state.withdrawalUnit || !canContinueQuantity}
+              onClick={() => dispatch({ type: "GO_TO_REVIEW" })}
+              className="w-full max-w-xs rounded-full bg-kiosk-amber px-10 py-4 text-xl font-semibold text-kiosk-amber-ink transition hover:bg-kiosk-amber-strong disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber-strong"
+            >
+              Continue →
+            </button>
+          </div>
+        }
+      >
+        {state.withdrawalUnitUnavailable ? (
+          <SetupRequiredNotice onBack={() => dispatch({ type: "BACK_TO_ITEMS" })} />
+        ) : state.withdrawalUnit === null ? (
+          state.errorBanner ? null : <QuantityEntrySkeleton />
+        ) : (
+          <div className="flex w-full max-w-xs flex-col items-center gap-6">
+            <ValueCard label="Withdraw Quantity" value={state.enteredQuantity} unit={state.withdrawalUnit.baseUnitCode} />
+            <QuantityKeypad
+              value={state.enteredQuantity}
+              onChange={(value) => dispatch({ type: "QUANTITY_CHANGED", value })}
             />
           </div>
-        ) : null}
-        {state.itemUnits === null ? (
-          <p className="text-lg text-zinc-400">Loading options…</p>
-        ) : (
-          <>
-            <QuantityEntryForm
-              units={state.itemUnits}
-              baseUnitName={state.baseUnitName ?? ""}
-              selectedUnitId={state.selectedUnitId}
-              onUnitChange={(unitId) => dispatch({ type: "UNIT_CHANGED", unitId })}
-              enteredQuantity={state.enteredQuantity}
-              onQuantityChange={(value) => dispatch({ type: "QUANTITY_CHANGED", value })}
-              measuredBaseQuantity={state.measuredBaseQuantity}
-              onMeasuredQuantityChange={(value) => dispatch({ type: "MEASURED_QUANTITY_CHANGED", value })}
-            />
-            <div className="mt-8 flex justify-center">
-              <button
-                type="button"
-                disabled={!canContinueQuantity}
-                onClick={() => dispatch({ type: "GO_TO_REVIEW" })}
-                className="rounded-full bg-amber-400 px-10 py-4 text-xl font-semibold text-zinc-950 transition hover:bg-amber-300 disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-100"
-              >
-                Continue →
-              </button>
-            </div>
-          </>
         )}
-      </>
+      </KioskScreen>
     );
   } else if (state.step === "review") {
     const rows = [
       { label: "Employee", value: state.employeeDisplayName ?? "" },
       { label: "Station", value: state.selectedStationName ?? "" },
       { label: "Item", value: state.selectedItem?.name ?? "" },
-      { label: "Quantity", value: `${state.enteredQuantity} ${selectedUnit?.unitName ?? ""}`.trim() },
+      { label: "Quantity", value: `${state.enteredQuantity} ${state.withdrawalUnit?.baseUnitCode ?? ""}`.trim() },
     ];
-    if (quantityLayout?.kind === "actual_measurement" && state.measuredBaseQuantity) {
-      rows.push({ label: "Actual weight", value: `${state.measuredBaseQuantity} ${state.baseUnitName ?? ""}`.trim() });
-    }
 
     content = (
-      <>
-        <KioskHeader title="Review Withdrawal" onBack={() => dispatch({ type: "BACK_TO_QUANTITY" })} onStartOver={handleStartOver} />
-        {state.errorBanner ? (
-          <div className="mb-4">
-            <ErrorState
-              title="This withdrawal couldn't be completed."
-              message={state.errorBanner.message}
-              primaryAction={{ label: "Try Again", onClick: handleSubmit }}
-              secondaryAction={{ label: "Back", onClick: () => dispatch({ type: "BACK_TO_QUANTITY" }) }}
-            />
+      <KioskScreen
+        header={
+          <>
+            <KioskHeader title="Review Withdrawal" onBack={() => dispatch({ type: "BACK_TO_QUANTITY" })} />
+            {state.errorBanner ? (
+              <div className="mb-4">
+                <ErrorState
+                  title="This withdrawal couldn't be completed."
+                  message={state.errorBanner.message}
+                  primaryAction={{ label: "Try Again", onClick: handleSubmit }}
+                  secondaryAction={{ label: "Back", onClick: () => dispatch({ type: "BACK_TO_QUANTITY" }) }}
+                />
+              </div>
+            ) : null}
+          </>
+        }
+        footer={
+          <div className="flex justify-center gap-4">
+            <button
+              type="button"
+              onClick={() => dispatch({ type: "BACK_TO_QUANTITY" })}
+              className="rounded-full border border-kiosk-border px-8 py-4 text-lg font-medium text-kiosk-text-muted transition hover:bg-kiosk-surface-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={state.submitting}
+              onClick={handleSubmit}
+              className="rounded-full bg-kiosk-amber px-10 py-4 text-xl font-semibold text-kiosk-amber-ink transition hover:bg-kiosk-amber-strong disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber-strong"
+            >
+              {state.submitting ? "Submitting…" : "Confirm & Submit"}
+            </button>
           </div>
-        ) : null}
+        }
+      >
         <ReviewCard rows={rows} />
-        <div className="mt-8 flex justify-center gap-4">
-          <button
-            type="button"
-            onClick={() => dispatch({ type: "BACK_TO_QUANTITY" })}
-            className="rounded-full border border-zinc-700 px-8 py-4 text-lg font-medium text-zinc-300 transition hover:bg-zinc-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            disabled={state.submitting}
-            onClick={handleSubmit}
-            className="rounded-full bg-amber-400 px-10 py-4 text-xl font-semibold text-zinc-950 transition hover:bg-amber-300 disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-100"
-          >
-            {state.submitting ? "Submitting…" : "Confirm & Submit"}
-          </button>
-        </div>
-      </>
+      </KioskScreen>
     );
   } else {
     content = <SuccessState onDone={handleStartOver} />;
   }
 
-  return <KioskShell onActivity={handleActivity}>{content}</KioskShell>;
+  const showEmployeeStatusBar = state.step !== "pin" && state.step !== "success" && state.employeeFirstName !== null;
+
+  return (
+    <KioskShell onActivity={handleActivity}>
+      {showEmployeeStatusBar ? (
+        <EmployeeStatusBar
+          employeeFirstName={state.employeeFirstName!}
+          stationName={state.selectedStationName}
+          onStartOver={handleStartOver}
+          screenLabel={state.step === "item_select" ? "Inventory" : undefined}
+        />
+      ) : null}
+      {content}
+    </KioskShell>
+  );
 }

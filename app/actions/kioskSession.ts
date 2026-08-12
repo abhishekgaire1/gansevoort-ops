@@ -14,7 +14,7 @@ import { refreshKioskToken } from "@/app/lib/auth/kioskToken";
  *
  * No SupabaseClient/database access is needed here -- refreshKioskToken is
  * pure token/crypto logic -- so unlike the read actions in app/actions/
- * (stations.ts, inventoryItems.ts, inventoryItemUnits.ts) there is no
+ * (stations.ts, inventoryItems.ts, withdrawalUnit.ts) there is no
  * separate app/lib/kiosk/* core module to split this into.
  */
 export type RefreshKioskSessionResult =

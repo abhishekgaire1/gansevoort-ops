@@ -24,13 +24,13 @@ export function SuccessState({ onDone, autoReturnMs = 3000 }: SuccessStateProps)
     <button
       type="button"
       onClick={onDone}
-      className="flex flex-1 flex-col items-center justify-center gap-6 text-center focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-400"
+      className="flex flex-1 flex-col items-center justify-center gap-6 text-center focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-kiosk-amber"
     >
-      <span className="flex h-24 w-24 items-center justify-center rounded-full bg-emerald-500/15 text-5xl text-emerald-400" aria-hidden="true">
+      <span className="flex h-24 w-24 items-center justify-center rounded-full bg-kiosk-green/15 text-5xl text-kiosk-green" aria-hidden="true">
         ✓
       </span>
-      <span className="text-3xl font-semibold text-zinc-50">Withdrawal recorded.</span>
-      <span className="text-lg text-zinc-400">Returning to PIN entry…</span>
+      <span className="text-3xl font-semibold text-kiosk-text">Withdrawal recorded.</span>
+      <span className="text-lg text-kiosk-text-muted">Returning to PIN entry…</span>
     </button>
   );
 }

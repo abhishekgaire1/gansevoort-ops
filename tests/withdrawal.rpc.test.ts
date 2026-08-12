@@ -39,48 +39,94 @@ beforeAll(async () => {
 });
 
 describe("record_inventory_withdrawal", () => {
-  it("records a variable-weight withdrawal (BOX entered, actual LB measured)", async () => {
+  it("records a base-unit WEIGHT withdrawal (entered directly in LB, no separate measured quantity)", async () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
       inventoryItemId: fx.variableWeightItemId,
-      enteredQuantity: "2",
-      enteredUnitId: fx.variableWeightBoxUnitId,
-      measuredBaseQuantity: "8",
+      enteredQuantity: "8",
+      enteredUnitId: fx.variableWeightLbUnitId,
       clientRequestId: randomUUID(),
     });
-    expect(result.normalizedBaseQuantity).toBe("8");
+    expect(result.normalizedBaseQuantity).toBe("8"); // 1:1, no conversion
     expect(result.exceptionRaised).toBe(false); // threshold is 10, strict ">"
     expect(result.replayed).toBe(false);
   });
 
-  it("records a fixed-conversion withdrawal (normalized = entered * conversion_factor)", async () => {
+  it("records a base-unit COUNT withdrawal (entered directly in PIECE, normalized 1:1)", async () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
       inventoryItemId: fx.fixedConversionItemId,
       enteredQuantity: "3",
-      enteredUnitId: fx.fixedConversionCaseUnitId,
+      enteredUnitId: fx.fixedConversionPieceUnitId,
       clientRequestId: randomUUID(),
     });
-    expect(result.normalizedBaseQuantity).toBe("30"); // 3 * 10
+    expect(result.normalizedBaseQuantity).toBe("3");
   });
 
-  it("rejects a variable-weight entry missing the required measured quantity, with no partial rows", async () => {
+  it("records a base-unit VOLUME withdrawal (entered directly in GAL, normalized 1:1, supports decimals)", async () => {
+    const result = await recordInventoryWithdrawal(fx.supabase, {
+      performedByAppUserId: fx.changeableEmployeeAppUserId,
+      stationId: fx.stationId,
+      inventoryItemId: fx.volumeItemId,
+      enteredQuantity: "2.5",
+      enteredUnitId: fx.volumeUnitId,
+      clientRequestId: randomUUID(),
+    });
+    expect(result.normalizedBaseQuantity).toBe("2.5");
+  });
+
+  it("rejects a withdrawal entered in a non-base packaging unit (BOX), even though it's a configured active inventory_item_units row, with no partial rows", async () => {
     const before = await movementCountFor(fx.stationId, fx.changeableEmployeeAppUserId);
     await expect(
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.changeableEmployeeAppUserId,
         stationId: fx.stationId,
         inventoryItemId: fx.variableWeightItemId,
-        enteredQuantity: "1",
+        enteredQuantity: "2",
         enteredUnitId: fx.variableWeightBoxUnitId,
-        // measuredBaseQuantity intentionally omitted
+        measuredBaseQuantity: "8",
         clientRequestId: randomUUID(),
       })
-    ).rejects.toThrow();
+    ).rejects.toThrow(/must be inventory_item_id .* base unit/);
     const after = await movementCountFor(fx.stationId, fx.changeableEmployeeAppUserId);
     expect(after).toBe(before); // proves the whole call rolled back, not just the failing statement
+  });
+
+  it("rejects a withdrawal entered in a non-base packaging unit (CASE), even though it has a valid fixed conversion_factor", async () => {
+    await expect(
+      recordInventoryWithdrawal(fx.supabase, {
+        performedByAppUserId: fx.changeableEmployeeAppUserId,
+        stationId: fx.stationId,
+        inventoryItemId: fx.fixedConversionItemId,
+        enteredQuantity: "3",
+        enteredUnitId: fx.fixedConversionCaseUnitId,
+        clientRequestId: randomUUID(),
+      })
+    ).rejects.toThrow(/must be inventory_item_id .* base unit/);
+  });
+
+  it("preserves package-unit mappings untouched -- BOX and CASE remain active, correctly configured inventory_item_units rows even though withdrawal now rejects them", async () => {
+    const { data: boxRow, error: boxError } = await fx.supabase
+      .from("inventory_item_units")
+      .select("unit_id, is_active, requires_actual_measurement, conversion_factor")
+      .eq("inventory_item_id", fx.variableWeightItemId)
+      .eq("unit_id", fx.variableWeightBoxUnitId)
+      .single();
+    expect(boxError).toBeNull();
+    expect(boxRow).toMatchObject({ is_active: true, requires_actual_measurement: true });
+    expect(boxRow!.conversion_factor).toBeNull();
+
+    const { data: caseRow, error: caseError } = await fx.supabase
+      .from("inventory_item_units")
+      .select("unit_id, is_active, requires_actual_measurement, conversion_factor")
+      .eq("inventory_item_id", fx.fixedConversionItemId)
+      .eq("unit_id", fx.fixedConversionCaseUnitId)
+      .single();
+    expect(caseError).toBeNull();
+    expect(caseRow).toMatchObject({ is_active: true, requires_actual_measurement: false });
+    expect(Number(caseRow!.conversion_factor)).toBe(10); // numeric may come back as string or number
   });
 
   it("rejects an item/unit combination that was never configured", async () => {
@@ -139,9 +185,8 @@ describe("record_inventory_withdrawal", () => {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
       inventoryItemId: fx.variableWeightItemId,
-      enteredQuantity: "1",
-      enteredUnitId: fx.variableWeightBoxUnitId,
-      measuredBaseQuantity: "10", // threshold is exactly 10
+      enteredQuantity: "10", // threshold is exactly 10
+      enteredUnitId: fx.variableWeightLbUnitId,
       clientRequestId: randomUUID(),
     });
     expect(result.exceptionRaised).toBe(false);
@@ -152,9 +197,8 @@ describe("record_inventory_withdrawal", () => {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
       inventoryItemId: fx.variableWeightItemId,
-      enteredQuantity: "1",
-      enteredUnitId: fx.variableWeightBoxUnitId,
-      measuredBaseQuantity: "10.01",
+      enteredQuantity: "10.01",
+      enteredUnitId: fx.variableWeightLbUnitId,
       clientRequestId: randomUUID(),
     });
     expect(result.exceptionRaised).toBe(true);
@@ -176,7 +220,7 @@ describe("record_inventory_withdrawal", () => {
       stationId: fx.stationId,
       inventoryItemId: fx.fixedConversionItemId,
       enteredQuantity: "1",
-      enteredUnitId: fx.fixedConversionCaseUnitId,
+      enteredUnitId: fx.fixedConversionPieceUnitId,
       clientRequestId: randomUUID(),
     });
 
@@ -219,7 +263,7 @@ describe("record_inventory_withdrawal idempotency", () => {
       stationId: fx.stationId,
       inventoryItemId: fx.fixedConversionItemId,
       enteredQuantity: "2",
-      enteredUnitId: fx.fixedConversionCaseUnitId,
+      enteredUnitId: fx.fixedConversionPieceUnitId,
       clientRequestId,
     };
 
@@ -237,29 +281,35 @@ describe("record_inventory_withdrawal idempotency", () => {
     expect(after).toBe(before + 1); // only ONE movement, despite two calls
   });
 
-  it("treats null vs. non-null measuredBaseQuantity as a mismatch, not an equal retry", async () => {
+  it("treats a different enteredQuantity as a mismatch, not an equal retry", async () => {
+    // Under the withdrawal-unit simplification a withdrawal's entered_unit_id
+    // is always the item's base unit, which structurally never accepts a
+    // measured_base_quantity (see 20260811100016_enforce_withdrawal_base_unit.sql
+    // and the pre-existing measurement XOR on inventory_item_units) -- so
+    // entered_quantity, not measured_base_quantity, is the field that
+    // actually varies between real withdrawal payloads now. This replaces
+    // the old "null vs. non-null measuredBaseQuantity" scenario, which is no
+    // longer reachable via a successful ISSUE_TO_STATION call.
     const clientRequestId = randomUUID();
 
     await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
       inventoryItemId: fx.variableWeightItemId,
-      enteredQuantity: "1",
-      enteredUnitId: fx.variableWeightBoxUnitId,
-      measuredBaseQuantity: "5",
+      enteredQuantity: "5",
+      enteredUnitId: fx.variableWeightLbUnitId,
       clientRequestId,
     });
 
-    // Same id, same everything else, but a DIFFERENT measuredBaseQuantity --
+    // Same id, same everything else, but a DIFFERENT enteredQuantity --
     // must fail closed, not silently replay the first withdrawal's result.
     await expect(
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.changeableEmployeeAppUserId,
         stationId: fx.stationId,
         inventoryItemId: fx.variableWeightItemId,
-        enteredQuantity: "1",
-        enteredUnitId: fx.variableWeightBoxUnitId,
-        measuredBaseQuantity: "6",
+        enteredQuantity: "6",
+        enteredUnitId: fx.variableWeightLbUnitId,
         clientRequestId,
       })
     ).rejects.toThrow(/already used with a different withdrawal payload/);

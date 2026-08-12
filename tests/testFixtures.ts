@@ -24,10 +24,29 @@ export interface RpcTestFixtures {
   otherStationId: string;
   variableWeightItemId: string;
   variableWeightBoxUnitId: string;
+  /** variableWeightItemId's own base unit (LB), also configured as a
+   * self-referencing inventory_item_units row (conversion_factor 1) --
+   * see the withdrawal-unit-simplification migration
+   * 20260811100016_enforce_withdrawal_base_unit.sql. This is the only
+   * unit an ISSUE_TO_STATION withdrawal may legally use for this item;
+   * variableWeightBoxUnitId (a packaging unit, kept for future receiving)
+   * must now be rejected. */
+  variableWeightLbUnitId: string;
   fixedConversionItemId: string;
   fixedConversionCaseUnitId: string;
+  /** fixedConversionItemId's own base unit (PIECE), also configured as a
+   * self-referencing inventory_item_units row -- same role as
+   * variableWeightLbUnitId above, but for a fixed-conversion-style
+   * packaging unit (CASE) rather than a measurement-required one (BOX),
+   * so both packaging-unit shapes are covered by the rejection tests. */
+  fixedConversionPieceUnitId: string;
   noRuleItemId: string;
   noRuleUnitId: string;
+  /** A VOLUME-tracked item whose base unit (GAL) is its only configured
+   * entry unit -- covers the third tracking basis for base-unit
+   * withdrawal tests. */
+  volumeItemId: string;
+  volumeUnitId: string;
   wrongUnitId: string;
   lockedEmployeeAppUserId: string;
   lockedEmployeePin: string;
@@ -118,6 +137,15 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     { inventory_item_id: variableWeightItemId, unit_id: boxUnitId },
     { inventory_item_id: variableWeightItemId, unit_id: boxUnitId, requires_actual_measurement: true, is_default_entry_unit: true }
   );
+  // Self-referencing base-unit row: the only unit an ISSUE_TO_STATION
+  // withdrawal may use for this item under the withdrawal-unit
+  // simplification -- BOX above stays purely for a future receiving flow.
+  await findOrInsert(
+    supabase,
+    "inventory_item_units",
+    { inventory_item_id: variableWeightItemId, unit_id: lbUnitId },
+    { inventory_item_id: variableWeightItemId, unit_id: lbUnitId, conversion_factor: 1, is_default_entry_unit: false }
+  );
 
   const fixedConversionItemId = await findOrInsert(
     supabase,
@@ -131,6 +159,14 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     { inventory_item_id: fixedConversionItemId, unit_id: caseUnitId },
     { inventory_item_id: fixedConversionItemId, unit_id: caseUnitId, conversion_factor: 10, is_default_entry_unit: true }
   );
+  // Self-referencing base-unit row -- same role as variableWeightLbUnitId
+  // above, but for a fixed-conversion-style packaging unit (CASE).
+  await findOrInsert(
+    supabase,
+    "inventory_item_units",
+    { inventory_item_id: fixedConversionItemId, unit_id: pieceUnitId },
+    { inventory_item_id: fixedConversionItemId, unit_id: pieceUnitId, conversion_factor: 1, is_default_entry_unit: false }
+  );
 
   const noRuleItemId = await findOrInsert(
     supabase,
@@ -143,6 +179,19 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     "inventory_item_units",
     { inventory_item_id: noRuleItemId, unit_id: pieceUnitId },
     { inventory_item_id: noRuleItemId, unit_id: pieceUnitId, conversion_factor: 1, is_default_entry_unit: true }
+  );
+
+  const volumeItemId = await findOrInsert(
+    supabase,
+    "inventory_items",
+    { organization_id: organizationId, name: `${TEST_PREFIX}Volume Item` },
+    { organization_id: organizationId, category_id: categoryId, base_unit_id: galUnitId, name: `${TEST_PREFIX}Volume Item` }
+  );
+  await findOrInsert(
+    supabase,
+    "inventory_item_units",
+    { inventory_item_id: volumeItemId, unit_id: galUnitId },
+    { inventory_item_id: volumeItemId, unit_id: galUnitId, conversion_factor: 1, is_default_entry_unit: true }
   );
 
   // Low threshold so an over-threshold test withdrawal reliably trips it.
@@ -245,10 +294,14 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     otherStationId,
     variableWeightItemId,
     variableWeightBoxUnitId: boxUnitId,
+    variableWeightLbUnitId: lbUnitId,
     fixedConversionItemId,
     fixedConversionCaseUnitId: caseUnitId,
+    fixedConversionPieceUnitId: pieceUnitId,
     noRuleItemId,
     noRuleUnitId: pieceUnitId,
+    volumeItemId,
+    volumeUnitId: galUnitId,
     wrongUnitId: galUnitId,
     lockedEmployeeAppUserId,
     lockedEmployeePin,

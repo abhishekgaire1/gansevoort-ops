@@ -35,6 +35,7 @@ export type VerifyPinResult =
       appUserId: string;
       organizationId: string;
       employeeDisplayName: string;
+      employeeFirstName: string;
       kioskToken: string;
       defaultStationId: string | null;
       defaultStationName: string | null;
@@ -113,6 +114,7 @@ export async function verifyPinCore(
   const kioskToken = issueKioskToken({ appUserId: appUser.id, organizationId }, kioskTokenSecret);
   const employee = Array.isArray(appUser.employees) ? appUser.employees[0] : appUser.employees;
   const employeeDisplayName = employee ? `${employee.first_name} ${employee.last_name}` : "";
+  const employeeFirstName = employee?.first_name ?? "";
   const defaultStationId: string | null = employee?.default_station_id ?? null;
   const autoResolveStation = employee?.auto_resolve_station ?? false;
   const canChangeStation = employee?.can_change_station ?? false;
@@ -140,6 +142,7 @@ export async function verifyPinCore(
     appUserId: appUser.id,
     organizationId,
     employeeDisplayName,
+    employeeFirstName,
     kioskToken,
     defaultStationId,
     defaultStationName,

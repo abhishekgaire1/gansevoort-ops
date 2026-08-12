@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run tests/pin.unit.test.ts tests/verifyPin.unit.test.ts tests/devSeedEnv.unit.test.ts tests/kioskReducer.unit.test.ts tests/stationBranch.unit.test.ts tests/quantityEntry.unit.test.ts tests/sessionRefresh.unit.test.ts tests/stations.unit.test.ts tests/inventoryItems.unit.test.ts tests/inventoryItemUnits.unit.test.ts",
+    "test": "vitest run tests/pin.unit.test.ts tests/verifyPin.unit.test.ts tests/devSeedEnv.unit.test.ts tests/kioskReducer.unit.test.ts tests/stationBranch.unit.test.ts tests/quantityEntry.unit.test.ts tests/itemFilter.unit.test.ts tests/sessionRefresh.unit.test.ts tests/stations.unit.test.ts tests/inventoryItems.unit.test.ts tests/withdrawalUnit.unit.test.ts",
     "test:integration": "vitest run tests/pin.integration.test.ts tests/withdrawal.rpc.test.ts",
     "db:seed:dev": "tsx scripts/dev-seed.ts"
   },

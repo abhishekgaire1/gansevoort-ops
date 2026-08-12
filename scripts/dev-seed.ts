@@ -411,27 +411,45 @@ async function main(): Promise<void> {
 
   console.log("Seeding inventory items and item units...");
   const itemIdByName = new Map<string, string>();
+  // Withdrawal-unit simplification (kiosk UI plan): the kiosk withdraws an
+  // item only in its own base unit, which record_inventory_withdrawal's
+  // enforce_movement_line_measurement() trigger and the
+  // inventory_movement_lines_item_unit_fk constraint only accept when an
+  // ACTIVE inventory_item_units row exists for (item, base_unit_id) --
+  // neither was changed to special-case this. So every item below gets a
+  // self-referencing base-unit row (conversionFactor 1, no measurement
+  // required) alongside whatever packaging units it already has. Packaging
+  // units (BOX/CASE/...) are left in place: they remain for a future
+  // purchasing/receiving workflow, they're just never offered by the kiosk.
   const itemSpecs: ItemSpec[] = [
     {
-      // Case a: variable-weight item entered as BOX + actual measured LB.
-      name: `${DEV}Chicken Thigh (Variable Weight)`,
+      // Case a: WEIGHT item. Packaging (BOX) stays for future receiving;
+      // the kiosk only ever withdraws in LB.
+      name: `${DEV}Chicken Thigh`,
       categoryName: `${DEV}Meat`,
       baseUnitCode: "LB",
-      units: [{ unitCode: "BOX", conversionFactor: null, requiresActualMeasurement: true, isDefaultEntryUnit: true }],
+      units: [
+        { unitCode: "BOX", conversionFactor: null, requiresActualMeasurement: true, isDefaultEntryUnit: false },
+        { unitCode: "LB", conversionFactor: 1, requiresActualMeasurement: false, isDefaultEntryUnit: true },
+      ],
     },
     {
-      // Case b: fixed-count item entered as PIECE.
+      // Case b: COUNT item whose base unit was already its only entry unit.
       name: `${DEV}Napkins`,
       categoryName: `${DEV}Dry Goods`,
       baseUnitCode: "PIECE",
       units: [{ unitCode: "PIECE", conversionFactor: 1, requiresActualMeasurement: false, isDefaultEntryUnit: true }],
     },
     {
-      // Case c: fixed package conversion (1 BOX = 360 PIECE).
-      name: `${DEV}Eggs (Box of 360)`,
+      // Case c: COUNT item. Packaging (BOX of 360) stays for future
+      // receiving; the kiosk only ever withdraws in PIECE.
+      name: `${DEV}Eggs`,
       categoryName: `${DEV}Dry Goods`,
       baseUnitCode: "PIECE",
-      units: [{ unitCode: "BOX", conversionFactor: 360, requiresActualMeasurement: false, isDefaultEntryUnit: true }],
+      units: [
+        { unitCode: "BOX", conversionFactor: 360, requiresActualMeasurement: false, isDefaultEntryUnit: false },
+        { unitCode: "PIECE", conversionFactor: 1, requiresActualMeasurement: false, isDefaultEntryUnit: true },
+      ],
     },
     {
       name: `${DEV}Ketchup`,
@@ -440,10 +458,22 @@ async function main(): Promise<void> {
       units: [{ unitCode: "BOTTLE", conversionFactor: 1, requiresActualMeasurement: false, isDefaultEntryUnit: true }],
     },
     {
+      // Packaging (CASE) stays for future receiving; the kiosk only ever
+      // withdraws in LB.
       name: `${DEV}Rice`,
       categoryName: `${DEV}Dry Goods`,
       baseUnitCode: "LB",
-      units: [{ unitCode: "CASE", conversionFactor: 25, requiresActualMeasurement: false, isDefaultEntryUnit: true }],
+      units: [
+        { unitCode: "CASE", conversionFactor: 25, requiresActualMeasurement: false, isDefaultEntryUnit: false },
+        { unitCode: "LB", conversionFactor: 1, requiresActualMeasurement: false, isDefaultEntryUnit: true },
+      ],
+    },
+    {
+      // Case e: VOLUME item, to exercise the third tracking basis end to end.
+      name: `${DEV}Cooking Oil`,
+      categoryName: `${DEV}Dry Goods`,
+      baseUnitCode: "GAL",
+      units: [{ unitCode: "GAL", conversionFactor: 1, requiresActualMeasurement: false, isDefaultEntryUnit: true }],
     },
   ];
   for (const spec of itemSpecs) {
@@ -456,14 +486,14 @@ async function main(): Promise<void> {
   await ensureControlRule(
     supabase,
     organizationId,
-    itemIdByName.get(`${DEV}Chicken Thigh (Variable Weight)`)!,
+    itemIdByName.get(`${DEV}Chicken Thigh`)!,
     stationIdByName.get(`${DEV}Grill Station`)!,
     5
   );
   // High threshold default rule -- a normal demo entry should not trip this.
-  await ensureControlRule(supabase, organizationId, itemIdByName.get(`${DEV}Eggs (Box of 360)`)!, null, 1000);
-  // Napkins/Ketchup/Rice intentionally get no rule: demonstrates "no
-  // configured rule -> no check possible."
+  await ensureControlRule(supabase, organizationId, itemIdByName.get(`${DEV}Eggs`)!, null, 1000);
+  // Napkins/Ketchup/Rice/Cooking Oil intentionally get no rule: demonstrates
+  // "no configured rule -> no check possible."
 
   console.log("Seeding roles reference...");
   const { data: roles, error: rolesError } = await supabase.from("roles").select("id, name");

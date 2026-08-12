@@ -13,7 +13,7 @@ const DIGIT_ROWS = [
 ];
 
 const KEY_CLASSES =
-  "aspect-square rounded-2xl bg-zinc-800 text-3xl font-medium text-zinc-50 transition active:bg-zinc-700 disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400";
+  "aspect-square rounded-2xl bg-kiosk-surface-raised text-3xl font-medium text-kiosk-text transition active:bg-kiosk-border-strong disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber";
 
 /** PIN-only: fixed-length digit taps, no decimal point, no backspace-heavy
  * editing -- distinct from QuantityKeypad's decimal-capable input. */
@@ -30,7 +30,7 @@ export function NumericKeypad({ onDigit, onDelete, disabled }: NumericKeypadProp
         disabled={disabled}
         onClick={onDelete}
         aria-label="Delete last digit"
-        className="aspect-square rounded-2xl bg-zinc-900 text-lg font-medium text-zinc-400 transition active:bg-zinc-800 disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400"
+        className="aspect-square rounded-2xl bg-kiosk-surface text-lg font-medium text-kiosk-text-muted transition active:bg-kiosk-surface-raised disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber"
       >
         Del
       </button>

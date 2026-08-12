@@ -15,6 +15,7 @@ function pinVerifiedState(overrides: Partial<KioskState> = {}): KioskState {
     type: "PIN_VERIFIED",
     kioskToken: "token-1",
     employeeDisplayName: "Maria G.",
+    employeeFirstName: "Maria",
     stationConfig: STATION_CONFIG,
     nextStep: "station_resolving",
     autoSelectedStationId: "station-1",
@@ -34,30 +35,88 @@ describe("kioskReducer", () => {
     expect(state.sessionStartedAtClient).not.toBeNull();
   });
 
-  it("UNIT_CHANGED resets enteredQuantity and measuredBaseQuantity so a stale number can never carry across a unit switch", () => {
+  it("WITHDRAWAL_UNIT_LOADED populates the item's canonical withdrawal unit and resets enteredQuantity", () => {
     let state = pinVerifiedState();
-    state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "2" });
-    state = kioskReducer(state, { type: "MEASURED_QUANTITY_CHANGED", value: "43.6" });
-    expect(state.enteredQuantity).toBe("2");
-    expect(state.measuredBaseQuantity).toBe("43.6");
-
-    state = kioskReducer(state, { type: "UNIT_CHANGED", unitId: "unit-2" });
-    expect(state.selectedUnitId).toBe("unit-2");
+    state = kioskReducer(state, {
+      type: "ITEM_SELECTED",
+      item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat" },
+    });
+    state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" } });
+    expect(state.withdrawalUnit).toEqual({ baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" });
     expect(state.enteredQuantity).toBe("");
-    expect(state.measuredBaseQuantity).toBeNull();
   });
 
-  it("ITEM_SELECTED clears any previously loaded units/quantity for the prior item", () => {
+  it("WITHDRAWAL_UNIT_UNAVAILABLE stays on quantity_entry with a compact inline flag -- it does not bounce back to item_select or set the disruptive errorBanner", () => {
+    // Covers "improperly configured items cannot cause the current
+    // disruptive selection flow": the old behavior dispatched
+    // BACK_TO_ITEMS with an errorBanner message, which rendered a large
+    // ErrorState banner on a different screen. The employee should stay
+    // right where they are, with just the compact flag set.
+    let state = pinVerifiedState();
+    state = kioskReducer(state, {
+      type: "ITEM_SELECTED",
+      item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat" },
+    });
+    state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_UNAVAILABLE" });
+
+    expect(state.step).toBe("quantity_entry");
+    expect(state.withdrawalUnitUnavailable).toBe(true);
+    expect(state.withdrawalUnit).toBeNull();
+    expect(state.errorBanner).toBeNull();
+    expect(state.selectedItem).toEqual({ id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat" });
+  });
+
+  it("ITEM_SELECTED and BACK_TO_ITEMS clear withdrawalUnitUnavailable, so a fresh item selection re-attempts the fetch", () => {
+    let state = pinVerifiedState();
+    state = kioskReducer(state, {
+      type: "ITEM_SELECTED",
+      item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat" },
+    });
+    state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_UNAVAILABLE" });
+    expect(state.withdrawalUnitUnavailable).toBe(true);
+
+    const backToItems = kioskReducer(state, { type: "BACK_TO_ITEMS" });
+    expect(backToItems.withdrawalUnitUnavailable).toBe(false);
+
+    const reselected = kioskReducer(state, {
+      type: "ITEM_SELECTED",
+      item: { id: "item-2", name: "Eggs", categoryId: "cat-2", categoryName: "Dairy" },
+    });
+    expect(reselected.withdrawalUnitUnavailable).toBe(false);
+  });
+
+  it("QUANTITY_CHANGED updates only enteredQuantity -- no other field is perturbed by typing", () => {
+    // The state-level analog of "values change, controls don't move": there
+    // is no layout/UI-shape field anywhere in KioskState for typing a digit
+    // to touch, so this asserts every other field is referentially/value
+    // identical before and after.
     let state = pinVerifiedState();
     state = kioskReducer(state, {
       type: "ITEM_SELECTED",
       item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat" },
     });
     state = kioskReducer(state, {
-      type: "ITEM_UNITS_LOADED",
-      units: [{ unitId: "unit-1", unitCode: "BOX", unitName: "Box", conversionFactor: null, requiresActualMeasurement: true, isDefaultEntryUnit: true }],
-      defaultUnitId: "unit-1",
-      baseUnitName: "Pound",
+      type: "WITHDRAWAL_UNIT_LOADED",
+      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
+    });
+    const before = state;
+    const after = kioskReducer(before, { type: "QUANTITY_CHANGED", value: "43.6" });
+
+    expect(after.enteredQuantity).toBe("43.6");
+    // Every other field must be untouched: overwriting enteredQuantity back
+    // to its pre-change value should make `after` deep-equal `before`.
+    expect({ ...after, enteredQuantity: before.enteredQuantity }).toEqual(before);
+  });
+
+  it("ITEM_SELECTED clears any previously loaded withdrawal unit/quantity for the prior item", () => {
+    let state = pinVerifiedState();
+    state = kioskReducer(state, {
+      type: "ITEM_SELECTED",
+      item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat" },
+    });
+    state = kioskReducer(state, {
+      type: "WITHDRAWAL_UNIT_LOADED",
+      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
     });
     state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "2" });
 
@@ -65,9 +124,7 @@ describe("kioskReducer", () => {
       type: "ITEM_SELECTED",
       item: { id: "item-2", name: "Eggs", categoryId: "cat-2", categoryName: "Dairy" },
     });
-    expect(state.itemUnits).toBeNull();
-    expect(state.baseUnitName).toBeNull();
-    expect(state.selectedUnitId).toBeNull();
+    expect(state.withdrawalUnit).toBeNull();
     expect(state.enteredQuantity).toBe("");
     expect(state.step).toBe("quantity_entry");
   });
@@ -97,17 +154,35 @@ describe("kioskReducer", () => {
     expect(state.step).toBe("quantity_entry");
   });
 
-  it("SUBMIT_SUCCESS clears clientRequestId and moves to the success step", () => {
+  it("SUBMIT_SUCCESS clears employee/station identity completely, not just the visible screen, and moves to the success step", () => {
     let state = pinVerifiedState({ step: "review" });
+    state = kioskReducer(state, {
+      type: "WITHDRAWAL_UNIT_LOADED",
+      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
+    });
     state = kioskReducer(state, { type: "SUBMIT_ATTEMPT_STARTED", clientRequestId: "req-1" });
     state = kioskReducer(state, { type: "SUBMIT_SUCCESS" });
-    expect(state.clientRequestId).toBeNull();
+
     expect(state.step).toBe("success");
     expect(state.submitting).toBe(false);
+    expect(state.clientRequestId).toBeNull();
+    expect(state.kioskToken).toBeNull();
+    expect(state.employeeDisplayName).toBeNull();
+    expect(state.employeeFirstName).toBeNull();
+    expect(state.stationConfig).toBeNull();
+    expect(state.selectedStationId).toBeNull();
+    expect(state.selectedStationName).toBeNull();
+    expect(state.selectedItem).toBeNull();
+    expect(state.withdrawalUnit).toBeNull();
+    expect(state.enteredQuantity).toBe("");
   });
 
   it("START_OVER fully resets every field back to the initial state shape", () => {
     let state = pinVerifiedState({ step: "review" });
+    state = kioskReducer(state, {
+      type: "WITHDRAWAL_UNIT_LOADED",
+      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
+    });
     state = kioskReducer(state, { type: "SUBMIT_ATTEMPT_STARTED", clientRequestId: "req-1" });
     state = kioskReducer(state, { type: "START_OVER" });
 
@@ -115,21 +190,31 @@ describe("kioskReducer", () => {
     expect(state.step).toBe(fresh.step);
     expect(state.kioskToken).toBeNull();
     expect(state.employeeDisplayName).toBeNull();
+    expect(state.employeeFirstName).toBeNull();
     expect(state.stationConfig).toBeNull();
     expect(state.selectedStationId).toBeNull();
+    expect(state.selectedStationName).toBeNull();
     expect(state.selectedItem).toBeNull();
+    expect(state.withdrawalUnit).toBeNull();
     expect(state.clientRequestId).toBeNull();
     expect(state.errorBanner).toBeNull();
   });
 
   it("SESSION_EXPIRED fully resets state (identity must disappear, not just the visible screen) and sets a banner", () => {
     let state = pinVerifiedState({ step: "quantity_entry" });
+    state = kioskReducer(state, {
+      type: "WITHDRAWAL_UNIT_LOADED",
+      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
+    });
     state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "5" });
     state = kioskReducer(state, { type: "SESSION_EXPIRED" });
 
     expect(state.step).toBe("pin");
     expect(state.kioskToken).toBeNull();
     expect(state.employeeDisplayName).toBeNull();
+    expect(state.employeeFirstName).toBeNull();
+    expect(state.selectedStationName).toBeNull();
+    expect(state.withdrawalUnit).toBeNull();
     expect(state.enteredQuantity).toBe("");
     expect(state.errorBanner?.message).toMatch(/session expired/i);
   });
