@@ -1,15 +1,18 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { mapPurchaseDocumentRpcError } from "@/app/lib/purchaseDocuments/errors";
-import type { PurchaseDocumentHeaderDraft } from "@/app/lib/purchaseDocuments/types";
-import type { NormalizedInvoiceLine } from "@/app/lib/ai/tasks/invoiceExtraction/types";
+import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine } from "@/app/lib/purchaseDocuments/types";
 
 /**
  * Typed wrapper around save_purchase_document_draft. Preparer-only, and
  * requires status='DRAFT' plus a matching version (optimistic concurrency)
  * -- throws NotPreparerError or StaleVersionError respectively. Replaces
- * the entire line set on every call (see the migration's own comment on
- * why line UUIDs aren't stable across saves).
+ * the entire purchase_document_lines row set on every call (the row `id`
+ * PK is not stable across saves), but preserves each line's `lineKey`
+ * verbatim -- that's the identity that survives across saves, used for
+ * diffing (see save_purchase_document_review_corrections/verify_purchase_
+ * document, both of which correlate lines by lineKey, never row id or
+ * array position).
  */
 
 export interface SavePurchaseDocumentDraftInput {
@@ -18,7 +21,7 @@ export interface SavePurchaseDocumentDraftInput {
   appUserId: string;
   expectedVersion: number;
   header: PurchaseDocumentHeaderDraft;
-  lines: NormalizedInvoiceLine[];
+  lines: PurchaseDocumentLine[];
 }
 
 export interface SavePurchaseDocumentDraftResult {

@@ -7,6 +7,10 @@ import { savePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/savePu
 import { submitPurchaseDocumentForVerificationRpc } from "@/app/lib/purchaseDocuments/submitPurchaseDocumentForVerificationRpc";
 import { verifyPurchaseDocumentRpc } from "@/app/lib/purchaseDocuments/verifyPurchaseDocumentRpc";
 import { returnPurchaseDocumentToDraftRpc } from "@/app/lib/purchaseDocuments/returnPurchaseDocumentToDraftRpc";
+import { saveReviewCorrectionsRpc } from "@/app/lib/purchaseDocuments/saveReviewCorrectionsRpc";
+import { initiateAmendmentRpc } from "@/app/lib/purchaseDocuments/initiateAmendmentRpc";
+import { discardPurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/discardPurchaseDocumentDraftRpc";
+import { withdrawPurchaseDocumentSubmissionRpc } from "@/app/lib/purchaseDocuments/withdrawPurchaseDocumentSubmissionRpc";
 import {
   findPossibleDuplicatePurchaseDocuments,
   type PossibleDuplicatePurchaseDocument,
@@ -18,8 +22,7 @@ import {
   VerifiedLockedError,
   VendorNotActiveError,
 } from "@/app/lib/purchaseDocuments/errors";
-import type { PurchaseDocumentHeaderDraft, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
-import type { NormalizedInvoiceLine } from "@/app/lib/ai/tasks/invoiceExtraction/types";
+import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 
 /** Manager-facing only -- never the raw RPC error text. */
 function safeMessage(err: unknown): string {
@@ -71,7 +74,7 @@ export interface SavePurchaseDocumentDraftActionInput {
   purchaseDocumentId: string;
   expectedVersion: number;
   header: PurchaseDocumentHeaderDraft;
-  lines: NormalizedInvoiceLine[];
+  lines: PurchaseDocumentLine[];
 }
 
 export type SavePurchaseDocumentDraftActionResult =
@@ -106,10 +109,15 @@ export type SubmitPurchaseDocumentForVerificationResult =
 
 /** Preparer-only. Completeness gates (vendor active, type resolved, >=1
  * line) are enforced by the RPC -- the UI should pre-check the same
- * conditions so this failure path is rare, not the primary signal. */
+ * conditions so this failure path is rare, not the primary signal.
+ * `header`/`lines` should always be the exact current on-screen form
+ * state -- the RPC persists them atomically with the transition, so the
+ * caller never needs a separate Save Draft click first. */
 export async function submitPurchaseDocumentForVerification(
   purchaseDocumentId: string,
-  expectedVersion: number
+  expectedVersion: number,
+  header?: PurchaseDocumentHeaderDraft,
+  lines?: PurchaseDocumentLine[]
 ): Promise<SubmitPurchaseDocumentForVerificationResult> {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) {
@@ -122,6 +130,8 @@ export async function submitPurchaseDocumentForVerification(
       organizationId: auth.manager.organizationId,
       appUserId: auth.manager.appUserId,
       expectedVersion,
+      header,
+      lines,
     });
     return { ok: true, status: result.status, version: result.version };
   } catch (err) {
@@ -138,8 +148,17 @@ export type VerifyPurchaseDocumentResult =
   | { ok: false; reason: FailureReason; message: string };
 
 /** Non-preparer-only: rejected with "cannot_self_verify" if the caller
- * uploaded the source document, regardless of admin status. */
-export async function verifyPurchaseDocument(purchaseDocumentId: string, expectedVersion: number): Promise<VerifyPurchaseDocumentResult> {
+ * uploaded the source document, regardless of admin status. `header`/
+ * `lines` should always be the reviewer's exact current on-screen form
+ * state -- the RPC persists any unsaved edits atomically with the
+ * verification, so the caller never needs a separate Save Corrections
+ * click first. */
+export async function verifyPurchaseDocument(
+  purchaseDocumentId: string,
+  expectedVersion: number,
+  header?: PurchaseDocumentHeaderDraft,
+  lines?: PurchaseDocumentLine[]
+): Promise<VerifyPurchaseDocumentResult> {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) {
     return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -151,6 +170,8 @@ export async function verifyPurchaseDocument(purchaseDocumentId: string, expecte
       organizationId: auth.manager.organizationId,
       appUserId: auth.manager.appUserId,
       expectedVersion,
+      header,
+      lines,
     });
     return { ok: true, verifiedAt: result.verifiedAt };
   } catch (err) {
@@ -189,6 +210,7 @@ export async function returnPurchaseDocumentToDraft(
 
 export interface CheckPurchaseDocumentDuplicatesInput {
   purchaseDocumentId: string;
+  revisionGroupId?: string;
   vendorId: string | null;
   documentType: PurchaseDocumentType | null;
   documentNumber: string | null;
@@ -214,6 +236,145 @@ export async function checkPurchaseDocumentDuplicates(
     documentType: input.documentType,
     documentNumber: input.documentNumber,
     excludePurchaseDocumentId: input.purchaseDocumentId,
+    excludeRevisionGroupId: input.revisionGroupId,
   });
   return { ok: true, duplicates };
+}
+
+export interface SaveReviewCorrectionsActionInput {
+  purchaseDocumentId: string;
+  expectedVersion: number;
+  header: PurchaseDocumentHeaderDraft;
+  lines: PurchaseDocumentLine[];
+}
+
+export type SaveReviewCorrectionsActionResult =
+  | { ok: true; version: number }
+  | { ok: false; reason: FailureReason; message: string };
+
+/** Non-preparer-only: the independent verifier's controlled write path for
+ * READY_FOR_VERIFICATION. Writes its own exactly-attributed audit event
+ * server-side (see the RPC) -- this action has no diff logic itself. */
+export async function saveReviewCorrections(input: SaveReviewCorrectionsActionInput): Promise<SaveReviewCorrectionsActionResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  try {
+    const result = await saveReviewCorrectionsRpc(getServiceRoleClient(), {
+      purchaseDocumentId: input.purchaseDocumentId,
+      organizationId: auth.manager.organizationId,
+      appUserId: auth.manager.appUserId,
+      expectedVersion: input.expectedVersion,
+      header: input.header,
+      lines: input.lines,
+    });
+    return { ok: true, version: result.version };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: reasonFor(err),
+      message: err instanceof CannotSelfVerifyError ? "You prepared this document and cannot review-correct your own submission." : safeMessage(err),
+    };
+  }
+}
+
+export type InitiateAmendmentResult =
+  | { ok: true; purchaseDocumentId: string; revisionNumber: number }
+  | { ok: false; reason: FailureReason; message: string };
+
+/** Any manager/admin may initiate -- the resulting revision's own
+ * created_by_app_user_id (the initiator) is what maker-checker enforces
+ * against from here on, exactly like an original draft's uploader. Only
+ * the CURRENT verified revision may be amended; a superseded one is
+ * rejected. */
+export async function initiatePurchaseDocumentAmendment(
+  purchaseDocumentId: string,
+  reason: string
+): Promise<InitiateAmendmentResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  try {
+    const result = await initiateAmendmentRpc(getServiceRoleClient(), {
+      purchaseDocumentId,
+      organizationId: auth.manager.organizationId,
+      appUserId: auth.manager.appUserId,
+      reason,
+    });
+    return { ok: true, purchaseDocumentId: result.purchaseDocumentId, revisionNumber: result.revisionNumber };
+  } catch (err) {
+    return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
+  }
+}
+
+export type DiscardPurchaseDocumentDraftResult =
+  | { ok: true; status: PurchaseDocumentStatus; version: number }
+  | { ok: false; reason: FailureReason; message: string };
+
+/** Preparer-only, DRAFT-only -- a READY_FOR_VERIFICATION submission must
+ * be withdrawn first (see withdrawPurchaseDocumentSubmission below), and a
+ * VERIFIED record can never be discarded. `reason` is required by the RPC
+ * for an amendment (revision_number > 1), optional for an original,
+ * never-submitted draft -- the UI should pre-check the same condition so
+ * this rejection is rare, not the primary signal. */
+export async function discardPurchaseDocumentDraft(
+  purchaseDocumentId: string,
+  expectedVersion: number,
+  reason?: string
+): Promise<DiscardPurchaseDocumentDraftResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  try {
+    const result = await discardPurchaseDocumentDraftRpc(getServiceRoleClient(), {
+      purchaseDocumentId,
+      organizationId: auth.manager.organizationId,
+      appUserId: auth.manager.appUserId,
+      expectedVersion,
+      reason,
+    });
+    return { ok: true, status: result.status, version: result.version };
+  } catch (err) {
+    return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
+  }
+}
+
+export type WithdrawPurchaseDocumentSubmissionResult =
+  | { ok: true; status: PurchaseDocumentStatus; version: number }
+  | { ok: false; reason: FailureReason; message: string };
+
+/** Preparer-only -- the opposite identity check from verify/return, since
+ * only the person who submitted a document may pull it back. Restores the
+ * latest submitted snapshot exactly like Return-to-Preparer, so any
+ * reviewer corrections saved during this cycle are discarded (they remain
+ * in permanent audit history, just never silently become the restored
+ * draft). */
+export async function withdrawPurchaseDocumentSubmission(
+  purchaseDocumentId: string,
+  expectedVersion: number,
+  reason?: string
+): Promise<WithdrawPurchaseDocumentSubmissionResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  try {
+    const result = await withdrawPurchaseDocumentSubmissionRpc(getServiceRoleClient(), {
+      purchaseDocumentId,
+      organizationId: auth.manager.organizationId,
+      appUserId: auth.manager.appUserId,
+      expectedVersion,
+      reason,
+    });
+    return { ok: true, status: result.status, version: result.version };
+  } catch (err) {
+    return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
+  }
 }

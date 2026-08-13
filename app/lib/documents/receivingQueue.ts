@@ -37,6 +37,25 @@ export interface ReceivingQueueItem {
   originalDocumentType: PurchaseDocumentType | null;
   verifiedByName: string | null;
   status: ReceivingItemStatus;
+  /** The EFFECTIVE workflow revision's own number -- open (DRAFT/READY)
+   * revision if one exists, else the current verified revision. Never to
+   * be confused with currentVerifiedRevisionNumber below. Null when no
+   * purchase_document exists yet. */
+  revisionNumber: number | null;
+  /** The CURRENT VERIFIED revision's number (highest revision_number with
+   * status=VERIFIED in this business document's revision group) --
+   * authoritative business truth, independent of whatever the effective
+   * workflow revision happens to be. Null if nothing has ever been
+   * verified yet. Differs from revisionNumber exactly when an amendment
+   * is in progress (effective = the open draft/ready amendment,
+   * current-verified = the still-authoritative prior revision). */
+  currentVerifiedRevisionNumber: number | null;
+  /** True only when the effective revision is itself an in-progress
+   * amendment (revisionNumber > 1 and status is DRAFT or
+   * READY_FOR_VERIFICATION) -- drives the "AMENDMENT DRAFT/READY · REV N"
+   * badge. A first-time draft/ready document (no prior verified revision)
+   * is never an amendment. */
+  isAmendmentInProgress: boolean;
 }
 
 interface EmployeeNameRow {
@@ -67,6 +86,8 @@ interface SearchReceivingQueueRow {
   out_document_date: string | null;
   out_status: ReceivingItemStatus;
   out_verified_by_app_user_id: string | null;
+  out_revision_number: number | null;
+  out_current_verified_revision_number: number | null;
 }
 
 /**
@@ -153,6 +174,13 @@ export async function getReceivingQueue(organizationId: string, filters: Receivi
           : null,
       verifiedByName: row.out_verified_by_app_user_id ? (nameByAppUserId.get(row.out_verified_by_app_user_id) ?? null) : null,
       status: row.out_status,
+      revisionNumber: row.out_revision_number,
+      currentVerifiedRevisionNumber: row.out_current_verified_revision_number,
+      isAmendmentInProgress:
+        row.out_status !== "VERIFIED" &&
+        row.out_revision_number !== null &&
+        row.out_revision_number > 1 &&
+        row.out_current_verified_revision_number !== null,
     };
   });
 }

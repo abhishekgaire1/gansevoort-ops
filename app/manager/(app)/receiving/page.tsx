@@ -27,6 +27,11 @@ const STATUS_LABEL: Record<ReceivingItemStatus, string> = {
   DRAFT: "Draft",
   READY_FOR_VERIFICATION: "Ready for Verification",
   VERIFIED: "Verified",
+  // Unreachable in practice -- search_receiving_queue never returns a
+  // DISCARDED row (or a document whose only revision was discarded), see
+  // 20260811100033. Kept only so this Record stays exhaustive over
+  // ReceivingItemStatus.
+  DISCARDED: "Discarded",
 };
 
 const STATUS_CLASS: Record<ReceivingItemStatus, string> = {
@@ -37,6 +42,7 @@ const STATUS_CLASS: Record<ReceivingItemStatus, string> = {
   DRAFT: "text-sky-400",
   READY_FOR_VERIFICATION: "text-amber-400",
   VERIFIED: "text-emerald-400",
+  DISCARDED: "text-zinc-600",
 };
 
 const DOCUMENT_TYPE_OPTIONS: PurchaseDocumentType[] = ["INVOICE", "RECEIPT", "CREDIT_MEMO"];
@@ -110,7 +116,12 @@ export default async function ReceivingQueuePage({
           name="status"
           label="Status"
           defaultValue={filters.status}
-          options={Object.entries(STATUS_LABEL).map(([value, label]) => ({ value, label }))}
+          // DISCARDED is deliberately excluded -- it's not a normal status
+          // filter value in this milestone (see 20260811100033); discarded
+          // records are hidden from the queue outright, not filterable.
+          options={Object.entries(STATUS_LABEL)
+            .filter(([value]) => value !== "DISCARDED")
+            .map(([value, label]) => ({ value, label }))}
         />
         <FilterSelect
           name="documentType"
@@ -186,8 +197,16 @@ export default async function ReceivingQueuePage({
                     </p>
                   ) : null}
                 </div>
-                <span className={`shrink-0 text-xs font-semibold uppercase tracking-wide ${STATUS_CLASS[item.status]}`}>
-                  {STATUS_LABEL[item.status]}
+                <span className="flex shrink-0 flex-col items-end gap-0.5">
+                  <span className={`text-xs font-semibold uppercase tracking-wide ${STATUS_CLASS[item.status]}`}>
+                    {item.isAmendmentInProgress ? `AMENDMENT ${STATUS_LABEL[item.status].toUpperCase()} · REV ${item.revisionNumber}` : STATUS_LABEL[item.status]}
+                    {!item.isAmendmentInProgress && item.status === "VERIFIED" && item.revisionNumber && item.revisionNumber > 1
+                      ? ` · REV ${item.revisionNumber} · CURRENT`
+                      : ""}
+                  </span>
+                  {item.isAmendmentInProgress && item.currentVerifiedRevisionNumber ? (
+                    <span className="text-[10px] text-zinc-500">Current verified: Rev {item.currentVerifiedRevisionNumber}</span>
+                  ) : null}
                 </span>
               </Link>
             );

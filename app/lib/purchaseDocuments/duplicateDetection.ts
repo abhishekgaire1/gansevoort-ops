@@ -12,9 +12,11 @@ import type { PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/pur
  * key, generic across INVOICE/RECEIPT/CREDIT_MEMO because document_type is
  * itself part of the key: an INVOICE #123 from Vendor A never collides with
  * a RECEIPT #123 from Vendor A, or an INVOICE #123 from Vendor B, without
- * any type-specific branching. Matches purchase_documents at any lifecycle
- * status (DRAFT/READY_FOR_VERIFICATION/VERIFIED) -- a duplicate already in
- * someone else's draft is just as worth surfacing as a verified one.
+ * any type-specific branching. Matches purchase_documents at any active
+ * lifecycle status (DRAFT/READY_FOR_VERIFICATION/VERIFIED) -- a duplicate
+ * already in someone else's draft is just as worth surfacing as a verified
+ * one -- but never a DISCARDED row: an accidental draft the preparer
+ * already discarded must not keep warning users about it forever.
  */
 
 export interface PossibleDuplicatePurchaseDocument {
@@ -32,6 +34,13 @@ export interface FindPossibleDuplicatesInput {
   /** Excluded from its own duplicate results -- omit when checking a draft
    * that doesn't have a purchase_document row yet. */
   excludePurchaseDocumentId?: string;
+  /** Every revision sharing this group is excluded, not just the single
+   * row identified by excludePurchaseDocumentId -- an amendment
+   * intentionally carries the same (vendor, type, number) as the revision
+   * it supersedes, and must never be flagged as a duplicate of its own
+   * revision family. Omit when checking a draft that doesn't have a
+   * purchase_document row (and therefore no revision_group_id) yet. */
+  excludeRevisionGroupId?: string;
 }
 
 const REAL_DOCUMENT_TYPES: PurchaseDocumentType[] = ["INVOICE", "RECEIPT", "CREDIT_MEMO"];
@@ -65,10 +74,16 @@ export async function findPossibleDuplicatePurchaseDocuments(
     .eq("vendor_id", input.vendorId as string)
     .eq("document_type", input.documentType as string)
     .eq("document_number", (input.documentNumber as string).trim())
+    // A discarded accidental draft is never a "real" match -- it must not
+    // keep warning users forever. VERIFIED/current legitimate records
+    // still participate normally.
+    .neq("status", "DISCARDED")
     .order("created_at", { ascending: false })
     .limit(10);
 
-  if (input.excludePurchaseDocumentId) {
+  if (input.excludeRevisionGroupId) {
+    query = query.neq("revision_group_id", input.excludeRevisionGroupId);
+  } else if (input.excludePurchaseDocumentId) {
     query = query.neq("id", input.excludePurchaseDocumentId);
   }
 

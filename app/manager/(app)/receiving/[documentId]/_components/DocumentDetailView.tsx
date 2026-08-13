@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { getDocumentViewUrl, getDocumentDownloadUrl } from "@/app/actions/documentAccess";
 import { retryDocumentExtraction } from "@/app/actions/documentExtraction";
 import { createOrOpenPurchaseDocumentDraft } from "@/app/actions/purchaseDocuments";
+import { archiveDocument } from "@/app/actions/documentArchive";
 import { ExtractionPanel } from "@/app/components/invoiceExtraction/ExtractionPanel";
 import { DocumentViewer } from "@/app/components/documents/DocumentViewer";
 import { StatusPoller } from "@/app/components/documents/StatusPoller";
@@ -19,6 +20,10 @@ const PURCHASE_DOCUMENT_BUTTON_LABEL: Record<PurchaseDocumentStatus, string> = {
   DRAFT: "Open Draft",
   READY_FOR_VERIFICATION: "View Submission",
   VERIFIED: "View Verified Document",
+  // Unreachable -- purchaseDocumentStatus is always the non-discarded
+  // "active" revision (see page.tsx's activePurchaseDocument), kept only
+  // for Record exhaustiveness.
+  DISCARDED: "View Discarded Draft",
 };
 
 export interface AttemptView {
@@ -55,6 +60,10 @@ export function DocumentDetailView({
   contentType,
   purchaseDocumentId,
   purchaseDocumentStatus,
+  hasDiscardedRevisionOne,
+  canRemoveUpload,
+  isArchived,
+  isUploader,
   attempts,
 }: {
   documentId: string;
@@ -62,6 +71,17 @@ export function DocumentDetailView({
   contentType: string;
   purchaseDocumentId: string | null;
   purchaseDocumentStatus: PurchaseDocumentStatus | null;
+  /** Revision 1 was discarded -- a new purchase_document can never be
+   * created from this document again (partial unique index), so "Create
+   * Purchase Document Draft" must not be offered even if extraction
+   * otherwise looks NEEDS_REVIEW. */
+  hasDiscardedRevisionOne: boolean;
+  /** Every purchase_document ever created from this upload (if any) is
+   * DISCARDED, and it isn't already archived -- "Remove Upload" may be
+   * offered. */
+  canRemoveUpload: boolean;
+  isArchived: boolean;
+  isUploader: boolean;
   attempts: AttemptView[];
 }) {
   const router = useRouter();
@@ -73,6 +93,10 @@ export function DocumentDetailView({
   const [draftPending, setDraftPending] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
   const [narrowPane, setNarrowPane] = useState<"document" | "extraction">("document");
+  const [showArchiveForm, setShowArchiveForm] = useState(false);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [archivePending, setArchivePending] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
 
   const latest = attempts[0] ?? null;
   const status = deriveDocumentStatus(latest);
@@ -131,8 +155,24 @@ export function DocumentDetailView({
     router.push(`/manager/purchases/${result.purchaseDocumentId}`);
   }
 
+  async function handleArchive() {
+    if (!window.confirm("Remove this upload? This cannot be undone.")) {
+      return;
+    }
+    setArchivePending(true);
+    setArchiveError(null);
+    const result = await archiveDocument(documentId, archiveReason.trim() || undefined);
+    setArchivePending(false);
+    if (!result.ok) {
+      setArchiveError(result.message);
+      return;
+    }
+    router.push("/manager/receiving");
+    router.refresh();
+  }
+
   const canRetry = status === "FAILED" || status === "STALLED";
-  const showDraftButton = Boolean(purchaseDocumentId) || status === "NEEDS_REVIEW";
+  const showDraftButton = Boolean(purchaseDocumentId) || (status === "NEEDS_REVIEW" && !hasDiscardedRevisionOne);
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -185,6 +225,42 @@ export function DocumentDetailView({
       </div>
       {retryError ? <p className="mt-2 text-sm text-red-400">{retryError}</p> : null}
       {draftError ? <p className="mt-2 text-sm text-red-400">{draftError}</p> : null}
+
+      {isArchived ? (
+        <p className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-500">This upload has been removed.</p>
+      ) : isUploader && canRemoveUpload ? (
+        <div className="mt-3">
+          {!showArchiveForm ? (
+            <button type="button" onClick={() => setShowArchiveForm(true)} className="text-xs text-red-400 underline">
+              Remove Upload
+            </button>
+          ) : (
+            <div className="flex flex-col gap-2 rounded-lg border border-red-900 bg-red-950/20 p-3">
+              <input
+                type="text"
+                value={archiveReason}
+                onChange={(event) => setArchiveReason(event.target.value)}
+                placeholder="Reason (optional)"
+                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+              />
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleArchive}
+                  disabled={archivePending}
+                  className="rounded-full border border-red-700 px-4 py-1.5 text-xs font-semibold text-red-300 disabled:opacity-40"
+                >
+                  {archivePending ? "Removing…" : "Confirm Remove Upload"}
+                </button>
+                <button type="button" onClick={() => setShowArchiveForm(false)} className="text-xs text-zinc-400 underline">
+                  Cancel
+                </button>
+              </div>
+              {archiveError ? <p className="text-xs text-red-400">{archiveError}</p> : null}
+            </div>
+          )}
+        </div>
+      ) : null}
 
       <div className="mt-4 flex gap-2 lg:hidden">
         <button

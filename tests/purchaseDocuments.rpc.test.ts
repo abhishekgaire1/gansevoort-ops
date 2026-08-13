@@ -6,11 +6,16 @@ import { savePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/savePu
 import { submitPurchaseDocumentForVerificationRpc } from "@/app/lib/purchaseDocuments/submitPurchaseDocumentForVerificationRpc";
 import { verifyPurchaseDocumentRpc } from "@/app/lib/purchaseDocuments/verifyPurchaseDocumentRpc";
 import { returnPurchaseDocumentToDraftRpc } from "@/app/lib/purchaseDocuments/returnPurchaseDocumentToDraftRpc";
+import { saveReviewCorrectionsRpc } from "@/app/lib/purchaseDocuments/saveReviewCorrectionsRpc";
+import { initiateAmendmentRpc } from "@/app/lib/purchaseDocuments/initiateAmendmentRpc";
+import { discardPurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/discardPurchaseDocumentDraftRpc";
+import { withdrawPurchaseDocumentSubmissionRpc } from "@/app/lib/purchaseDocuments/withdrawPurchaseDocumentSubmissionRpc";
+import { archiveDocumentRpc } from "@/app/lib/documents/archiveDocumentRpc";
 import { NotPreparerError, CannotSelfVerifyError, StaleVersionError } from "@/app/lib/purchaseDocuments/errors";
 import { findPossibleDuplicatePurchaseDocuments } from "@/app/lib/purchaseDocuments/duplicateDetection";
+import { getReceivingQueue } from "@/app/lib/documents/receivingQueue";
 import { setupRpcTestFixtures, setupOtherOrgFixtures, type RpcTestFixtures } from "./testFixtures";
-import type { NormalizedInvoiceLine } from "@/app/lib/ai/tasks/invoiceExtraction/types";
-import type { PurchaseDocumentHeaderDraft, PurchaseDocumentType, PurchaseDocumentStatus } from "@/app/lib/purchaseDocuments/types";
+import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentType, PurchaseDocumentStatus } from "@/app/lib/purchaseDocuments/types";
 
 /**
  * MANUAL / ON-DEMAND ONLY -- not run in CI (`npm test` does not include
@@ -33,7 +38,8 @@ import type { PurchaseDocumentHeaderDraft, PurchaseDocumentType, PurchaseDocumen
 
 let fx: RpcTestFixtures;
 
-const LINE_A: NormalizedInvoiceLine = {
+const LINE_A: PurchaseDocumentLine = {
+  lineKey: null,
   vendorSku: "SKU-A",
   description: "Chicken Thigh",
   packageQuantity: 5,
@@ -230,6 +236,60 @@ async function createReadyForVerificationDocument(): Promise<{ purchaseDocumentI
     expectedVersion: 1,
   });
   return { purchaseDocumentId: draft.purchaseDocumentId, version: submitted.version };
+}
+
+/** Same as createReadyForVerificationDocument, but with a caller-chosen
+ * document number/total and a real client-generated lineKey on the single
+ * line -- the shared starting point for 2A.2.1's review-correction and
+ * amendment tests, which need to control (and later assert on) exact
+ * header/line identity across the submit -> correct -> verify -> amend
+ * chain. */
+async function createReadyForVerificationDocumentWithLine(opts: {
+  documentNumber?: string;
+  total?: number;
+} = {}): Promise<{ purchaseDocumentId: string; version: number; sourceDocumentId: string; lineKey: string; documentNumber: string; total: number }> {
+  const documentNumber = opts.documentNumber ?? `REV-${randomUUID().slice(0, 8)}`;
+  const total = opts.total ?? 134.7;
+  const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+  const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+    documentId,
+    organizationId: fx.organizationId,
+    appUserId: fx.changeableEmployeeAppUserId,
+  });
+  const lineKey = randomUUID();
+  const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+    purchaseDocumentId: draft.purchaseDocumentId,
+    organizationId: fx.organizationId,
+    appUserId: fx.changeableEmployeeAppUserId,
+    expectedVersion: 1,
+    header: { ...HEADER, vendorId: fx.vendorId, documentNumber, total },
+    lines: [{ ...LINE_A, lineKey }],
+  });
+  const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+    purchaseDocumentId: draft.purchaseDocumentId,
+    organizationId: fx.organizationId,
+    appUserId: fx.changeableEmployeeAppUserId,
+    expectedVersion: saved.version,
+  });
+  return { purchaseDocumentId: draft.purchaseDocumentId, version: submitted.version, sourceDocumentId: documentId, lineKey, documentNumber, total };
+}
+
+/** Drives a document all the way to VERIFIED with a known preparer
+ * (changeableEmployee) and verifier (lockedEmployee) and a caller-chosen
+ * document number/total -- the shared starting point for amendment tests. */
+async function createVerifiedRevisionOneDocument(opts: {
+  documentNumber?: string;
+  total?: number;
+} = {}): Promise<{ purchaseDocumentId: string; revisionGroupId: string; sourceDocumentId: string }> {
+  const ready = await createReadyForVerificationDocumentWithLine(opts);
+  await verifyPurchaseDocumentRpc(fx.supabase, {
+    purchaseDocumentId: ready.purchaseDocumentId,
+    organizationId: fx.organizationId,
+    appUserId: fx.lockedEmployeeAppUserId,
+    expectedVersion: ready.version,
+  });
+  const { data: row } = await fx.supabase.from("purchase_documents").select("revision_group_id").eq("id", ready.purchaseDocumentId).single();
+  return { purchaseDocumentId: ready.purchaseDocumentId, revisionGroupId: row!.revision_group_id as string, sourceDocumentId: ready.sourceDocumentId };
 }
 
 const HEADER: PurchaseDocumentHeaderDraft = {
@@ -436,6 +496,236 @@ describe("submit_purchase_document_for_verification", () => {
         expectedVersion: 1,
       })
     ).rejects.toBeInstanceOf(NotPreparerError);
+  });
+});
+
+describe("submit_purchase_document_for_verification: atomic save-and-submit (regression for the browser 'unsaved edits silently discarded' bug)", () => {
+  it("submits the exact current form payload without a prior Save Draft call -- persisted DB values and the SUBMITTED snapshot both reflect it, never the last-saved value", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    // Persist an initial draft with description "OLD" -- simulates the
+    // last explicit Save Draft click.
+    const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId },
+      lines: [{ ...LINE_A, description: "OLD" }],
+    });
+
+    // Client-style: the browser's current form state is "NEW" -- Submit is
+    // clicked WITHOUT a save first. This is the exact shape of the
+    // reported bug: submitPurchaseDocumentForVerificationRpc is called
+    // with the current on-screen payload, never a separate save call.
+    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: saved.version,
+      header: { ...HEADER, vendorId: fx.vendorId },
+      lines: [{ ...LINE_A, description: "NEW" }],
+    });
+    expect(submitted.status).toBe("READY_FOR_VERIFICATION");
+
+    const { data: lines } = await fx.supabase
+      .from("purchase_document_lines")
+      .select("description")
+      .eq("purchase_document_id", draft.purchaseDocumentId);
+    expect(lines).toHaveLength(1);
+    expect(lines![0].description).toBe("NEW"); // never "OLD"
+
+    const { data: submittedEvent } = await fx.supabase
+      .from("audit_events")
+      .select("after_state")
+      .eq("entity_id", draft.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_SUBMITTED")
+      .single();
+    const snapshotLines = (submittedEvent!.after_state as { lines: { description: string }[] }).lines;
+    expect(snapshotLines[0].description).toBe("NEW"); // never "OLD"
+  });
+
+  it("submits multiple simultaneous unsaved changes -- header total, a modified line, an added line, and a removed line -- all in one atomic call", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    const keepKey = randomUUID();
+    const removeKey = randomUUID();
+    const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 100 },
+      lines: [
+        { ...LINE_A, lineKey: keepKey, description: "Kept Item", packageQuantity: 1, unitPrice: 10, lineTotal: 10 },
+        { ...LINE_A, lineKey: removeKey, description: "To Be Removed" },
+      ],
+    });
+
+    const addedKey = randomUUID();
+    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: saved.version,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 250 },
+      lines: [
+        { ...LINE_A, lineKey: keepKey, description: "Kept Item", packageQuantity: 5, unitPrice: 20, lineTotal: 100 },
+        { ...LINE_A, lineKey: addedKey, description: "New Item", packageQuantity: 1, unitPrice: 150, lineTotal: 150 },
+      ],
+    });
+    expect(submitted.status).toBe("READY_FOR_VERIFICATION");
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("total").eq("id", draft.purchaseDocumentId).single();
+    expect(Number(row!.total)).toBe(250);
+
+    const { data: lines } = await fx.supabase
+      .from("purchase_document_lines")
+      .select("line_key, description, package_quantity, unit_price, line_total")
+      .eq("purchase_document_id", draft.purchaseDocumentId);
+    expect(lines).toHaveLength(2);
+    const byKey = new Map(lines!.map((l) => [l.line_key, l]));
+    expect(byKey.get(keepKey)).toMatchObject({ description: "Kept Item", package_quantity: 5, unit_price: 20, line_total: 100 });
+    expect(byKey.get(addedKey)).toMatchObject({ description: "New Item" });
+    expect(byKey.has(removeKey)).toBe(false); // removed line did not survive
+
+    const { data: submittedEvent } = await fx.supabase
+      .from("audit_events")
+      .select("after_state")
+      .eq("entity_id", draft.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_SUBMITTED")
+      .single();
+    const snapshot = submittedEvent!.after_state as { total: string; lines: { line_key: string }[] };
+    expect(Number(snapshot.total)).toBe(250);
+    expect(snapshot.lines.map((l) => l.line_key).sort()).toEqual([addedKey, keepKey].sort());
+  });
+
+  it("preserves a supplied line_key exactly, and rejects duplicate line_key values in the atomic payload", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    const explicitKey = randomUUID();
+
+    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId },
+      lines: [{ ...LINE_A, lineKey: explicitKey }],
+    });
+    expect(submitted.status).toBe("READY_FOR_VERIFICATION");
+
+    const { data: lines } = await fx.supabase.from("purchase_document_lines").select("line_key").eq("purchase_document_id", draft.purchaseDocumentId);
+    expect(lines![0].line_key).toBe(explicitKey);
+
+    const { documentId: documentId2 } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft2 = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId: documentId2,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    const dupeKey = randomUUID();
+    await expect(
+      submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+        purchaseDocumentId: draft2.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.changeableEmployeeAppUserId,
+        expectedVersion: 1,
+        header: { ...HEADER, vendorId: fx.vendorId },
+        lines: [
+          { ...LINE_A, lineKey: dupeKey },
+          { ...LINE_A, lineKey: dupeKey, vendorSku: "SKU-DUPE" },
+        ],
+      })
+    ).rejects.toThrow();
+  });
+
+  it("stale version: a second atomic submit using an outdated expected_version is rejected and never overwrites the first submit's values", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+
+    // "Tab A" submits first, using version 1.
+    const submittedA = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 111 },
+      lines: [{ ...LINE_A, description: "From Tab A" }],
+    });
+    expect(submittedA.status).toBe("READY_FOR_VERIFICATION");
+
+    // "Tab B" never saw Tab A's transition and still attempts to submit
+    // against the original version 1 -- must be rejected, not silently
+    // reapplied on top.
+    await expect(
+      submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+        purchaseDocumentId: draft.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.changeableEmployeeAppUserId,
+        expectedVersion: 1,
+        header: { ...HEADER, vendorId: fx.vendorId, total: 999 },
+        lines: [{ ...LINE_A, description: "From Tab B" }],
+      })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("total, status").eq("id", draft.purchaseDocumentId).single();
+    expect(Number(row!.total)).toBe(111);
+    expect(row!.status).toBe("READY_FOR_VERIFICATION");
+  });
+
+  it("amendment: submitting an edited Rev 2 draft without a prior Save Draft persists the edited values, and Rev 1 remains the current verified revision until Rev 2 is verified", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 300 });
+    const amendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "amendment atomic-submit regression test",
+    });
+
+    // Edited Rev 2 values, submitted directly -- no Save Draft call.
+    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 275 },
+      lines: [{ ...LINE_A, description: "Amended Line" }],
+    });
+    expect(submitted.status).toBe("READY_FOR_VERIFICATION");
+
+    const { data: rev2Row } = await fx.supabase.from("purchase_documents").select("total, status").eq("id", amendment.purchaseDocumentId).single();
+    expect(Number(rev2Row!.total)).toBe(275);
+    expect(rev2Row!.status).toBe("READY_FOR_VERIFICATION");
+
+    const { data: rev2Lines } = await fx.supabase.from("purchase_document_lines").select("description").eq("purchase_document_id", amendment.purchaseDocumentId);
+    expect(rev2Lines![0].description).toBe("Amended Line");
+
+    const { data: rev1Row } = await fx.supabase.from("purchase_documents").select("status, total").eq("id", verified.purchaseDocumentId).single();
+    expect(rev1Row!.status).toBe("VERIFIED"); // untouched
+    expect(Number(rev1Row!.total)).toBe(300); // untouched
+
+    const { data: currentVerifiedId } = await fx.supabase.rpc("current_verified_purchase_document_revision_id", {
+      p_organization_id: fx.organizationId,
+      p_revision_group_id: verified.revisionGroupId,
+    });
+    expect(currentVerifiedId).toBe(verified.purchaseDocumentId); // Rev 1 stays current-verified until Rev 2 is itself verified
   });
 });
 
@@ -907,5 +1197,1324 @@ describe("findPossibleDuplicatePurchaseDocuments -- real DB row-level proof", ()
     expect(statusById.get(draft.purchaseDocumentId)).toBe("DRAFT");
     expect(statusById.get(ready.purchaseDocumentId)).toBe("READY_FOR_VERIFICATION");
     expect(statusById.get(verified.purchaseDocumentId)).toBe("VERIFIED");
+  });
+});
+
+describe("purchase_document_diff (real Postgres) -- regression coverage for the line -> 'value' alias bug fixed in 20260811100030", () => {
+  it("with non-empty old AND new lines, correctly returns a modified line, an added line, and a removed line in one call", async () => {
+    const oldHeader = { vendor_id: fx.vendorId, document_type: "INVOICE", document_number: "839291", document_date: "2026-08-12", po_number: null, delivery_date: null, subtotal: 100, tax: 0, fees: 0, total: 100, currency: "USD" };
+    const newHeader = { ...oldHeader, total: 120 };
+
+    const keyModified = randomUUID();
+    const keyRemoved = randomUUID();
+    const keyAdded = randomUUID();
+
+    const oldLines = [
+      { line_key: keyModified, vendor_sku: "SKU-A", description: "Item A", package_quantity: 1, package_unit: "CS", measured_quantity: null, measured_unit: null, unit_price: 10, price_basis_unit: "CS", line_total: 10 },
+      { line_key: keyRemoved, vendor_sku: "SKU-B", description: "Item B", package_quantity: 1, package_unit: "CS", measured_quantity: null, measured_unit: null, unit_price: 20, price_basis_unit: "CS", line_total: 20 },
+    ];
+    const newLines = [
+      { line_key: keyModified, vendor_sku: "SKU-A", description: "Item A", package_quantity: 1, package_unit: "CS", measured_quantity: null, measured_unit: null, unit_price: 15, price_basis_unit: "CS", line_total: 15 },
+      { line_key: keyAdded, vendor_sku: "SKU-C", description: "Item C", package_quantity: 1, package_unit: "CS", measured_quantity: null, measured_unit: null, unit_price: 5, price_basis_unit: "CS", line_total: 5 },
+    ];
+
+    // This is a direct call to the SQL function itself (not through any
+    // wrapper) -- the exact call shape that raised SQLSTATE 42883
+    // ("operator does not exist: record -> unknown") before the fix,
+    // whenever either lines array was non-empty.
+    const { data, error } = await fx.supabase.rpc("purchase_document_diff", {
+      p_old_header: oldHeader,
+      p_old_lines: oldLines,
+      p_new_header: newHeader,
+      p_new_lines: newLines,
+    });
+    expect(error).toBeNull();
+
+    // Values were passed as plain JS numbers and round-trip through jsonb
+    // as JSON numbers -- never strings.
+    expect(data.headerChanges).toContainEqual({ field: "total", before: 100, after: 120 });
+
+    expect(data.lineChanges).toContainEqual(
+      expect.objectContaining({ lineKey: keyRemoved, kind: "removed" })
+    );
+    expect(data.lineChanges).toContainEqual(
+      expect.objectContaining({ lineKey: keyAdded, kind: "added" })
+    );
+    const modifiedChange = data.lineChanges.find((c: { lineKey: string }) => c.lineKey === keyModified);
+    expect(modifiedChange.kind).toBe("modified");
+    expect(modifiedChange.fields).toContainEqual({ field: "unit_price", before: 10, after: 15 });
+    expect(modifiedChange.fields).toContainEqual({ field: "line_total", before: 10, after: 15 });
+
+    const { data: count, error: countError } = await fx.supabase.rpc("purchase_document_diff_count", { p_diff: data });
+    expect(countError).toBeNull();
+    // 1 header field + 1 removed line + 1 added line + 2 modified fields = 5
+    expect(count).toBe(5);
+  });
+});
+
+describe("save_purchase_document_review_corrections", () => {
+  it("is non-preparer-only: the preparer cannot review-correct their own submission (GA004)", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine();
+    await expect(
+      saveReviewCorrectionsRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.changeableEmployeeAppUserId, // the preparer
+        expectedVersion: ready.version,
+        header: { ...HEADER, vendorId: fx.vendorId, total: 999 },
+        lines: [{ ...LINE_A, lineKey: ready.lineKey }],
+      })
+    ).rejects.toBeInstanceOf(CannotSelfVerifyError);
+  });
+
+  it("rejects a non-READY_FOR_VERIFICATION document (still DRAFT)", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    await expect(
+      saveReviewCorrectionsRpc(fx.supabase, {
+        purchaseDocumentId: draft.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        expectedVersion: 1,
+        header: { ...HEADER, vendorId: fx.vendorId },
+        lines: [LINE_A],
+      })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+  });
+
+  it("rejects a stale expected_version", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine();
+    await expect(
+      saveReviewCorrectionsRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        expectedVersion: 999,
+        header: { ...HEADER, vendorId: fx.vendorId },
+        lines: [{ ...LINE_A, lineKey: ready.lineKey }],
+      })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+  });
+
+  it("rejects duplicate line_key values in the submitted payload", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine();
+    const dupeKey = ready.lineKey;
+    await expect(
+      saveReviewCorrectionsRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        expectedVersion: ready.version,
+        header: { ...HEADER, vendorId: fx.vendorId },
+        lines: [
+          { ...LINE_A, lineKey: dupeKey },
+          { ...LINE_A, lineKey: dupeKey, vendorSku: "SKU-DUPE" },
+        ],
+      })
+    ).rejects.toThrow();
+
+    // save_purchase_document_draft rejects the same payload shape too (the
+    // same validation was added there for consistency).
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    const draftDupeKey = randomUUID();
+    await expect(
+      savePurchaseDocumentDraftRpc(fx.supabase, {
+        purchaseDocumentId: draft.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.changeableEmployeeAppUserId,
+        expectedVersion: 1,
+        header: { ...HEADER, vendorId: fx.vendorId },
+        lines: [
+          { ...LINE_A, lineKey: draftDupeKey },
+          { ...LINE_A, lineKey: draftDupeKey, vendorSku: "SKU-DUPE" },
+        ],
+      })
+    ).rejects.toThrow();
+  });
+
+  it("a save with a real net change writes exactly one attributed PURCHASE_DOCUMENT_REVIEW_CORRECTED event, matching the submission's own audit_events id", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
+
+    const { data: submittedEvent } = await fx.supabase
+      .from("audit_events")
+      .select("id")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_SUBMITTED")
+      .single();
+
+    await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 90 },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey }],
+    });
+
+    const { data: correctedEvents } = await fx.supabase
+      .from("audit_events")
+      .select("actor_app_user_id, after_state")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_REVIEW_CORRECTED");
+    expect(correctedEvents).toHaveLength(1);
+    expect(correctedEvents![0].actor_app_user_id).toBe(fx.lockedEmployeeAppUserId); // the actual saving manager, never inferred
+    const afterState = correctedEvents![0].after_state as { submissionAuditEventId: string; headerChanges: unknown[] };
+    expect(afterState.submissionAuditEventId).toBe(submittedEvent!.id);
+    // Postgres jsonb_build_object on a `numeric` column yields a JSON
+    // number, not a string -- before/after are real numbers here.
+    expect(afterState.headerChanges).toContainEqual({ field: "total", before: 100, after: 90 });
+  });
+
+  it("a save with no real net change writes no REVIEW_CORRECTED event", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
+
+    await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 100 }, // identical to submitted
+      lines: [{ ...LINE_A, lineKey: ready.lineKey }],
+    });
+
+    const { data: correctedEvents } = await fx.supabase
+      .from("audit_events")
+      .select("id")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_REVIEW_CORRECTED");
+    expect(correctedEvents).toHaveLength(0);
+  });
+
+  it("worked example: Manager B $42 -> $40, Manager C $40 -> $42 -- reviewEditCount=2, finalCorrectionCount=0, no verified-with-corrections notification, but both reviewer edits remain in audit history", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 42 });
+
+    const afterB = await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId, // Manager B
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 40 },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey }],
+    });
+
+    const managerC = await ensureThirdManager(); // a third real app_user in the SAME org, distinct from the preparer and Manager B
+
+    await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: managerC, // Manager C
+      expectedVersion: afterB.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 42 }, // back to submitted value
+      lines: [{ ...LINE_A, lineKey: ready.lineKey }],
+    });
+
+    const { data: correctedEvents } = await fx.supabase
+      .from("audit_events")
+      .select("actor_app_user_id")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_REVIEW_CORRECTED");
+    expect(correctedEvents).toHaveLength(2); // both reviewer edits remain, individually attributed
+    expect(correctedEvents!.map((e) => e.actor_app_user_id).sort()).toEqual([fx.lockedEmployeeAppUserId, managerC].sort());
+
+    const { data: current } = await fx.supabase.from("purchase_documents").select("version").eq("id", ready.purchaseDocumentId).single();
+    const verified = await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: current!.version as number,
+    });
+    expect(verified.verifiedAt).toBeTruthy();
+
+    const { data: verifiedEvent } = await fx.supabase
+      .from("audit_events")
+      .select("after_state")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_VERIFIED")
+      .single();
+    const state = verifiedEvent!.after_state as { finalCorrectionCount: number; reviewEditCount: number };
+    expect(state.finalCorrectionCount).toBe(0); // net submitted -> final is unchanged
+    expect(state.reviewEditCount).toBe(2); // both attempts still counted as review activity
+
+    const { data: notifications } = await fx.supabase
+      .from("user_notifications")
+      .select("id")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("type", "PURCHASE_DOCUMENT_VERIFIED_WITH_CORRECTIONS");
+    expect(notifications).toHaveLength(0); // finalCorrectionCount=0 -> no notification, despite reviewEditCount=2
+  });
+});
+
+/** A third, distinct manager app_user in the SAME organization as the rest
+ * of the fixtures -- needed for the B/C worked example above, where two
+ * DIFFERENT reviewers (neither of them the preparer) edit the same
+ * revision in sequence. Idempotent like the rest of testFixtures.ts. */
+async function ensureThirdManager(): Promise<string> {
+  const { data: existing } = await fx.supabase.from("employees").select("id").eq("organization_id", fx.organizationId).eq("employee_code", "TEST-RPC-REVIEWER-C").maybeSingle();
+  let employeeId = existing?.id as string | undefined;
+  if (!employeeId) {
+    const { data: inserted, error } = await fx.supabase
+      .from("employees")
+      .insert({
+        organization_id: fx.organizationId,
+        first_name: "TestReviewerC",
+        last_name: "TestFixture",
+        employee_code: "TEST-RPC-REVIEWER-C",
+        default_station_id: fx.stationId,
+        auto_resolve_station: true,
+        can_change_station: false,
+        status: "active",
+      })
+      .select("id")
+      .single();
+    if (error) throw error;
+    employeeId = inserted.id as string;
+  }
+
+  const { data: existingAppUser } = await fx.supabase.from("app_users").select("id").eq("employee_id", employeeId).maybeSingle();
+  if (existingAppUser) return existingAppUser.id as string;
+
+  const pinPepper = process.env.PIN_PEPPER;
+  if (!pinPepper) throw new Error("PIN_PEPPER is not set");
+  const { hashPinForStorage, hashPinLookup } = await import("@/app/lib/auth/pin");
+  const { data: inserted, error } = await fx.supabase
+    .from("app_users")
+    .insert({
+      organization_id: fx.organizationId,
+      employee_id: employeeId,
+      pin_lookup_hash: hashPinLookup("555555", pinPepper),
+      pin_hash: await hashPinForStorage("555555"),
+      is_active: true,
+    })
+    .select("id")
+    .single();
+  if (error) throw error;
+  return inserted.id as string;
+}
+
+describe("return_purchase_document_to_draft: restores the submitted snapshot, discarding reviewer edits", () => {
+  it("business fields and lines revert to the latest SUBMITTED snapshot, not the reviewer's in-progress edits, and line_key is preserved", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
+
+    const corrected = await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 55, documentNumber: "REVIEWER-EDITED" },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "Reviewer's edit" }],
+    });
+
+    const returned = await returnPurchaseDocumentToDraftRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: corrected.version,
+      reason: "Discarding reviewer changes, restoring submitted",
+    });
+    expect(returned.status).toBe("DRAFT");
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("total, document_number").eq("id", ready.purchaseDocumentId).single();
+    expect(Number(row!.total)).toBe(100); // the ORIGINALLY SUBMITTED value, not the reviewer's 55
+    expect(row!.document_number).not.toBe("REVIEWER-EDITED");
+
+    const { data: lines } = await fx.supabase
+      .from("purchase_document_lines")
+      .select("line_key, description")
+      .eq("purchase_document_id", ready.purchaseDocumentId);
+    expect(lines).toHaveLength(1);
+    expect(lines![0].line_key).toBe(ready.lineKey); // stable line_key preserved through restoration
+    expect(lines![0].description).not.toBe("Reviewer's edit"); // restored to the submitted description
+  });
+});
+
+describe("raw READY_FOR_VERIFICATION mutation still requires a sanctioned RPC (the capability flag is not a blanket loosening)", () => {
+  it("a raw header UPDATE outside either save_purchase_document_review_corrections or return_purchase_document_to_draft is still GA003", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine();
+    const { error } = await fx.supabase.from("purchase_documents").update({ total: 1 }).eq("id", ready.purchaseDocumentId);
+    expect(error?.code).toBe("GA003");
+  });
+
+  it("a raw line INSERT is still GA003", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine();
+    const { error } = await fx.supabase.from("purchase_document_lines").insert({
+      organization_id: fx.organizationId,
+      purchase_document_id: ready.purchaseDocumentId,
+      line_number: 99,
+      description: "sneaky",
+    });
+    expect(error?.code).toBe("GA003");
+  });
+});
+
+describe("initiate_purchase_document_amendment", () => {
+  it("rejects amending a non-VERIFIED document (GA002)", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine();
+    await expect(
+      initiateAmendmentRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        reason: "test",
+      })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+  });
+
+  it("creates a new DRAFT revision sharing revision_group_id, pointing previous_revision_id at the row it amends, with the initiator as its preparer", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 200 });
+
+    const amendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId, // a different manager than the original preparer
+      reason: "Total was transcribed incorrectly",
+    });
+    expect(amendment.revisionNumber).toBe(2);
+
+    const { data: row } = await fx.supabase
+      .from("purchase_documents")
+      .select("status, revision_group_id, previous_revision_id, created_by_app_user_id, total, amendment_reason")
+      .eq("id", amendment.purchaseDocumentId)
+      .single();
+    expect(row!.status).toBe("DRAFT");
+    expect(row!.revision_group_id).toBe(verified.revisionGroupId);
+    expect(row!.previous_revision_id).toBe(verified.purchaseDocumentId);
+    expect(row!.created_by_app_user_id).toBe(fx.lockedEmployeeAppUserId); // preparer = amendment initiator, not the original uploader
+    expect(Number(row!.total)).toBe(200); // copied forward from the revision being amended
+    expect(row!.amendment_reason).toBe("Total was transcribed incorrectly");
+
+    // The new revision's own preparer (lockedEmployee) can now edit it as
+    // an ordinary draft -- generalized created_by_app_user_id identity in
+    // action.
+    const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 175 },
+      lines: [LINE_A],
+    });
+    expect(saved.version).toBe(2);
+  });
+
+  it("currentVerifiedRevision stays Rev 1 while Rev 2 is DRAFT/READY, both via the SQL function and via the receiving queue", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 300 });
+    const amendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "test",
+    });
+
+    const { data: currentVerifiedId } = await fx.supabase.rpc("current_verified_purchase_document_revision_id", {
+      p_organization_id: fx.organizationId,
+      p_revision_group_id: verified.revisionGroupId,
+    });
+    expect(currentVerifiedId).toBe(verified.purchaseDocumentId); // still Rev 1
+
+    const queue = await getReceivingQueue(fx.organizationId);
+    const row = queue.find((q) => q.documentId === verified.sourceDocumentId);
+    expect(row).toBeTruthy();
+    expect(row!.purchaseDocumentId).toBe(amendment.purchaseDocumentId); // effective = the open Rev 2 draft
+    expect(row!.revisionNumber).toBe(2);
+    expect(row!.currentVerifiedRevisionNumber).toBe(1);
+    expect(row!.isAmendmentInProgress).toBe(true);
+    expect(row!.status).toBe("DRAFT");
+
+    // Exactly one queue row exists for this business document, never two.
+    expect(queue.filter((q) => q.documentId === verified.sourceDocumentId)).toHaveLength(1);
+  });
+
+  it("once Rev 2 is itself verified, currentVerifiedRevision becomes Rev 2 and the queue shows it as VERIFIED · CURRENT, not an amendment in progress", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 400 });
+    const amendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "test",
+    });
+    const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 350 },
+      lines: [LINE_A],
+    });
+    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: saved.version,
+    });
+    await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId, // a different manager than Rev 2's own preparer
+      expectedVersion: submitted.version,
+    });
+
+    const { data: currentVerifiedId } = await fx.supabase.rpc("current_verified_purchase_document_revision_id", {
+      p_organization_id: fx.organizationId,
+      p_revision_group_id: verified.revisionGroupId,
+    });
+    expect(currentVerifiedId).toBe(amendment.purchaseDocumentId);
+
+    const queue = await getReceivingQueue(fx.organizationId);
+    const row = queue.find((q) => q.documentId === verified.sourceDocumentId);
+    expect(row!.purchaseDocumentId).toBe(amendment.purchaseDocumentId);
+    expect(row!.status).toBe("VERIFIED");
+    expect(row!.revisionNumber).toBe(2);
+    expect(row!.currentVerifiedRevisionNumber).toBe(2);
+    expect(row!.isAmendmentInProgress).toBe(false);
+  });
+
+  it("two concurrent amendment initiations on the same verified revision -- exactly one succeeds", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 500 });
+
+    const attempt = () =>
+      initiateAmendmentRpc(fx.supabase, {
+        purchaseDocumentId: verified.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        reason: "concurrent attempt",
+      });
+
+    const results = await Promise.allSettled([attempt(), attempt()]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    const { count } = await fx.supabase
+      .from("purchase_documents")
+      .select("id", { count: "exact", head: true })
+      .eq("revision_group_id", verified.revisionGroupId)
+      .neq("id", verified.purchaseDocumentId);
+    expect(count).toBe(1); // only one Rev 2 row was ever created
+  });
+
+  it("a raw insert with a previous_revision_id that mismatches organization/group/source is rejected by the composite FK, not just RPC-level care", async () => {
+    const verifiedA = await createVerifiedRevisionOneDocument({ total: 10 });
+    const verifiedB = await createVerifiedRevisionOneDocument({ total: 20 }); // a different revision family entirely
+
+    const { error } = await fx.supabase.from("purchase_documents").insert({
+      id: randomUUID(),
+      organization_id: fx.organizationId,
+      source_document_id: verifiedA.sourceDocumentId,
+      vendor_id: fx.vendorId,
+      document_type: "INVOICE",
+      status: "DRAFT",
+      created_by_app_user_id: fx.lockedEmployeeAppUserId,
+      revision_group_id: verifiedA.revisionGroupId, // group A ...
+      revision_number: 2,
+      previous_revision_id: verifiedB.purchaseDocumentId, // ... but previous_revision_id points into group B
+    });
+    expect(error).toBeTruthy(); // composite FK violation -- structurally impossible, not merely unvalidated
+  });
+
+  it("duplicate detection ignores siblings in the same revision group (an amendment carrying forward the same vendor/type/number is never its own duplicate)", async () => {
+    const documentNumber = `AMEND-DUP-${randomUUID().slice(0, 8)}`;
+    const verified = await createVerifiedRevisionOneDocument({ documentNumber, total: 60 });
+    const amendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "test",
+    });
+
+    const matches = await findPossibleDuplicatePurchaseDocuments(fx.supabase, {
+      organizationId: fx.organizationId,
+      vendorId: fx.vendorId,
+      documentType: "INVOICE",
+      documentNumber,
+      excludeRevisionGroupId: verified.revisionGroupId,
+    });
+    expect(matches.map((m) => m.purchaseDocumentId)).not.toContain(verified.purchaseDocumentId);
+    expect(matches.map((m) => m.purchaseDocumentId)).not.toContain(amendment.purchaseDocumentId);
+  });
+});
+
+describe("verify_purchase_document: exact submissionAuditEventId cycle grouping across return -> resubmit", () => {
+  it("a REVIEW_CORRECTED event from a returned (discarded) cycle is never aggregated into the resubmitted cycle's reviewEditCount", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
+
+    // Cycle 1: a reviewer makes a correction, then a different manager
+    // returns it to draft (discarding that correction, per return
+    // semantics -- restores the submitted snapshot).
+    const corrected1 = await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 90 },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey }],
+    });
+    const returned = await returnPurchaseDocumentToDraftRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: corrected1.version,
+      reason: "please double check the total",
+    });
+
+    // Preparer resubmits unchanged -- a NEW SUBMITTED event/id.
+    const submitted2 = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: returned.version,
+    });
+
+    // Cycle 2: verify with zero reviewer corrections this time.
+    const verified = await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: submitted2.version,
+    });
+    expect(verified.verifiedAt).toBeTruthy();
+
+    const { data: verifiedEvent } = await fx.supabase
+      .from("audit_events")
+      .select("after_state")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_VERIFIED")
+      .single();
+    const state = verifiedEvent!.after_state as { reviewEditCount: number; submissionAuditEventId: string };
+    expect(state.reviewEditCount).toBe(0); // cycle 1's correction must not leak into cycle 2's count
+    expect(state.submissionAuditEventId).not.toBe(null);
+
+    // Both REVIEW_CORRECTED (cycle 1, discarded) and SUBMITTED (both
+    // cycles) events remain in the permanent audit trail regardless.
+    const { data: allCorrected } = await fx.supabase
+      .from("audit_events")
+      .select("id")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_REVIEW_CORRECTED");
+    expect(allCorrected).toHaveLength(1); // cycle 1's correction is retained as history, just not counted toward cycle 2
+  });
+});
+
+describe("verify_purchase_document: notification recipient deduplication", () => {
+  it("when the original uploader and the previous revision's verifier are the same person, only one PURCHASE_DOCUMENT_AMENDMENT_VERIFIED notification is created for them", async () => {
+    // Rev 1: prepared by changeableEmployee, verified by lockedEmployee.
+    const verified = await createVerifiedRevisionOneDocument({ total: 120 });
+
+    // Amendment (Rev 2) is initiated and verified by lockedEmployee too --
+    // the SAME person as Rev 1's verifier AND (since Rev 2's preparer is
+    // the amendment initiator) not its own preparer, so a different
+    // manager must actually verify it.
+    const amendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "test",
+    });
+    const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 130 },
+      lines: [LINE_A],
+    });
+    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: saved.version,
+    });
+    await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId, // original Rev 1 uploader, distinct from Rev 2's own preparer
+      expectedVersion: submitted.version,
+    });
+
+    const { data: notifications } = await fx.supabase
+      .from("user_notifications")
+      .select("recipient_app_user_id")
+      .eq("entity_id", amendment.purchaseDocumentId)
+      .eq("type", "PURCHASE_DOCUMENT_AMENDMENT_VERIFIED");
+    // Recipients would naively be [uploader=changeableEmployee,
+    // previousVerifier=lockedEmployee] -- both distinct here, so both get
+    // one notification each, never a duplicate for either.
+    expect(notifications!.map((n) => n.recipient_app_user_id).sort()).toEqual(
+      [fx.changeableEmployeeAppUserId, fx.lockedEmployeeAppUserId].sort()
+    );
+    expect(new Set(notifications!.map((n) => n.recipient_app_user_id)).size).toBe(notifications!.length); // no duplicate recipient rows
+  });
+});
+
+describe("verify_purchase_document: atomic save-and-verify (regression for the browser 'unsaved edits silently discarded' bug)", () => {
+  it("reviewer's unsaved local edit is persisted and verified atomically -- VERIFIED reflects the edit, REVIEW_CORRECTED records OLD -> CORRECTED, finalCorrectionCount and the notification both reflect it", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
+    // Confirm the persisted (pre-verify) state really is "OLD" -- the
+    // reviewer's browser never called Save Corrections.
+    const { data: preLine } = await fx.supabase.from("purchase_document_lines").select("description").eq("purchase_document_id", ready.purchaseDocumentId).single();
+    expect(preLine!.description).toBe(LINE_A.description); // still whatever was submitted, not yet corrected
+
+    const verified = await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: ready.total },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "CORRECTED" }],
+    });
+    expect(verified.verifiedAt).toBeTruthy();
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("status").eq("id", ready.purchaseDocumentId).single();
+    expect(row!.status).toBe("VERIFIED");
+
+    const { data: postLine } = await fx.supabase.from("purchase_document_lines").select("description").eq("purchase_document_id", ready.purchaseDocumentId).single();
+    expect(postLine!.description).toBe("CORRECTED"); // never the stale pre-click value
+
+    const { data: correctedEvents } = await fx.supabase
+      .from("audit_events")
+      .select("actor_app_user_id, after_state")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_REVIEW_CORRECTED");
+    expect(correctedEvents).toHaveLength(1);
+    expect(correctedEvents![0].actor_app_user_id).toBe(fx.lockedEmployeeAppUserId); // the actual verifying reviewer
+    const diff = correctedEvents![0].after_state as { lineChanges: { kind: string; fields: { field: string; before: string; after: string }[] }[] };
+    const modified = diff.lineChanges.find((c) => c.kind === "modified")!;
+    expect(modified.fields).toContainEqual({ field: "description", before: LINE_A.description, after: "CORRECTED" });
+
+    const { data: verifiedEvent } = await fx.supabase
+      .from("audit_events")
+      .select("after_state")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_VERIFIED")
+      .single();
+    const state = verifiedEvent!.after_state as { finalCorrectionCount: number; reviewEditCount: number };
+    expect(state.finalCorrectionCount).toBeGreaterThan(0);
+    expect(state.reviewEditCount).toBeGreaterThan(0);
+
+    const { data: notifications } = await fx.supabase
+      .from("user_notifications")
+      .select("id")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("type", "PURCHASE_DOCUMENT_VERIFIED_WITH_CORRECTIONS");
+    expect(notifications!.length).toBeGreaterThan(0);
+  });
+
+  it("reviewer already saved via Save Corrections, then Verify with the identical current payload -- no duplicate REVIEW_CORRECTED event", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
+
+    const corrected = await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: ready.total },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "ALREADY SAVED" }],
+    });
+
+    await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: corrected.version,
+      // Identical to what was just saved -- the UI always sends current
+      // state, which here happens to equal the already-persisted state.
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: ready.total },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "ALREADY SAVED" }],
+    });
+
+    const { data: correctedEvents } = await fx.supabase
+      .from("audit_events")
+      .select("id")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_REVIEW_CORRECTED");
+    expect(correctedEvents).toHaveLength(1); // only the explicit Save Corrections event -- verify added nothing
+  });
+
+  it("stale version: a second atomic verify using an outdated expected_version is rejected and never overwrites the first verify's values", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
+
+    const verified = await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 500 },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "First Verifier" }],
+    });
+    expect(verified.verifiedAt).toBeTruthy();
+
+    // A second, stale attempt against the original (now outdated)
+    // expected_version -- must be rejected, never silently reapplied.
+    await expect(
+      verifyPurchaseDocumentRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        expectedVersion: ready.version,
+        header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 999 },
+        lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "Second Attempt" }],
+      })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("total, status").eq("id", ready.purchaseDocumentId).single();
+    expect(Number(row!.total)).toBe(500);
+    expect(row!.status).toBe("VERIFIED");
+  });
+
+  it("rejects duplicate line_key values in the atomic verify payload", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine();
+    const dupeKey = randomUUID();
+    await expect(
+      verifyPurchaseDocumentRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        expectedVersion: ready.version,
+        header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: ready.total },
+        lines: [
+          { ...LINE_A, lineKey: dupeKey },
+          { ...LINE_A, lineKey: dupeKey, vendorSku: "SKU-DUPE" },
+        ],
+      })
+    ).rejects.toThrow();
+  });
+
+  it("verify still works normally (no header/lines payload) when the reviewer has no unsaved changes", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine();
+    const verified = await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+    });
+    expect(verified.verifiedAt).toBeTruthy();
+  });
+});
+
+describe("atomic submit + return-to-draft + atomic resubmit + verify -- return-flow regression under the new atomic paths", () => {
+  it("return-to-draft snapshot restoration continues to work exactly as designed after an atomic submit, and a subsequent atomic resubmit + verify completes cleanly", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    const lineKey = randomUUID();
+
+    const submittedA = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: "ATOMIC-RETURN-FLOW" },
+      lines: [{ ...LINE_A, lineKey, description: "Submitted Value" }],
+    });
+
+    const returned = await returnPurchaseDocumentToDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: submittedA.version,
+      reason: "please recheck",
+    });
+    expect(returned.status).toBe("DRAFT");
+
+    const { data: restoredRow } = await fx.supabase.from("purchase_documents").select("document_number").eq("id", draft.purchaseDocumentId).single();
+    expect(restoredRow!.document_number).toBe("ATOMIC-RETURN-FLOW"); // restored exactly what was atomically submitted
+
+    const { data: restoredLines } = await fx.supabase.from("purchase_document_lines").select("line_key, description").eq("purchase_document_id", draft.purchaseDocumentId);
+    expect(restoredLines![0].line_key).toBe(lineKey); // stable line_key survives the atomic-submit -> return round trip
+    expect(restoredLines![0].description).toBe("Submitted Value");
+
+    const submittedB = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: returned.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: "ATOMIC-RETURN-FLOW" },
+      lines: [{ ...LINE_A, lineKey, description: "Resubmitted After Return" }],
+    });
+    expect(submittedB.status).toBe("READY_FOR_VERIFICATION");
+
+    const verified = await verifyPurchaseDocumentRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: submittedB.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: "ATOMIC-RETURN-FLOW" },
+      lines: [{ ...LINE_A, lineKey, description: "Resubmitted After Return" }],
+    });
+    expect(verified.verifiedAt).toBeTruthy();
+
+    const { data: finalRow } = await fx.supabase.from("purchase_documents").select("status").eq("id", draft.purchaseDocumentId).single();
+    expect(finalRow!.status).toBe("VERIFIED");
+  });
+});
+
+describe("2A.2.1 RPCs: zero inventory or payment-side effects", () => {
+  it("save_purchase_document_review_corrections, return_purchase_document_to_draft, and initiate_purchase_document_amendment never touch inventory_movements", async () => {
+    const { count: before } = await fx.supabase.from("inventory_movements").select("id", { count: "exact", head: true });
+
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 70 });
+    const corrected = await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, total: 65 },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey }],
+    });
+    await returnPurchaseDocumentToDraftRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: corrected.version,
+    });
+
+    const verified = await createVerifiedRevisionOneDocument({ total: 80 });
+    await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "test",
+    });
+
+    const { count: after } = await fx.supabase.from("inventory_movements").select("id", { count: "exact", head: true });
+    expect(after).toBe(before); // no inventory or payment-side effects from any 2A.2.1 RPC (this milestone has no payment table yet)
+  });
+});
+
+describe("discard_purchase_document_draft", () => {
+  it("the original DRAFT (revision 1) can be discarded without a reason, and disappears from the queue and duplicate detection", async () => {
+    const documentNumber = `DISCARD-REV1-${randomUUID().slice(0, 8)}`;
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber },
+      lines: [LINE_A],
+    });
+
+    // Present in the queue and in duplicate detection before discard.
+    const beforeQueue = await getReceivingQueue(fx.organizationId);
+    expect(beforeQueue.some((q) => q.documentId === documentId)).toBe(true);
+    const beforeDuplicates = await findPossibleDuplicatePurchaseDocuments(fx.supabase, {
+      organizationId: fx.organizationId,
+      vendorId: fx.vendorId,
+      documentType: "INVOICE",
+      documentNumber,
+    });
+    expect(beforeDuplicates.map((d) => d.purchaseDocumentId)).toContain(draft.purchaseDocumentId);
+
+    const discarded = await discardPurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: saved.version,
+    });
+    expect(discarded.status).toBe("DISCARDED");
+
+    const { data: row } = await fx.supabase
+      .from("purchase_documents")
+      .select("status, discarded_by_app_user_id, discarded_at, discard_reason")
+      .eq("id", draft.purchaseDocumentId)
+      .single();
+    expect(row!.status).toBe("DISCARDED");
+    expect(row!.discarded_by_app_user_id).toBe(fx.changeableEmployeeAppUserId);
+    expect(row!.discarded_at).toBeTruthy();
+    expect(row!.discard_reason).toBeNull();
+
+    // Row, lines, and source document are preserved -- never hard-deleted.
+    const { data: lines } = await fx.supabase.from("purchase_document_lines").select("id").eq("purchase_document_id", draft.purchaseDocumentId);
+    expect(lines!.length).toBeGreaterThan(0);
+    const { data: sourceDoc } = await fx.supabase.from("documents").select("id").eq("id", documentId).maybeSingle();
+    expect(sourceDoc).toBeTruthy();
+
+    const { data: auditEvent } = await fx.supabase
+      .from("audit_events")
+      .select("actor_app_user_id, after_state")
+      .eq("entity_id", draft.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_DISCARDED")
+      .single();
+    expect(auditEvent!.actor_app_user_id).toBe(fx.changeableEmployeeAppUserId);
+
+    // Hidden from the queue afterward -- never falls back to a stale
+    // "Needs Review" state.
+    const afterQueue = await getReceivingQueue(fx.organizationId);
+    expect(afterQueue.some((q) => q.documentId === documentId)).toBe(false);
+
+    // Ignored by duplicate detection -- a discarded accidental draft must
+    // not keep warning users forever.
+    const afterDuplicates = await findPossibleDuplicatePurchaseDocuments(fx.supabase, {
+      organizationId: fx.organizationId,
+      vendorId: fx.vendorId,
+      documentType: "INVOICE",
+      documentNumber,
+    });
+    expect(afterDuplicates.map((d) => d.purchaseDocumentId)).not.toContain(draft.purchaseDocumentId);
+  });
+
+  it("a READY_FOR_VERIFICATION document cannot be discarded directly -- it must be withdrawn to DRAFT first", async () => {
+    const ready = await createReadyForVerificationDocument();
+    await expect(
+      discardPurchaseDocumentDraftRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.changeableEmployeeAppUserId,
+        expectedVersion: ready.version,
+      })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("status").eq("id", ready.purchaseDocumentId).single();
+    expect(row!.status).toBe("READY_FOR_VERIFICATION"); // unchanged
+  });
+
+  it("a VERIFIED document can never be discarded", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 40 });
+    await expect(
+      discardPurchaseDocumentDraftRpc(fx.supabase, {
+        purchaseDocumentId: verified.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.changeableEmployeeAppUserId,
+        expectedVersion: 3,
+      })
+    ).rejects.toThrow();
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("status").eq("id", verified.purchaseDocumentId).single();
+    expect(row!.status).toBe("VERIFIED");
+  });
+
+  it("only the preparer may discard their own draft", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    await expect(
+      discardPurchaseDocumentDraftRpc(fx.supabase, {
+        purchaseDocumentId: draft.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        expectedVersion: 1,
+      })
+    ).rejects.toBeInstanceOf(NotPreparerError);
+  });
+
+  it("an amendment (revision > 1) requires a reason to discard", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 90 });
+    const amendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "test amendment",
+    });
+
+    await expect(
+      discardPurchaseDocumentDraftRpc(fx.supabase, {
+        purchaseDocumentId: amendment.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId,
+        expectedVersion: 1,
+      })
+    ).rejects.toThrow();
+
+    const discarded = await discardPurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: 1,
+      reason: "Changed my mind about this correction",
+    });
+    expect(discarded.status).toBe("DISCARDED");
+  });
+
+  it("discarding Rev 2 leaves Rev 1 as the current verified AND effective workflow revision, does not block a new amendment, and the next amendment is Rev 3 (never reusing Rev 2)", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 200 });
+    const amendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "first attempt",
+    });
+    expect(amendment.revisionNumber).toBe(2);
+
+    await discardPurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: amendment.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: 1,
+      reason: "wrong approach",
+    });
+
+    const { data: currentVerifiedId } = await fx.supabase.rpc("current_verified_purchase_document_revision_id", {
+      p_organization_id: fx.organizationId,
+      p_revision_group_id: verified.revisionGroupId,
+    });
+    expect(currentVerifiedId).toBe(verified.purchaseDocumentId); // Rev 1 still current verified
+
+    const queue = await getReceivingQueue(fx.organizationId);
+    const row = queue.find((q) => q.documentId === verified.sourceDocumentId);
+    expect(row).toBeTruthy();
+    expect(row!.purchaseDocumentId).toBe(verified.purchaseDocumentId); // effective workflow revision falls back to Rev 1
+    expect(row!.status).toBe("VERIFIED");
+    expect(row!.revisionNumber).toBe(1);
+    expect(row!.isAmendmentInProgress).toBe(false);
+
+    // A discarded Rev 2 does not block a new amendment attempt.
+    const secondAmendment = await initiateAmendmentRpc(fx.supabase, {
+      purchaseDocumentId: verified.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      reason: "second attempt",
+    });
+    expect(secondAmendment.revisionNumber).toBe(3); // never reuses 2
+
+    const { data: allRevisions } = await fx.supabase
+      .from("purchase_documents")
+      .select("revision_number, status")
+      .eq("revision_group_id", verified.revisionGroupId)
+      .order("revision_number");
+    expect(allRevisions!.map((r) => [r.revision_number, r.status])).toEqual([
+      [1, "VERIFIED"],
+      [2, "DISCARDED"],
+      [3, "DRAFT"],
+    ]);
+  });
+
+  it("discarding never touches inventory_movements", async () => {
+    const { count: before } = await fx.supabase.from("inventory_movements").select("id", { count: "exact", head: true });
+
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    await discardPurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+    });
+
+    const { count: after } = await fx.supabase.from("inventory_movements").select("id", { count: "exact", head: true });
+    expect(after).toBe(before);
+  });
+});
+
+describe("withdraw_purchase_document_submission", () => {
+  it("the uploader/preparer can withdraw their own READY submission back to DRAFT", async () => {
+    const ready = await createReadyForVerificationDocument();
+    const withdrawn = await withdrawPurchaseDocumentSubmissionRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: ready.version,
+      reason: "need to fix a typo",
+    });
+    expect(withdrawn.status).toBe("DRAFT");
+
+    const { data: auditEvent } = await fx.supabase
+      .from("audit_events")
+      .select("actor_app_user_id, after_state")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_SUBMISSION_WITHDRAWN")
+      .single();
+    expect(auditEvent!.actor_app_user_id).toBe(fx.changeableEmployeeAppUserId);
+    expect((auditEvent!.after_state as { reason: string }).reason).toBe("need to fix a typo");
+
+    // The preparer can now freely edit it again, exactly like any DRAFT.
+    const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: withdrawn.version,
+      header: { ...HEADER, vendorId: fx.vendorId },
+      lines: [LINE_A],
+    });
+    expect(saved.version).toBe(withdrawn.version + 1);
+  });
+
+  it("another manager cannot withdraw someone else's submission", async () => {
+    const ready = await createReadyForVerificationDocument();
+    await expect(
+      withdrawPurchaseDocumentSubmissionRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId, // not the preparer
+        expectedVersion: ready.version,
+      })
+    ).rejects.toBeInstanceOf(NotPreparerError);
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("status").eq("id", ready.purchaseDocumentId).single();
+    expect(row!.status).toBe("READY_FOR_VERIFICATION"); // unchanged
+  });
+
+  it("restores the latest SUBMITTED snapshot after reviewer edits -- reviewer corrections are discarded from the restored draft but preserved permanently in audit history", async () => {
+    const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
+
+    const corrected = await saveReviewCorrectionsRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.lockedEmployeeAppUserId,
+      expectedVersion: ready.version,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 55 },
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "Reviewer's edit" }],
+    });
+
+    const withdrawn = await withdrawPurchaseDocumentSubmissionRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: corrected.version,
+    });
+    expect(withdrawn.status).toBe("DRAFT");
+
+    const { data: row } = await fx.supabase.from("purchase_documents").select("total").eq("id", ready.purchaseDocumentId).single();
+    expect(Number(row!.total)).toBe(100); // the ORIGINALLY SUBMITTED value, not the reviewer's 55 -- never silently promoted
+
+    const { data: lines } = await fx.supabase.from("purchase_document_lines").select("description").eq("purchase_document_id", ready.purchaseDocumentId);
+    expect(lines![0].description).not.toBe("Reviewer's edit");
+
+    // The reviewer's correction event is still there, permanently, as
+    // discarded review history.
+    const { data: correctedEvents } = await fx.supabase
+      .from("audit_events")
+      .select("id")
+      .eq("entity_id", ready.purchaseDocumentId)
+      .eq("action", "PURCHASE_DOCUMENT_REVIEW_CORRECTED");
+    expect(correctedEvents!.length).toBeGreaterThan(0);
+  });
+
+  it("stale version is rejected", async () => {
+    const ready = await createReadyForVerificationDocument();
+    await expect(
+      withdrawPurchaseDocumentSubmissionRpc(fx.supabase, {
+        purchaseDocumentId: ready.purchaseDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.changeableEmployeeAppUserId,
+        expectedVersion: 999,
+      })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+  });
+
+  it("never touches inventory_movements", async () => {
+    const { count: before } = await fx.supabase.from("inventory_movements").select("id", { count: "exact", head: true });
+    const ready = await createReadyForVerificationDocument();
+    await withdrawPurchaseDocumentSubmissionRpc(fx.supabase, {
+      purchaseDocumentId: ready.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: ready.version,
+    });
+    const { count: after } = await fx.supabase.from("inventory_movements").select("id", { count: "exact", head: true });
+    expect(after).toBe(before);
+  });
+});
+
+describe("archive_document", () => {
+  it("an upload with no purchase_document ever created can be archived by its uploader, and disappears from the queue", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+
+    const beforeQueue = await getReceivingQueue(fx.organizationId);
+    expect(beforeQueue.some((q) => q.documentId === documentId)).toBe(true);
+
+    const archived = await archiveDocumentRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    expect(archived.archivedAt).toBeTruthy();
+
+    // documents itself is fully append-only -- the archive fact lives in
+    // the separate document_archives table.
+    const { data: row } = await fx.supabase.from("document_archives").select("archived_at, archived_by_app_user_id").eq("document_id", documentId).single();
+    expect(row!.archived_at).toBeTruthy();
+    expect(row!.archived_by_app_user_id).toBe(fx.changeableEmployeeAppUserId);
+
+    const { data: auditEvent } = await fx.supabase
+      .from("audit_events")
+      .select("id")
+      .eq("entity_type", "document")
+      .eq("entity_id", documentId)
+      .eq("action", "DOCUMENT_ARCHIVED")
+      .maybeSingle();
+    expect(auditEvent).toBeTruthy();
+
+    const afterQueue = await getReceivingQueue(fx.organizationId);
+    expect(afterQueue.some((q) => q.documentId === documentId)).toBe(false);
+  });
+
+  it("an upload whose only purchase_document was discarded can also be archived", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    const draft = await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    await discardPurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+    });
+
+    const archived = await archiveDocumentRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+    expect(archived.archivedAt).toBeTruthy();
+  });
+
+  it("an upload backing an active (non-discarded) purchase_document workflow cannot be archived", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    await initializePurchaseDocumentDraftRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+    });
+
+    await expect(
+      archiveDocumentRpc(fx.supabase, { documentId, organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+
+    const { data: row } = await fx.supabase.from("document_archives").select("document_id").eq("document_id", documentId).maybeSingle();
+    expect(row).toBeNull();
+  });
+
+  it("a VERIFIED document's upload can never be archived", async () => {
+    const verified = await createVerifiedRevisionOneDocument({ total: 30 });
+    await expect(
+      archiveDocumentRpc(fx.supabase, {
+        documentId: verified.sourceDocumentId,
+        organizationId: fx.organizationId,
+        appUserId: fx.changeableEmployeeAppUserId,
+      })
+    ).rejects.toBeInstanceOf(StaleVersionError);
+  });
+
+  it("only the uploader may archive their own upload", async () => {
+    const { documentId } = await createSucceededDocument(fx.changeableEmployeeAppUserId);
+    await expect(
+      archiveDocumentRpc(fx.supabase, { documentId, organizationId: fx.organizationId, appUserId: fx.lockedEmployeeAppUserId })
+    ).rejects.toBeInstanceOf(NotPreparerError);
   });
 });

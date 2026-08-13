@@ -5,7 +5,7 @@ import { initializePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/
 import { savePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/savePurchaseDocumentDraftRpc";
 import { getReceivingQueue } from "@/app/lib/documents/receivingQueue";
 import { setupRpcTestFixtures, type RpcTestFixtures } from "./testFixtures";
-import type { NormalizedInvoiceLine } from "@/app/lib/ai/tasks/invoiceExtraction/types";
+import type { PurchaseDocumentLine } from "@/app/lib/purchaseDocuments/types";
 
 /**
  * MANUAL / ON-DEMAND ONLY -- not run in CI (see purchaseDocuments.rpc.test.ts
@@ -17,7 +17,8 @@ import type { NormalizedInvoiceLine } from "@/app/lib/ai/tasks/invoiceExtraction
 
 let fx: RpcTestFixtures;
 
-const LINE_A: NormalizedInvoiceLine = {
+const LINE_A: PurchaseDocumentLine = {
+  lineKey: null,
   vendorSku: "SKU-A",
   description: "Chicken Thigh",
   packageQuantity: 5,

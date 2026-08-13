@@ -3,6 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { signOutManager } from "@/app/actions/managerAuth";
+import { NotificationBell } from "@/app/components/notifications/NotificationBell";
 
 /**
  * The auth guard for every real manager route (this route group -- app/manager/(app)/
@@ -29,6 +30,7 @@ export default async function ManagerAppLayout({ children }: { children: ReactNo
           <Link href="/manager/vendors" className="text-sm text-zinc-400 hover:text-zinc-200">
             Vendors
           </Link>
+          <NotificationBell />
           <form action={signOutManager}>
             <button type="submit" className="text-sm text-zinc-400 underline-offset-4 hover:text-zinc-200 hover:underline">
               Sign Out

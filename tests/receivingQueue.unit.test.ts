@@ -116,6 +116,8 @@ describe("getReceivingQueue -- mapping RPC rows to ReceivingQueueItem", () => {
           out_document_date: "2026-08-10",
           out_status: "DRAFT",
           out_verified_by_app_user_id: null,
+          out_revision_number: null,
+          out_current_verified_revision_number: null,
         },
       ],
       vendors: [
@@ -145,6 +147,9 @@ describe("getReceivingQueue -- mapping RPC rows to ReceivingQueueItem", () => {
         originalDocumentType: "RECEIPT",
         verifiedByName: null,
         status: "DRAFT",
+        revisionNumber: null,
+        currentVerifiedRevisionNumber: null,
+        isAmendmentInProgress: false,
       },
     ]);
   });
@@ -167,6 +172,8 @@ describe("getReceivingQueue -- mapping RPC rows to ReceivingQueueItem", () => {
           out_document_date: null,
           out_status: "NEEDS_REVIEW",
           out_verified_by_app_user_id: null,
+          out_revision_number: null,
+          out_current_verified_revision_number: null,
         },
       ],
       vendors: [{ id: "vendor-original", name: "Baldor" }],
@@ -178,5 +185,70 @@ describe("getReceivingQueue -- mapping RPC rows to ReceivingQueueItem", () => {
 
     expect(result[0].originalVendorName).toBeNull();
     expect(result[0].originalDocumentType).toBeNull();
+  });
+});
+
+describe("getReceivingQueue -- revision/amendment fields", () => {
+  function amendmentRow(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      out_document_id: "doc-3",
+      out_original_filename: "invoice.pdf",
+      out_content_type: "application/pdf",
+      out_created_at: "2026-08-12T00:00:00Z",
+      out_uploaded_by_app_user_id: "user-1",
+      out_purchase_document_id: "pd-3",
+      out_effective_vendor_id: "vendor-1",
+      out_effective_document_type: "INVOICE",
+      out_declared_vendor_id: "vendor-1",
+      out_declared_document_type: "INVOICE",
+      out_document_number: "839291",
+      out_document_date: "2026-08-10",
+      out_status: "DRAFT",
+      out_verified_by_app_user_id: null,
+      out_revision_number: 2,
+      out_current_verified_revision_number: 1,
+      ...overrides,
+    };
+  }
+
+  it("marks an open (DRAFT/READY) revision-2+ row as isAmendmentInProgress when a current verified revision exists", async () => {
+    const { rpc, from } = fakeClient({
+      queueRows: [amendmentRow()],
+      vendors: [{ id: "vendor-1", name: "Baldor" }],
+      appUsers: [{ id: "user-1", employees: { first_name: "Ana", last_name: "Manager" } }],
+    });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+
+    const result = await getReceivingQueue("org-1");
+
+    expect(result[0].revisionNumber).toBe(2);
+    expect(result[0].currentVerifiedRevisionNumber).toBe(1);
+    expect(result[0].isAmendmentInProgress).toBe(true);
+  });
+
+  it("is not an amendment once the row itself is VERIFIED, even at revision > 1 -- it becomes the new current-verified revision instead", async () => {
+    const { rpc, from } = fakeClient({
+      queueRows: [amendmentRow({ out_status: "VERIFIED", out_revision_number: 2, out_current_verified_revision_number: 2 })],
+      vendors: [{ id: "vendor-1", name: "Baldor" }],
+      appUsers: [{ id: "user-1", employees: { first_name: "Ana", last_name: "Manager" } }],
+    });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+
+    const result = await getReceivingQueue("org-1");
+
+    expect(result[0].isAmendmentInProgress).toBe(false);
+  });
+
+  it("is not an amendment at revision 1, even while still DRAFT/READY (a first-time document, nothing to amend)", async () => {
+    const { rpc, from } = fakeClient({
+      queueRows: [amendmentRow({ out_revision_number: 1, out_current_verified_revision_number: null })],
+      vendors: [{ id: "vendor-1", name: "Baldor" }],
+      appUsers: [{ id: "user-1", employees: { first_name: "Ana", last_name: "Manager" } }],
+    });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+
+    const result = await getReceivingQueue("org-1");
+
+    expect(result[0].isAmendmentInProgress).toBe(false);
   });
 });

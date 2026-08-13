@@ -79,6 +79,7 @@ describe("savePurchaseDocumentDraftRpc", () => {
   };
   const lines = [
     {
+      lineKey: null,
       vendorSku: "SKU-1",
       description: "Item",
       packageQuantity: 1,
@@ -149,8 +150,59 @@ describe("submitPurchaseDocumentForVerificationRpc", () => {
       p_organization_id: "org-1",
       p_app_user_id: "user-1",
       p_expected_version: 1,
+      p_header: null,
+      p_lines: null,
     });
     expect(result).toEqual({ purchaseDocumentId: "pd-1", status: "READY_FOR_VERIFICATION", version: 2 });
+  });
+
+  it("forwards header/lines when the caller supplies the current on-screen form state (atomic save-and-submit)", async () => {
+    const { client, rpc } = fakeSupabase({
+      data: [{ out_purchase_document_id: "pd-1", out_status: "READY_FOR_VERIFICATION", out_version: 2 }],
+      error: null,
+    });
+    const header = {
+      vendorId: "vendor-1",
+      documentType: "INVOICE" as const,
+      documentNumber: "839291",
+      documentDate: "2026-08-12",
+      poNumber: null,
+      deliveryDate: null,
+      subtotal: 100,
+      tax: 0,
+      fees: 0,
+      total: 100,
+      currency: "USD",
+    };
+    const lines = [
+      {
+        lineKey: "line-1",
+        vendorSku: "SKU-1",
+        description: "Item",
+        packageQuantity: 1,
+        packageUnit: "CS",
+        measuredQuantity: null,
+        measuredUnit: null,
+        unitPrice: 100,
+        priceBasisUnit: "CS",
+        lineTotal: 100,
+        rawLineText: null,
+      },
+    ];
+
+    await submitPurchaseDocumentForVerificationRpc(client, {
+      purchaseDocumentId: "pd-1",
+      organizationId: "org-1",
+      appUserId: "user-1",
+      expectedVersion: 1,
+      header,
+      lines,
+    });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "submit_purchase_document_for_verification",
+      expect.objectContaining({ p_header: header, p_lines: lines })
+    );
   });
 });
 
@@ -173,6 +225,8 @@ describe("verifyPurchaseDocumentRpc", () => {
       p_organization_id: "org-1",
       p_app_user_id: "user-2",
       p_expected_version: 2,
+      p_header: null,
+      p_lines: null,
     });
     expect(result).toEqual({ purchaseDocumentId: "pd-1", verifiedAt: "2026-08-12T00:00:00.000Z" });
   });
@@ -182,6 +236,52 @@ describe("verifyPurchaseDocumentRpc", () => {
     await expect(
       verifyPurchaseDocumentRpc(client, { purchaseDocumentId: "pd-1", organizationId: "org-1", appUserId: "user-1", expectedVersion: 2 })
     ).rejects.toBeInstanceOf(CannotSelfVerifyError);
+  });
+
+  it("forwards header/lines when the caller supplies the reviewer's current on-screen form state (atomic save-and-verify)", async () => {
+    const { client, rpc } = fakeSupabase({
+      data: [{ out_purchase_document_id: "pd-1", out_verified_at: "2026-08-12T00:00:00.000Z" }],
+      error: null,
+    });
+    const header = {
+      vendorId: "vendor-1",
+      documentType: "INVOICE" as const,
+      documentNumber: "839291",
+      documentDate: "2026-08-12",
+      poNumber: null,
+      deliveryDate: null,
+      subtotal: 100,
+      tax: 0,
+      fees: 0,
+      total: 100,
+      currency: "USD",
+    };
+    const lines = [
+      {
+        lineKey: "line-1",
+        vendorSku: "SKU-1",
+        description: "Corrected Item",
+        packageQuantity: 1,
+        packageUnit: "CS",
+        measuredQuantity: null,
+        measuredUnit: null,
+        unitPrice: 100,
+        priceBasisUnit: "CS",
+        lineTotal: 100,
+        rawLineText: null,
+      },
+    ];
+
+    await verifyPurchaseDocumentRpc(client, {
+      purchaseDocumentId: "pd-1",
+      organizationId: "org-1",
+      appUserId: "user-2",
+      expectedVersion: 2,
+      header,
+      lines,
+    });
+
+    expect(rpc).toHaveBeenCalledWith("verify_purchase_document", expect.objectContaining({ p_header: header, p_lines: lines }));
   });
 });
 

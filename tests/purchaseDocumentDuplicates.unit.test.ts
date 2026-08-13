@@ -68,6 +68,9 @@ describe("findPossibleDuplicatePurchaseDocuments -- query construction", () => {
     expect(calls).toContainEqual({ method: "eq", args: ["vendor_id", "vendor-1"] });
     expect(calls).toContainEqual({ method: "eq", args: ["document_type", "INVOICE"] });
     expect(calls).toContainEqual({ method: "eq", args: ["document_number", "839291"] });
+    // A discarded accidental draft never counts as an active duplicate --
+    // this filter is unconditional, independent of any exclude* option.
+    expect(calls).toContainEqual({ method: "neq", args: ["status", "DISCARDED"] });
     expect(result).toEqual([{ purchaseDocumentId: "pd-2", documentNumber: "839291", documentDate: "2026-08-10", status: "VERIFIED" }]);
   });
 
@@ -77,10 +80,26 @@ describe("findPossibleDuplicatePurchaseDocuments -- query construction", () => {
     expect(calls).toContainEqual({ method: "neq", args: ["id", "pd-1"] });
   });
 
-  it("does not exclude anything when no excludePurchaseDocumentId is given (checking a not-yet-created draft)", async () => {
+  it("excludes the entire revision group (not just one row) via neq(revision_group_id, ...) when excludeRevisionGroupId is given -- an amendment must never flag its own prior revision as a duplicate", async () => {
+    const { client, calls } = fakeClient([]);
+    await findPossibleDuplicatePurchaseDocuments(client, { ...BASE_INPUT, excludeRevisionGroupId: "group-1" });
+    expect(calls).toContainEqual({ method: "neq", args: ["revision_group_id", "group-1"] });
+    expect(calls.some((c) => c.method === "neq" && c.args[0] === "id")).toBe(false);
+  });
+
+  it("prefers excludeRevisionGroupId over excludePurchaseDocumentId when both are given", async () => {
+    const { client, calls } = fakeClient([]);
+    await findPossibleDuplicatePurchaseDocuments(client, { ...BASE_INPUT, excludeRevisionGroupId: "group-1", excludePurchaseDocumentId: "pd-1" });
+    expect(calls).toContainEqual({ method: "neq", args: ["revision_group_id", "group-1"] });
+    expect(calls.some((c) => c.method === "neq" && c.args[0] === "id")).toBe(false);
+  });
+
+  it("does not exclude by id or revision group when neither exclude option is given (checking a not-yet-created draft) -- the unconditional DISCARDED filter still applies", async () => {
     const { client, calls } = fakeClient([]);
     await findPossibleDuplicatePurchaseDocuments(client, BASE_INPUT);
-    expect(calls.some((c) => c.method === "neq")).toBe(false);
+    expect(calls.some((c) => c.method === "neq" && c.args[0] === "id")).toBe(false);
+    expect(calls.some((c) => c.method === "neq" && c.args[0] === "revision_group_id")).toBe(false);
+    expect(calls).toContainEqual({ method: "neq", args: ["status", "DISCARDED"] });
   });
 
   it("a different vendor is a separate filter value -- INVOICE #123 from Vendor A does not share a query with Vendor B", async () => {
