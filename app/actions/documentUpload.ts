@@ -12,7 +12,29 @@ import {
 } from "@/app/lib/documents/finalizeDocumentUploadRpc";
 import { resolveGeminiModel } from "@/app/lib/ai/config";
 import { ACCEPTED_MIME_TYPES, extensionForMimeType, sniffMimeType } from "@/app/lib/files/sniffMimeType";
+import { VendorNotActiveError } from "@/app/lib/purchaseDocuments/errors";
 import type { SupabaseClient } from "@supabase/supabase-js";
+
+export type DeclaredDocumentType = "INVOICE" | "RECEIPT" | "CREDIT_MEMO";
+
+/** Shared by initiate and finalize -- a plain active/same-org check, no
+ * RPC needed for a single-table read. finalize_document_upload itself
+ * re-validates at insert time as the authoritative gate; this is purely
+ * fail-fast so a manager finds out before minting a signed upload URL. */
+async function isVendorActiveInOrganization(
+  serviceClient: SupabaseClient,
+  vendorId: string,
+  organizationId: string
+): Promise<boolean> {
+  const { data } = await serviceClient
+    .from("vendors")
+    .select("id")
+    .eq("id", vendorId)
+    .eq("organization_id", organizationId)
+    .eq("is_active", true)
+    .maybeSingle();
+  return !!data;
+}
 
 /**
  * Direct browser-to-Storage upload (not a Server Action body upload): the
@@ -64,6 +86,11 @@ function describeError(error: unknown): { code: string | null; message: string |
 export interface InitiateDocumentUploadInput {
   filename: string;
   declaredContentType: string;
+  /** Declared by the manager BEFORE the file picker -- vendor-first
+   * intake. Must be an active vendor in the manager's own organization. */
+  vendorId: string;
+  /** Declared by the manager BEFORE the file picker, alongside vendorId. */
+  declaredDocumentType: DeclaredDocumentType;
   /** Optional client-computed hint (crypto.subtle.digest), used ONLY for a
    * non-blocking "possible duplicate" prompt -- never trusted for the
    * authoritative record, which is always recomputed server-side at
@@ -85,7 +112,7 @@ export type InitiateDocumentUploadResult =
       token: string;
       possibleDuplicate: PossibleDuplicateDocument | null;
     }
-  | { ok: false; reason: "not_authorized" | "invalid_file_type" | "misconfigured"; message: string };
+  | { ok: false; reason: "not_authorized" | "invalid_file_type" | "invalid_vendor" | "misconfigured"; message: string };
 
 export async function initiateDocumentUpload(input: InitiateDocumentUploadInput): Promise<InitiateDocumentUploadResult> {
   const auth = await requireManagerOrAdmin();
@@ -101,10 +128,15 @@ export async function initiateDocumentUpload(input: InitiateDocumentUploadInput)
     };
   }
 
+  const serviceClient = getServiceRoleClient();
+
+  if (!(await isVendorActiveInOrganization(serviceClient, input.vendorId, auth.manager.organizationId))) {
+    return { ok: false, reason: "invalid_vendor", message: "Select an active vendor before uploading." };
+  }
+
   const documentId = crypto.randomUUID();
   const path = buildStoragePath(auth.manager.organizationId, documentId, extensionForMimeType(input.declaredContentType));
 
-  const serviceClient = getServiceRoleClient();
   const { data: uploadUrlData, error: uploadUrlError } = await serviceClient.storage
     .from(RECEIVING_DOCUMENTS_BUCKET)
     .createSignedUploadUrl(path);
@@ -154,13 +186,17 @@ export interface FinalizeDocumentUploadInput {
   documentId: string;
   declaredContentType: string;
   originalFilename: string;
+  /** Re-supplied here (initiate doesn't persist anything) and re-validated
+   * by finalize_document_upload itself as the authoritative gate. */
+  vendorId: string;
+  declaredDocumentType: DeclaredDocumentType;
 }
 
 export type FinalizeDocumentUploadResult =
   | { ok: true; documentId: string; replayed: boolean }
   | {
       ok: false;
-      reason: "not_authorized" | "invalid_file_type" | "not_found" | "conflict" | "misconfigured";
+      reason: "not_authorized" | "invalid_file_type" | "invalid_vendor" | "not_found" | "conflict" | "misconfigured";
       message: string;
     };
 
@@ -266,6 +302,8 @@ export async function finalizeDocumentUpload(input: FinalizeDocumentUploadInput)
       fileSha256,
       provider: "gemini",
       model: resolveGeminiModel(),
+      vendorId: input.vendorId,
+      declaredDocumentType: input.declaredDocumentType,
     });
 
     logUploadDiagnostic(currentStage, {
@@ -295,6 +333,15 @@ export async function finalizeDocumentUpload(input: FinalizeDocumentUploadInput)
         reason: "conflict",
         message: "This upload no longer matches a previously finalized document. Please upload again.",
       };
+    }
+    if (err instanceof VendorNotActiveError) {
+      // The vendor was deactivated between initiate and finalize -- a
+      // genuinely invalid upload, same category as bad MIME/size, so it
+      // still falls through to the cleanup below.
+      if (!dbFinalized) {
+        await removeUploadedObject(serviceClient, path);
+      }
+      return { ok: false, reason: "invalid_vendor", message: "The selected vendor is no longer active. Choose a different vendor and upload again." };
     }
     if (!dbFinalized) {
       await removeUploadedObject(serviceClient, path);

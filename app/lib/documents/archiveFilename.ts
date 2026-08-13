@@ -1,23 +1,34 @@
 /**
  * Never stored -- computed on demand at signed-download-URL generation
- * time. Milestone 2A.1 has no verified invoice data yet (that starts in
- * 2A.2), so every call site passes nulls for vendorName/invoiceDate/
- * invoiceNumber today and this always falls back to the original filename;
- * the shape exists now so a later verification milestone can start passing
- * real values without any change to the download path itself.
+ * time. Only ever called with real values once a VERIFIED purchase_document
+ * exists for the document (see getDocumentDownloadUrl); otherwise every
+ * field is null and this falls back to the original filename. Type-aware
+ * (Milestone 2A.2): the document-number prefix depends on document_type,
+ * e.g. Baldor_2026-08-12_INV-839291.pdf vs. Target_2026-07-15_RECEIPT-26196.jpg
+ * vs. US-Foods_2026-08-10_CM-49322.pdf.
  */
+const DOCUMENT_TYPE_PREFIX: Record<"INVOICE" | "RECEIPT" | "CREDIT_MEMO", string> = {
+  INVOICE: "INV",
+  RECEIPT: "RECEIPT",
+  CREDIT_MEMO: "CM",
+};
+
 export function buildArchiveFilename(input: {
   vendorName: string | null;
-  invoiceDate: string | null;
-  invoiceNumber: string | null;
+  documentDate: string | null;
+  documentNumber: string | null;
+  documentType: "INVOICE" | "RECEIPT" | "CREDIT_MEMO" | null;
   originalFilename: string;
 }): string {
   const lastDot = input.originalFilename.lastIndexOf(".");
   const extension = lastDot > 0 ? input.originalFilename.slice(lastDot) : "";
 
-  const parts = [input.vendorName, input.invoiceDate, input.invoiceNumber].filter(
-    (part): part is string => Boolean(part && part.trim())
-  );
+  const prefixedNumber =
+    input.documentNumber && input.documentType
+      ? `${DOCUMENT_TYPE_PREFIX[input.documentType]}-${input.documentNumber}`
+      : input.documentNumber;
+
+  const parts = [input.vendorName, input.documentDate, prefixedNumber].filter((part): part is string => Boolean(part && part.trim()));
 
   if (parts.length === 0) {
     return input.originalFilename;

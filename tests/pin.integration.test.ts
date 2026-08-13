@@ -4,6 +4,7 @@ import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { hashPinForStorage, hashPinLookup } from "@/app/lib/auth/pin";
 import { checkAndIncrementPinRateLimit, deriveRateLimitKey } from "@/app/lib/auth/rateLimit";
 import { verifyPinCore } from "@/app/lib/auth/verifyPin";
+import { resolveTestOrgId } from "./testFixtures";
 
 /**
  * MANUAL / ON-DEMAND ONLY -- not run in CI (`npm test` does not include
@@ -14,9 +15,14 @@ import { verifyPinCore } from "@/app/lib/auth/verifyPin";
  * safely mutable and reusable between runs, unlike the withdrawal RPC's
  * append-only tables (see withdrawal.rpc.test.ts).
  *
- * Uses its own dedicated fixture employee (isolated from
- * testFixtures.ts/withdrawal.rpc.test.ts) so state produced here can never
- * make the withdrawal RPC tests flaky.
+ * Lives inside the shared TEST RPC Fixture Org (via testFixtures.ts's
+ * resolveTestOrgId, which only resolves it -- creation happens once,
+ * serially, in scripts/test-integration-setup.ts before this file ever
+ * runs) -- never the real "Gansevoort" organization a manager uses for
+ * manual browser testing. Uses its own dedicated fixture employee within
+ * that org (isolated from testFixtures.ts's own setupRpcTestFixtures()/
+ * withdrawal.rpc.test.ts) so state produced here can never make the
+ * withdrawal RPC tests flaky.
  *
  * V1 authentication design (product decision): the PIN is both the kiosk
  * identifier and the credential -- no employee-name/code selection step
@@ -58,9 +64,7 @@ beforeAll(async () => {
   canonicalPinLookupHash = hashPinLookup(PIN, pinPepper);
   canonicalPinHash = await hashPinForStorage(PIN);
 
-  const { data: org, error: orgError } = await supabase.from("organizations").select("id").eq("name", "Gansevoort").single();
-  if (orgError) throw orgError;
-  organizationId = org.id as string;
+  ({ organizationId } = await resolveTestOrgId(supabase));
 
   const { data: existingEmployee } = await supabase
     .from("employees")

@@ -45,7 +45,7 @@ export function validateInvoiceExtraction(extraction: NormalizedInvoiceExtractio
   }
 
   extraction.lines.forEach((line, index) => {
-    issues.push(...validateLine(line, index));
+    issues.push(...validateLineItem(line, index));
   });
 
   if (extraction.total !== null && extraction.lines.length > 0) {
@@ -67,7 +67,15 @@ export function validateInvoiceExtraction(extraction: NormalizedInvoiceExtractio
   return { data: extraction, issues };
 }
 
-function validateLine(line: NormalizedInvoiceLine, index: number): ReviewFlag[] {
+/**
+ * Exported (Milestone 2A.2) so app/lib/purchaseDocuments/validatePurchaseDocumentDraft.ts
+ * can reuse this line-math/unit logic for a purchase document draft's
+ * lines -- it doesn't care whether the document is an invoice, receipt, or
+ * credit memo, so it's shared rather than duplicated. Header-level checks
+ * stay type-aware and live in that module instead, since "Invoice #" vs.
+ * "Receipt #" vs. "Credit Memo #" genuinely differ by document type.
+ */
+export function validateLineItem(line: NormalizedInvoiceLine, index: number): ReviewFlag[] {
   const issues: ReviewFlag[] = [];
   const prefix = `lines[${index}]`;
 

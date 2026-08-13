@@ -3,10 +3,22 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
-import { initiateDocumentUpload, finalizeDocumentUpload, type InitiateDocumentUploadResult } from "@/app/actions/documentUpload";
+import {
+  initiateDocumentUpload,
+  finalizeDocumentUpload,
+  type InitiateDocumentUploadResult,
+  type DeclaredDocumentType,
+} from "@/app/actions/documentUpload";
 import { RECEIVING_DOCUMENTS_BUCKET } from "@/app/lib/documents/storageConstants";
+import type { VendorSummary } from "@/app/actions/vendors";
 
 type InitiatedUpload = Extract<InitiateDocumentUploadResult, { ok: true }>;
+
+const DOCUMENT_TYPE_OPTIONS: { value: DeclaredDocumentType; label: string }[] = [
+  { value: "INVOICE", label: "Invoice" },
+  { value: "RECEIPT", label: "Receipt" },
+  { value: "CREDIT_MEMO", label: "Credit Memo" },
+];
 
 async function sha256Hex(file: File): Promise<string | undefined> {
   try {
@@ -21,26 +33,45 @@ async function sha256Hex(file: File): Promise<string | undefined> {
   }
 }
 
+/**
+ * Vendor-first + document-type-first intake (Milestone 2A.2): the manager
+ * must declare both BEFORE the file picker is usable -- these become the
+ * immutable documents.vendor_id / documents.declared_document_type facts,
+ * re-validated server-side at both initiate and finalize.
+ */
 export function UploadDocumentForm({
   supabaseUrl,
   supabasePublishableKey,
+  vendors,
 }: {
   supabaseUrl: string;
   supabasePublishableKey: string;
+  vendors: VendorSummary[];
 }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
+  const [vendorId, setVendorId] = useState("");
+  const [documentType, setDocumentType] = useState<DeclaredDocumentType | "">("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<{ file: File; initiated: InitiatedUpload; uploadedAt: string } | null>(null);
 
+  const canUpload = Boolean(vendorId) && Boolean(documentType);
+
   async function handleFile(file: File) {
+    if (!vendorId || !documentType) return;
     setPending(true);
     setError(null);
     setDuplicate(null);
 
     const clientComputedSha256 = await sha256Hex(file);
-    const initiated = await initiateDocumentUpload({ filename: file.name, declaredContentType: file.type, clientComputedSha256 });
+    const initiated = await initiateDocumentUpload({
+      filename: file.name,
+      declaredContentType: file.type,
+      vendorId,
+      declaredDocumentType: documentType,
+      clientComputedSha256,
+    });
 
     if (!initiated.ok) {
       setPending(false);
@@ -58,6 +89,7 @@ export function UploadDocumentForm({
   }
 
   async function uploadAndFinalize(file: File, initiated: InitiatedUpload) {
+    if (!documentType) return;
     setPending(true);
     setDuplicate(null);
 
@@ -76,6 +108,8 @@ export function UploadDocumentForm({
       documentId: initiated.documentId,
       declaredContentType: file.type,
       originalFilename: file.name,
+      vendorId,
+      declaredDocumentType: documentType,
     });
 
     setPending(false);
@@ -90,7 +124,43 @@ export function UploadDocumentForm({
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap gap-3">
+        <select
+          value={vendorId}
+          onChange={(event) => setVendorId(event.target.value)}
+          className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+        >
+          <option value="">Select vendor…</option>
+          {vendors.map((vendor) => (
+            <option key={vendor.id} value={vendor.id}>
+              {vendor.name}
+            </option>
+          ))}
+        </select>
+        <select
+          value={documentType}
+          onChange={(event) => setDocumentType(event.target.value as DeclaredDocumentType)}
+          className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+        >
+          <option value="">Select type…</option>
+          {DOCUMENT_TYPE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {vendors.length === 0 ? (
+        <p className="text-xs text-amber-400">
+          No active vendors yet.{" "}
+          <a href="/manager/vendors" className="underline">
+            Add one
+          </a>{" "}
+          before uploading.
+        </p>
+      ) : null}
+
       <input
         ref={inputRef}
         type="file"
@@ -105,7 +175,7 @@ export function UploadDocumentForm({
       />
       <button
         type="button"
-        disabled={pending}
+        disabled={pending || !canUpload}
         onClick={() => inputRef.current?.click()}
         className="w-fit rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 transition disabled:opacity-40"
       >

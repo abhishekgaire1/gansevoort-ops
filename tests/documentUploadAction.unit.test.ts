@@ -33,7 +33,13 @@ const MANAGER = {
   manager: { appUserId: "user-1", organizationId: "org-1", authUserId: "auth-1", roles: ["manager"] },
 };
 
-const INPUT = { documentId: "doc-1", declaredContentType: "application/pdf", originalFilename: "invoice.pdf" };
+const INPUT = {
+  documentId: "doc-1",
+  declaredContentType: "application/pdf",
+  originalFilename: "invoice.pdf",
+  vendorId: "vendor-1",
+  declaredDocumentType: "INVOICE" as const,
+};
 
 function pdfBytes(): Uint8Array {
   return new TextEncoder().encode("%PDF-1.4\n");

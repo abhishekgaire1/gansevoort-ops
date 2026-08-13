@@ -45,6 +45,8 @@ function baseInput(documentId: string): FinalizeDocumentUploadRpcInput {
     fileSha256: randomBytes(32).toString("hex"),
     provider: "gemini",
     model: "gemini-3.6-flash",
+    vendorId: fx.vendorId,
+    declaredDocumentType: "INVOICE",
   };
 }
 
@@ -116,7 +118,13 @@ describe("finalize_document_upload RPC", () => {
 
     // Insert the documents row directly, bypassing the RPC, to simulate the
     // "attempt insert failed on the very first finalize" scenario the heal
-    // path exists for.
+    // path exists for. Must match `input`'s identity EXACTLY, including
+    // vendor_id/declared_document_type -- those two fields are part of the
+    // RPC's replay-identity comparison (see 20260811100024's finalize_
+    // document_upload), so leaving them null here would make the
+    // subsequent finalize call look like a genuine GA001 conflict (a
+    // different vendor/type) rather than the "same document, missing
+    // attempt" scenario this test means to simulate.
     const { error: insertError } = await fx.supabase.from("documents").insert({
       id: documentId,
       organization_id: input.organizationId,
@@ -126,6 +134,8 @@ describe("finalize_document_upload RPC", () => {
       content_type: input.contentType,
       byte_size: input.byteSize,
       file_sha256: input.fileSha256,
+      vendor_id: input.vendorId,
+      declared_document_type: input.declaredDocumentType,
     });
     expect(insertError).toBeNull();
     expect(await countAttempts(documentId)).toBe(0);
@@ -167,5 +177,46 @@ describe("finalize_document_upload RPC", () => {
     expect([a.replayed, b.replayed].sort()).toEqual([false, true]);
 
     expect(await countAttempts(documentId)).toBe(1);
+  });
+
+  it("rejects a fresh finalize call against an inactive vendor with GA005, inserting nothing", async () => {
+    const documentId = randomUUID();
+    const input = { ...baseInput(documentId), vendorId: fx.inactiveVendorId };
+
+    await expect(finalizeDocumentUploadRpc(fx.supabase, input)).rejects.toThrow(/not an active vendor/);
+
+    const { data: documentRow } = await fx.supabase.from("documents").select("id").eq("id", documentId).maybeSingle();
+    expect(documentRow).toBeNull();
+  });
+
+  describe("idempotent-replay identity includes vendor_id and declared_document_type", () => {
+    it("A: an identical second finalize call, including the same vendor and declared type, replays successfully", async () => {
+      const documentId = randomUUID();
+      const input = baseInput(documentId);
+
+      const first = await finalizeDocumentUploadRpc(fx.supabase, input);
+      expect(first.replayed).toBe(false);
+
+      const second = await finalizeDocumentUploadRpc(fx.supabase, input);
+      expect(second.replayed).toBe(true);
+      expect(second.attemptId).toBe(first.attemptId);
+    });
+
+    it("B: same file/documentId but a different declared_document_type is a GA001 conflict, leaving the existing document/Storage untouched", async () => {
+      const documentId = randomUUID();
+      const input = baseInput(documentId);
+      await finalizeDocumentUploadRpc(fx.supabase, input);
+
+      const conflicting = { ...input, declaredDocumentType: "RECEIPT" as const };
+      await expect(finalizeDocumentUploadRpc(fx.supabase, conflicting)).rejects.toBeInstanceOf(DocumentIdentityConflictError);
+
+      const { data: documentRow } = await fx.supabase
+        .from("documents")
+        .select("declared_document_type, storage_path")
+        .eq("id", documentId)
+        .single();
+      expect(documentRow!.declared_document_type).toBe("INVOICE");
+      expect(documentRow!.storage_path).toBe(input.storagePath);
+    });
   });
 });

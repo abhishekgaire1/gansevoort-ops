@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isAttemptStale, STALE_EXTRACTION_THRESHOLD_MS } from "@/app/lib/documents/staleExtraction";
-import { deriveDocumentStatus } from "@/app/lib/documents/documentStatus";
+import { deriveDocumentStatus, deriveReceivingItemStatus } from "@/app/lib/documents/documentStatus";
 import { safeExtractionErrorMessage } from "@/app/lib/documents/extractionErrorMessages";
 
 const NOW = new Date("2026-08-12T12:00:00.000Z");
@@ -52,6 +52,21 @@ describe("deriveDocumentStatus", () => {
   it("a stale PENDING/RUNNING attempt maps to STALLED, not PROCESSING", () => {
     expect(deriveDocumentStatus({ status: "PENDING", requestedAt: JUST_OVER, startedAt: null }, NOW)).toBe("STALLED");
     expect(deriveDocumentStatus({ status: "RUNNING", requestedAt: JUST_OVER, startedAt: JUST_OVER }, NOW)).toBe("STALLED");
+  });
+});
+
+describe("deriveReceivingItemStatus", () => {
+  it("falls back to the extraction-based status when no purchase_document exists", () => {
+    expect(deriveReceivingItemStatus({ status: "SUCCEEDED", requestedAt: JUST_UNDER, startedAt: null }, null, NOW)).toBe("NEEDS_REVIEW");
+    expect(deriveReceivingItemStatus(null, null, NOW)).toBe("FAILED");
+  });
+
+  it("a purchase_document's own status always wins once one exists, regardless of the latest extraction attempt's status", () => {
+    expect(deriveReceivingItemStatus({ status: "SUCCEEDED", requestedAt: JUST_UNDER, startedAt: null }, "DRAFT", NOW)).toBe("DRAFT");
+    expect(deriveReceivingItemStatus({ status: "FAILED", requestedAt: JUST_UNDER, startedAt: null }, "READY_FOR_VERIFICATION", NOW)).toBe(
+      "READY_FOR_VERIFICATION"
+    );
+    expect(deriveReceivingItemStatus(null, "VERIFIED", NOW)).toBe("VERIFIED");
   });
 });
 

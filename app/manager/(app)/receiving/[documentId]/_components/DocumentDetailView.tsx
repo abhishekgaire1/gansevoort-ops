@@ -2,14 +2,24 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { getDocumentViewUrl, getDocumentDownloadUrl } from "@/app/actions/documentAccess";
 import { retryDocumentExtraction } from "@/app/actions/documentExtraction";
+import { createOrOpenPurchaseDocumentDraft } from "@/app/actions/purchaseDocuments";
 import { ExtractionPanel } from "@/app/components/invoiceExtraction/ExtractionPanel";
+import { DocumentViewer } from "@/app/components/documents/DocumentViewer";
 import { StatusPoller } from "@/app/components/documents/StatusPoller";
 import { deriveDocumentStatus, type DocumentDisplayStatus } from "@/app/lib/documents/documentStatus";
 import { shouldPollForStatuses } from "@/app/lib/documents/pollingDecision";
 import { safeExtractionErrorMessage } from "@/app/lib/documents/extractionErrorMessages";
 import type { NormalizedInvoiceExtraction, ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
+import type { PurchaseDocumentStatus } from "@/app/lib/purchaseDocuments/types";
+
+const PURCHASE_DOCUMENT_BUTTON_LABEL: Record<PurchaseDocumentStatus, string> = {
+  DRAFT: "Open Draft",
+  READY_FOR_VERIFICATION: "View Submission",
+  VERIFIED: "View Verified Document",
+};
 
 export interface AttemptView {
   id: string;
@@ -43,18 +53,25 @@ export function DocumentDetailView({
   documentId,
   originalFilename,
   contentType,
+  purchaseDocumentId,
+  purchaseDocumentStatus,
   attempts,
 }: {
   documentId: string;
   originalFilename: string;
   contentType: string;
+  purchaseDocumentId: string | null;
+  purchaseDocumentStatus: PurchaseDocumentStatus | null;
   attempts: AttemptView[];
 }) {
+  const router = useRouter();
   const [viewUrl, setViewUrl] = useState<string | null>(null);
   const [viewError, setViewError] = useState<string | null>(null);
   const [downloadPending, setDownloadPending] = useState(false);
   const [retryPending, setRetryPending] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [draftPending, setDraftPending] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
   const [narrowPane, setNarrowPane] = useState<"document" | "extraction">("document");
 
   const latest = attempts[0] ?? null;
@@ -98,7 +115,24 @@ export function DocumentDetailView({
     window.location.reload();
   }
 
+  async function handleOpenOrCreateDraft() {
+    if (purchaseDocumentId) {
+      router.push(`/manager/purchases/${purchaseDocumentId}`);
+      return;
+    }
+    setDraftPending(true);
+    setDraftError(null);
+    const result = await createOrOpenPurchaseDocumentDraft(documentId);
+    setDraftPending(false);
+    if (!result.ok) {
+      setDraftError(result.message);
+      return;
+    }
+    router.push(`/manager/purchases/${result.purchaseDocumentId}`);
+  }
+
   const canRetry = status === "FAILED" || status === "STALLED";
+  const showDraftButton = Boolean(purchaseDocumentId) || status === "NEEDS_REVIEW";
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -123,6 +157,20 @@ export function DocumentDetailView({
           >
             {downloadPending ? "Preparing…" : "Download"}
           </button>
+          {showDraftButton ? (
+            <button
+              type="button"
+              onClick={handleOpenOrCreateDraft}
+              disabled={draftPending}
+              className="rounded-full bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
+            >
+              {draftPending
+                ? "Opening…"
+                : purchaseDocumentStatus
+                  ? PURCHASE_DOCUMENT_BUTTON_LABEL[purchaseDocumentStatus]
+                  : "Create Purchase Document Draft"}
+            </button>
+          ) : null}
           {canRetry ? (
             <button
               type="button"
@@ -136,6 +184,7 @@ export function DocumentDetailView({
         </div>
       </div>
       {retryError ? <p className="mt-2 text-sm text-red-400">{retryError}</p> : null}
+      {draftError ? <p className="mt-2 text-sm text-red-400">{draftError}</p> : null}
 
       <div className="mt-4 flex gap-2 lg:hidden">
         <button
@@ -187,28 +236,6 @@ export function DocumentDetailView({
       </div>
     </div>
   );
-}
-
-function DocumentViewer({
-  viewUrl,
-  viewError,
-  contentType,
-}: {
-  viewUrl: string | null;
-  viewError: string | null;
-  contentType: string;
-}) {
-  if (viewError) {
-    return <p className="text-sm text-red-400">{viewError}</p>;
-  }
-  if (!viewUrl) {
-    return <p className="text-sm text-zinc-500">Loading document…</p>;
-  }
-  if (contentType === "application/pdf") {
-    return <embed src={viewUrl} type="application/pdf" className="h-[70vh] w-full rounded-lg" />;
-  }
-  // eslint-disable-next-line @next/next/no-img-element -- signed Storage URL, not an optimizable static asset
-  return <img src={viewUrl} alt="Original document" className="max-h-[70vh] w-full rounded-lg object-contain" />;
 }
 
 function AttemptHistory({ attempts }: { attempts: AttemptView[] }) {

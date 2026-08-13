@@ -1,4 +1,5 @@
 import { isAttemptStale, type AttemptTimingInfo } from "@/app/lib/documents/staleExtraction";
+import type { PurchaseDocumentStatus } from "@/app/lib/purchaseDocuments/types";
 
 /**
  * documents has no status column (see 20260811100018_documents.sql) --
@@ -30,4 +31,27 @@ export function deriveDocumentStatus(latestAttempt: LatestAttemptForStatus | nul
   }
 
   return isAttemptStale(latestAttempt, now) ? "STALLED" : "PROCESSING";
+}
+
+/**
+ * Milestone 2A.2: the Receiving Queue's full workflow status, extending
+ * DocumentDisplayStatus with the purchase_documents lifecycle. Still
+ * nothing stored -- purchase_documents.status (when a row exists) is
+ * simply layered on top of the same extraction-based derivation. Once a
+ * purchase_document exists, its status always wins (DRAFT/
+ * READY_FOR_VERIFICATION/VERIFIED) regardless of what a later extraction
+ * retry's status is -- a document's business workflow state is no longer
+ * about extraction once a draft has been started from it.
+ */
+export type ReceivingItemStatus = DocumentDisplayStatus | PurchaseDocumentStatus;
+
+export function deriveReceivingItemStatus(
+  latestAttempt: LatestAttemptForStatus | null,
+  purchaseDocumentStatus: PurchaseDocumentStatus | null,
+  now: Date = new Date()
+): ReceivingItemStatus {
+  if (purchaseDocumentStatus) {
+    return purchaseDocumentStatus;
+  }
+  return deriveDocumentStatus(latestAttempt, now);
 }

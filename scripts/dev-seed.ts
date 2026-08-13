@@ -2,11 +2,12 @@ import { config as loadEnv } from "dotenv";
 loadEnv({ path: ".env.local" });
 
 import { randomBytes, randomInt } from "node:crypto";
-import { readFileSync } from "node:fs";
 import readline from "node:readline/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { hashPinForStorage, hashPinLookup, isValidPinFormat } from "../app/lib/auth/pin";
 import { envOrGenerated } from "./lib/envOrGenerated";
+import { verifyExpectedProjectRef } from "./lib/verifyExpectedProjectRef";
+import { findGansevoortOrgId } from "./lib/findGansevoortOrgId";
 
 /**
  * Dev-only test-data seed. NOT a Supabase migration: migrations apply
@@ -44,31 +45,6 @@ function randomPin(): string {
 
 function randomPassword(): string {
   return randomBytes(18).toString("base64url");
-}
-
-/** Positive verification that this script is talking to the expected dev
- * project, beyond just possessing a service-role key -- compares the
- * project ref embedded in SUPABASE_URL against the Supabase CLI's own
- * linked-project marker. */
-function verifyExpectedProjectRef(supabaseUrl: string): void {
-  let expectedRef: string;
-  try {
-    expectedRef = readFileSync("supabase/.temp/project-ref", "utf8").trim();
-  } catch {
-    console.error(
-      "Could not read supabase/.temp/project-ref (the Supabase CLI's linked-project marker). " +
-        'Run "supabase link" first so this script can verify it is pointed at the right project.'
-    );
-    process.exit(1);
-  }
-
-  const actualRef = new URL(supabaseUrl).hostname.split(".")[0];
-  if (actualRef !== expectedRef) {
-    console.error(
-      `SUPABASE_URL project ref "${actualRef}" does not match the linked dev project "${expectedRef}". Aborting.`
-    );
-    process.exit(1);
-  }
 }
 
 async function confirm(message: string): Promise<void> {
@@ -376,13 +352,7 @@ async function main(): Promise<void> {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
-  const { data: orgs, error: orgError } = await supabase.from("organizations").select("id, name");
-  if (orgError) throw orgError;
-  if (!orgs || orgs.length !== 1 || orgs[0].name !== "Gansevoort") {
-    console.error(`Expected exactly one organization named "Gansevoort", found: ${JSON.stringify(orgs)}. Aborting.`);
-    process.exit(1);
-  }
-  const organizationId = orgs[0].id as string;
+  const organizationId = await findGansevoortOrgId(supabase);
 
   await confirm(`About to seed DEV test data into organization "Gansevoort" (${organizationId}) at ${supabaseUrl}.`);
 
@@ -566,6 +536,23 @@ async function main(): Promise<void> {
       canChangeStation: false,
       authEmail: envOrGenerated("DEV_SEED_MANAGER_EMAIL", () => "dev-manager@gansevoort.local").value,
       authPasswordEnvVar: "DEV_SEED_MANAGER_PASSWORD",
+    },
+    {
+      // A second, distinct manager -- for manually exercising maker-checker
+      // workflows (Milestone 2A.2) that require a DIFFERENT manager to
+      // verify/return a document than the one who uploaded/prepared it.
+      // Follows the exact same ensureEmployee path as DEV-MGR-1 above --
+      // no separate seeding pathway.
+      employeeCode: "DEV-MGR-2",
+      firstName: "Dev",
+      lastName: "ManagerTwo",
+      roleName: "manager",
+      pinEnvVar: "DEV_SEED_MANAGER_2_PIN",
+      defaultStationName: null,
+      autoResolveStation: false,
+      canChangeStation: false,
+      authEmail: envOrGenerated("DEV_SEED_MANAGER_2_EMAIL", () => "dev-manager-2@gansevoort.local").value,
+      authPasswordEnvVar: "DEV_SEED_MANAGER_2_PASSWORD",
     },
   ];
   for (const spec of employeeSpecs) {

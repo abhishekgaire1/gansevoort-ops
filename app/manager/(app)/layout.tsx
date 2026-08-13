@@ -25,11 +25,16 @@ export default async function ManagerAppLayout({ children }: { children: ReactNo
         >
           Gansevoort Manager
         </Link>
-        <form action={signOutManager}>
-          <button type="submit" className="text-sm text-zinc-400 underline-offset-4 hover:text-zinc-200 hover:underline">
-            Sign Out
-          </button>
-        </form>
+        <div className="flex items-center gap-6">
+          <Link href="/manager/vendors" className="text-sm text-zinc-400 hover:text-zinc-200">
+            Vendors
+          </Link>
+          <form action={signOutManager}>
+            <button type="submit" className="text-sm text-zinc-400 underline-offset-4 hover:text-zinc-200 hover:underline">
+              Sign Out
+            </button>
+          </form>
+        </div>
       </header>
       <main className="px-6 py-8">{children}</main>
     </div>

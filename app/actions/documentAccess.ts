@@ -79,15 +79,32 @@ export async function getDocumentViewUrl(documentId: string): Promise<DocumentUr
 }
 
 /** Explicit download only -- carries the friendly, derived archive filename
- * via Storage's `download` option; never renames the underlying object. */
+ * via Storage's `download` option; never renames the underlying object.
+ * Uses verified purchase_document data (vendor/type/number/date) once it
+ * exists -- never Gemini's unverified guess -- falling back to the
+ * original filename until (and unless) a VERIFIED record exists. */
 export async function getDocumentDownloadUrl(documentId: string): Promise<DocumentUrlResult> {
   const resolved = await resolveOwnedDocument(documentId);
   if (!resolved.ok) return unresolvedToResult(resolved);
 
+  const { data: verified } = await resolved.serviceClient
+    .from("purchase_documents")
+    .select("vendor_id, document_type, document_number, document_date")
+    .eq("source_document_id", documentId)
+    .eq("status", "VERIFIED")
+    .maybeSingle();
+
+  let verifiedVendorName: string | null = null;
+  if (verified?.vendor_id) {
+    const { data: vendor } = await resolved.serviceClient.from("vendors").select("name").eq("id", verified.vendor_id).maybeSingle();
+    verifiedVendorName = vendor?.name ?? null;
+  }
+
   const friendlyFilename = buildArchiveFilename({
-    vendorName: null,
-    invoiceDate: null,
-    invoiceNumber: null,
+    vendorName: verifiedVendorName,
+    documentDate: verified?.document_date ?? null,
+    documentNumber: verified?.document_number ?? null,
+    documentType: (verified?.document_type as "INVOICE" | "RECEIPT" | "CREDIT_MEMO" | null) ?? null,
     originalFilename: resolved.originalFilename,
   });
 

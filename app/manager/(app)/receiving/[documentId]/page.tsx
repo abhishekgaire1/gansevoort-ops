@@ -39,11 +39,20 @@ export default async function DocumentDetailPage({ params }: { params: Promise<{
     .eq("document_id", documentId)
     .order("attempt_number", { ascending: false });
 
+  const { data: purchaseDocument } = await serviceClient
+    .from("purchase_documents")
+    .select("id, status")
+    .eq("source_document_id", documentId)
+    .eq("organization_id", auth.manager.organizationId)
+    .maybeSingle();
+
   return (
     <DocumentDetailView
       documentId={document.id}
       originalFilename={document.original_filename}
       contentType={document.content_type}
+      purchaseDocumentId={purchaseDocument?.id ?? null}
+      purchaseDocumentStatus={purchaseDocument?.status ?? null}
       attempts={(attempts ?? []).map((attempt) => ({
         id: attempt.id,
         attemptNumber: attempt.attempt_number,

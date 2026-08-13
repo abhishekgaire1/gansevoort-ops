@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { finalizeDocumentUploadRpc, DocumentIdentityConflictError } from "@/app/lib/documents/finalizeDocumentUploadRpc";
+import { VendorNotActiveError } from "@/app/lib/purchaseDocuments/errors";
 
 // CI-safe: no network, no database -- fakes supabase.rpc() directly, same
 // spirit as tests/stations.unit.test.ts's createFakeSupabase.
@@ -21,11 +22,13 @@ const INPUT = {
   fileSha256: "a".repeat(64),
   provider: "gemini",
   model: "gemini-3.6-flash",
+  vendorId: "vendor-1",
+  declaredDocumentType: "INVOICE" as const,
 };
 
 describe("finalizeDocumentUploadRpc", () => {
   it("calls the finalize_document_upload RPC exactly once, with snake_case parameters -- one round trip for both rows", async () => {
-    const { client, rpc } = fakeSupabase({ data: [{ document_id: "doc-1", attempt_id: "attempt-1", replayed: false }], error: null });
+    const { client, rpc } = fakeSupabase({ data: [{ out_document_id: "doc-1", out_attempt_id: "attempt-1", out_replayed: false }], error: null });
 
     await finalizeDocumentUploadRpc(client, INPUT);
 
@@ -41,11 +44,13 @@ describe("finalizeDocumentUploadRpc", () => {
       p_file_sha256: "a".repeat(64),
       p_provider: "gemini",
       p_model: "gemini-3.6-flash",
+      p_vendor_id: "vendor-1",
+      p_declared_document_type: "INVOICE",
     });
   });
 
   it("maps the returned row (array form) to camelCase, including attemptId and replayed", async () => {
-    const { client } = fakeSupabase({ data: [{ document_id: "doc-1", attempt_id: "attempt-1", replayed: true }], error: null });
+    const { client } = fakeSupabase({ data: [{ out_document_id: "doc-1", out_attempt_id: "attempt-1", out_replayed: true }], error: null });
     const result = await finalizeDocumentUploadRpc(client, INPUT);
     expect(result).toEqual({ documentId: "doc-1", attemptId: "attempt-1", replayed: true });
   });
@@ -56,6 +61,14 @@ describe("finalizeDocumentUploadRpc", () => {
       error: { code: "GA001", message: "document_id doc-1 already exists with different file identity" },
     });
     await expect(finalizeDocumentUploadRpc(client, INPUT)).rejects.toBeInstanceOf(DocumentIdentityConflictError);
+  });
+
+  it("throws VendorNotActiveError for the app-defined GA005 code", async () => {
+    const { client } = fakeSupabase({
+      data: null,
+      error: { code: "GA005", message: "vendor_id vendor-1 is not an active vendor in organization org-1" },
+    });
+    await expect(finalizeDocumentUploadRpc(client, INPUT)).rejects.toBeInstanceOf(VendorNotActiveError);
   });
 
   it("throws a generic Error (not DocumentIdentityConflictError) for any other RPC error code", async () => {

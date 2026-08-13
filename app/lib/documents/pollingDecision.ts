@@ -1,4 +1,4 @@
-import type { DocumentDisplayStatus } from "@/app/lib/documents/documentStatus";
+import type { ReceivingItemStatus } from "@/app/lib/documents/documentStatus";
 
 /**
  * Single source of truth for "should the client keep polling for status
@@ -20,6 +20,6 @@ import type { DocumentDisplayStatus } from "@/app/lib/documents/documentStatus";
  * function stops returning true) once the existing 5-minute stale
  * threshold passes, with no change needed here.
  */
-export function shouldPollForStatuses(statuses: DocumentDisplayStatus[]): boolean {
+export function shouldPollForStatuses(statuses: ReceivingItemStatus[]): boolean {
   return statuses.includes("PROCESSING");
 }
