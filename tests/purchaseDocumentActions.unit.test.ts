@@ -14,7 +14,6 @@ const {
   submitMock,
   verifyMock,
   returnMock,
-  saveReviewCorrectionsMock,
   initiateAmendmentMock,
   discardMock,
   withdrawMock,
@@ -24,7 +23,6 @@ const {
   submitMock: vi.fn(),
   verifyMock: vi.fn(),
   returnMock: vi.fn(),
-  saveReviewCorrectionsMock: vi.fn(),
   initiateAmendmentMock: vi.fn(),
   discardMock: vi.fn(),
   withdrawMock: vi.fn(),
@@ -36,7 +34,6 @@ vi.mock("@/app/lib/purchaseDocuments/submitPurchaseDocumentForVerificationRpc", 
 }));
 vi.mock("@/app/lib/purchaseDocuments/verifyPurchaseDocumentRpc", () => ({ verifyPurchaseDocumentRpc: verifyMock }));
 vi.mock("@/app/lib/purchaseDocuments/returnPurchaseDocumentToDraftRpc", () => ({ returnPurchaseDocumentToDraftRpc: returnMock }));
-vi.mock("@/app/lib/purchaseDocuments/saveReviewCorrectionsRpc", () => ({ saveReviewCorrectionsRpc: saveReviewCorrectionsMock }));
 vi.mock("@/app/lib/purchaseDocuments/initiateAmendmentRpc", () => ({ initiateAmendmentRpc: initiateAmendmentMock }));
 vi.mock("@/app/lib/purchaseDocuments/discardPurchaseDocumentDraftRpc", () => ({ discardPurchaseDocumentDraftRpc: discardMock }));
 vi.mock("@/app/lib/purchaseDocuments/withdrawPurchaseDocumentSubmissionRpc", () => ({ withdrawPurchaseDocumentSubmissionRpc: withdrawMock }));
@@ -47,7 +44,6 @@ import {
   submitPurchaseDocumentForVerification,
   verifyPurchaseDocument,
   returnPurchaseDocumentToDraft,
-  saveReviewCorrections,
   initiatePurchaseDocumentAmendment,
   discardPurchaseDocumentDraft,
   withdrawPurchaseDocumentSubmission,
@@ -81,7 +77,6 @@ beforeEach(() => {
   submitMock.mockReset();
   verifyMock.mockReset();
   returnMock.mockReset();
-  saveReviewCorrectionsMock.mockReset();
   initiateAmendmentMock.mockReset();
   discardMock.mockReset();
   withdrawMock.mockReset();
@@ -163,35 +158,6 @@ describe("returnPurchaseDocumentToDraft", () => {
     returnMock.mockResolvedValue({ purchaseDocumentId: "pd-1", status: "DRAFT", version: 3 });
     await returnPurchaseDocumentToDraft("pd-1", 2, "Wrong vendor");
     expect(returnMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reason: "Wrong vendor" }));
-  });
-});
-
-describe("saveReviewCorrections", () => {
-  it("rejects unauthenticated callers before calling the RPC", async () => {
-    requireManagerOrAdminMock.mockResolvedValue({ ok: false, reason: "not_authenticated" });
-    const result = await saveReviewCorrections({ purchaseDocumentId: "pd-1", expectedVersion: 1, header: HEADER, lines: [] });
-    expect(result).toEqual({ ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." });
-    expect(saveReviewCorrectionsMock).not.toHaveBeenCalled();
-  });
-
-  it("passes the resolved manager identity (never a client-supplied one) to the RPC", async () => {
-    saveReviewCorrectionsMock.mockResolvedValue({ purchaseDocumentId: "pd-1", version: 5 });
-    const result = await saveReviewCorrections({ purchaseDocumentId: "pd-1", expectedVersion: 4, header: HEADER, lines: [] });
-    expect(saveReviewCorrectionsMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ purchaseDocumentId: "pd-1", appUserId: "user-1", organizationId: "org-1", expectedVersion: 4 })
-    );
-    expect(result).toEqual({ ok: true, version: 5 });
-  });
-
-  it("maps CannotSelfVerifyError to a message specific to reviewing your own submission", async () => {
-    saveReviewCorrectionsMock.mockRejectedValue(new CannotSelfVerifyError("cannot review-correct"));
-    const result = await saveReviewCorrections({ purchaseDocumentId: "pd-1", expectedVersion: 1, header: HEADER, lines: [] });
-    expect(result).toEqual({
-      ok: false,
-      reason: "cannot_self_verify",
-      message: "You prepared this document and cannot review-correct your own submission.",
-    });
   });
 });
 

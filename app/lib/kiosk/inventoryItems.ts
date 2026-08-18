@@ -47,6 +47,12 @@ export async function listActiveInventoryItemsForOrganization(
     .select("id, name, category_id, base_unit_id, inventory_categories(name)")
     .eq("organization_id", organizationId)
     .eq("status", "active")
+    // A PENDING_REVIEW item (an AI proposal awaiting manager approval) is
+    // never withdrawable -- this filter is a UX nicety only, since a
+    // PENDING_REVIEW item structurally has no inventory_item_units rows
+    // yet (created at confirmation time, not proposal time) and the
+    // withdrawable-entry-unit filter below would already exclude it.
+    .eq("approval_status", "CONFIRMED")
     .order("name");
 
   if (error) {

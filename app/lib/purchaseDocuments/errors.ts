@@ -11,6 +11,7 @@ export const PURCHASE_DOCUMENT_SQLSTATE = {
   CANNOT_SELF_VERIFY: "GA004",
   VENDOR_NOT_ACTIVE: "GA005",
   NOT_PREPARER: "GA006",
+  PREPARATION_INCOMPLETE: "GA013",
 } as const;
 
 /** The purchase document's version didn't match, or it wasn't in the
@@ -59,6 +60,17 @@ export class NotPreparerError extends Error {
   }
 }
 
+/** Send for Final Review was attempted while a CURRENT relevant line still
+ * has incomplete item mapping/receiving preparation -- see
+ * 20260811100047's purchase_document_preparation_incomplete() for the
+ * exact, authoritative definition of "complete." */
+export class PreparationIncompleteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PreparationIncompleteError";
+  }
+}
+
 export function mapPurchaseDocumentRpcError(error: { code?: string; message: string }): Error {
   switch (error.code) {
     case PURCHASE_DOCUMENT_SQLSTATE.STALE_OR_WRONG_STATUS:
@@ -71,6 +83,8 @@ export function mapPurchaseDocumentRpcError(error: { code?: string; message: str
       return new VendorNotActiveError(error.message);
     case PURCHASE_DOCUMENT_SQLSTATE.NOT_PREPARER:
       return new NotPreparerError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.PREPARATION_INCOMPLETE:
+      return new PreparationIncompleteError(error.message);
     default:
       return new Error(error.message);
   }

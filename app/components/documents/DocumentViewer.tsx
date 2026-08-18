@@ -11,10 +11,17 @@ export function DocumentViewer({
   viewUrl,
   viewError,
   contentType,
+  heightClassName = "h-[70vh]",
 }: {
   viewUrl: string | null;
   viewError: string | null;
   contentType: string;
+  /** Defaults to a fixed 70vh (the original standalone-page behavior).
+   * Callers embedding this inside their own fixed-height, independently-
+   * scrollable workspace (the Step 1 Review Invoice split pane) pass
+   * "h-full" instead, so the PDF fills its container rather than imposing
+   * its own viewport-relative height. */
+  heightClassName?: string;
 }) {
   if (viewError) {
     return <p className="text-sm text-red-400">{viewError}</p>;
@@ -23,8 +30,8 @@ export function DocumentViewer({
     return <p className="text-sm text-zinc-500">Loading document…</p>;
   }
   if (contentType === "application/pdf") {
-    return <embed src={viewUrl} type="application/pdf" className="h-[70vh] w-full rounded-lg" />;
+    return <embed src={viewUrl} type="application/pdf" className={`${heightClassName} w-full rounded-lg`} />;
   }
   // eslint-disable-next-line @next/next/no-img-element -- signed Storage URL, not an optimizable static asset
-  return <img src={viewUrl} alt="Original document" className="max-h-[70vh] w-full rounded-lg object-contain" />;
+  return <img src={viewUrl} alt="Original document" className={`max-${heightClassName} w-full rounded-lg object-contain`} />;
 }

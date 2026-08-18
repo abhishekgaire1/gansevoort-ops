@@ -145,30 +145,44 @@ describe("search_receiving_queue -- filtering happens before the limit, not afte
     60_000
   );
 
-  it("combined filters (vendor + document type + uploaded-by + status + text search) all narrow correctly together", async () => {
-    const documentNumber = `QUEUE-COMBINED-${randomUUID().slice(0, 8)}`;
-    const target = await createDraftPurchaseDocument(documentNumber);
+  it(
+    "combined filters (vendor + document type + uploaded-by + status + text search) all narrow correctly together",
+    async () => {
+      const documentNumber = `QUEUE-COMBINED-${randomUUID().slice(0, 8)}`;
+      const target = await createDraftPurchaseDocument(documentNumber);
 
-    const result = await getReceivingQueue(fx.organizationId, {
-      vendorId: fx.vendorId,
-      documentType: "INVOICE",
-      uploadedByAppUserId: fx.changeableEmployeeAppUserId,
-      status: "DRAFT",
-      q: documentNumber,
-    });
+      const result = await getReceivingQueue(fx.organizationId, {
+        vendorId: fx.vendorId,
+        documentType: "INVOICE",
+        uploadedByAppUserId: fx.changeableEmployeeAppUserId,
+        status: "DRAFT",
+        q: documentNumber,
+      });
 
-    expect(result).toHaveLength(1);
-    expect(result[0].documentId).toBe(target.documentId);
-    expect(result[0].purchaseDocumentId).toBe(target.purchaseDocumentId);
-    expect(result[0].uploadedByName).not.toBe("Unknown");
+      expect(result).toHaveLength(1);
+      expect(result[0].documentId).toBe(target.documentId);
+      expect(result[0].purchaseDocumentId).toBe(target.purchaseDocumentId);
+      expect(result[0].uploadedByName).not.toBe("Unknown");
 
-    // A mismatched status excludes it.
-    const wrongStatus = await getReceivingQueue(fx.organizationId, {
-      vendorId: fx.vendorId,
-      documentType: "INVOICE",
-      status: "VERIFIED",
-      q: documentNumber,
-    });
-    expect(wrongStatus.find((item) => item.documentId === target.documentId)).toBeUndefined();
-  });
+      // A mismatched status excludes it.
+      const wrongStatus = await getReceivingQueue(fx.organizationId, {
+        vendorId: fx.vendorId,
+        documentType: "INVOICE",
+        status: "VERIFIED",
+        q: documentNumber,
+      });
+      expect(wrongStatus.find((item) => item.documentId === target.documentId)).toBeUndefined();
+    },
+    // Real-Postgres round trips (createDraftPurchaseDocument's own extraction
+    // + draft + save chain, plus two getReceivingQueue search calls) against
+    // the linked DEV database -- the sibling test above in this same file
+    // already needed the identical explicit timeout for the same reason
+    // (this file is never run under CI's stricter time budget, only
+    // manually/on-demand). Vitest's 5s default was never enough headroom
+    // here even in isolation under any real network latency, and gets
+    // tighter still when 22 .rpc.test.ts files run concurrently against the
+    // same instance -- a longer timeout, not a weaker assertion, is the
+    // correct fix for a genuinely slower integration test.
+    60_000
+  );
 });

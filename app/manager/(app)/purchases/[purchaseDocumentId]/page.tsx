@@ -35,7 +35,7 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
   const { data: purchaseDocument } = await serviceClient
     .from("purchase_documents")
     .select(
-      "id, source_document_id, source_extraction_id, vendor_id, document_type, document_number, document_date, po_number, delivery_date, subtotal, tax, fees, total, currency, status, version, created_by_app_user_id, verified_by_app_user_id, verified_at, last_returned_reason, last_returned_at, revision_group_id, revision_number, previous_revision_id, amendment_reason, discarded_by_app_user_id, discarded_at, discard_reason"
+      "id, source_document_id, source_extraction_id, vendor_id, document_type, document_number, document_date, po_number, delivery_date, subtotal, tax, fees, total, currency, status, version, created_by_app_user_id, verified_by_app_user_id, verified_at, last_returned_reason, last_returned_at, revision_group_id, revision_number, previous_revision_id, amendment_reason, discarded_by_app_user_id, discarded_at, discard_reason, updated_at"
     )
     .eq("id", purchaseDocumentId)
     .eq("organization_id", auth.manager.organizationId)
@@ -187,6 +187,43 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
     );
   }
 
+  // The physical delivery verifier -- an EMPLOYEE, never an app_user (they
+  // never authenticate) -- captured once at upload, correctable afterward
+  // (document_delivery_verifier_corrections). Distinct from "Final review
+  // verified by," the second manager's own app-authenticated verification.
+  // Needed on every branch now (Step 4's Review & Send summary shows it
+  // too, not only the post-VERIFIED summary), so resolved once up front.
+  let deliveryVerifiedByName: string | null = null;
+  if (purchaseDocument.source_document_id) {
+    const { data: deliveryVerifierEmployeeId } = await serviceClient.rpc("current_document_delivery_verifier_employee_id", {
+      p_document_id: purchaseDocument.source_document_id,
+      p_organization_id: auth.manager.organizationId,
+    });
+    if (deliveryVerifierEmployeeId) {
+      const { data: employee } = await serviceClient
+        .from("employees")
+        .select("first_name, last_name")
+        .eq("id", deliveryVerifierEmployeeId as string)
+        .maybeSingle();
+      deliveryVerifiedByName = employee ? `${employee.first_name} ${employee.last_name}` : null;
+    }
+  }
+
+  // The preparer (Manager 1) -- needed by Step 4's Review & Send "People"
+  // summary on the DRAFT/READY_FOR_VERIFICATION path too, not only the
+  // post-VERIFIED summary (which already resolves its own preparerAppUser
+  // further below), so resolved once up front the same way.
+  let preparerName: string | null = null;
+  {
+    const { data: preparerAppUser } = await serviceClient
+      .from("app_users")
+      .select("id, employees(first_name, last_name)")
+      .eq("id", purchaseDocument.created_by_app_user_id)
+      .maybeSingle();
+    const employee = preparerAppUser ? (Array.isArray(preparerAppUser.employees) ? preparerAppUser.employees[0] : preparerAppUser.employees) : null;
+    preparerName = employee ? `${employee.first_name} ${employee.last_name}` : null;
+  }
+
   if (purchaseDocument.status === "VERIFIED") {
     // Corrections indicator: read the VERIFIED event's own finalCorrectionCount
     // (computed once, server-side, at verify time -- never recomputed here).
@@ -232,6 +269,7 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
         verifiedByName={displayName(verifiedByAppUser)}
         preparedByName={displayName(preparerAppUser)}
         uploadedByName={displayName(uploaderAppUser)}
+        deliveryVerifiedByName={deliveryVerifiedByName}
         isOriginalUploader={isOriginalUploader}
         finalCorrectionCount={finalCorrectionCount}
         revisionNumber={purchaseDocument.revision_number}
@@ -320,6 +358,9 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
       lastReturnedAt={purchaseDocument.last_returned_at}
       initialDuplicates={duplicates}
       vendors={vendorsResult.ok ? vendorsResult.vendors : []}
+      deliveryVerifiedByName={deliveryVerifiedByName}
+      preparerName={preparerName}
+      preparedAt={purchaseDocument.updated_at}
     />
   );
 }

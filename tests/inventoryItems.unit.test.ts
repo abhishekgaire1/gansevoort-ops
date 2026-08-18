@@ -18,7 +18,8 @@ interface FakeSupabaseOptions {
 
 function createFakeSupabase({ itemRows, itemsError = null, entryUnitRows = [], entryUnitsError = null }: FakeSupabaseOptions) {
   const order = vi.fn().mockResolvedValue({ data: itemRows, error: itemsError });
-  const itemsEqStatus = vi.fn().mockReturnValue({ order });
+  const itemsEqApprovalStatus = vi.fn().mockReturnValue({ order });
+  const itemsEqStatus = vi.fn().mockReturnValue({ eq: itemsEqApprovalStatus });
   const itemsEqOrg = vi.fn().mockReturnValue({ eq: itemsEqStatus });
   const itemsSelect = vi.fn().mockReturnValue({ eq: itemsEqOrg });
 
@@ -38,6 +39,7 @@ function createFakeSupabase({ itemRows, itemsError = null, entryUnitRows = [], e
     itemsSelect,
     itemsEqOrg,
     itemsEqStatus,
+    itemsEqApprovalStatus,
     order,
     entryUnitsSelect,
     entryUnitsIn,
@@ -46,14 +48,15 @@ function createFakeSupabase({ itemRows, itemsError = null, entryUnitRows = [], e
 }
 
 describe("listActiveInventoryItemsForOrganization", () => {
-  it("queries inventory_items scoped to organization_id and status='active', ordered by name", async () => {
-    const { client, from, itemsSelect, itemsEqOrg, itemsEqStatus, order } = createFakeSupabase({ itemRows: [] });
+  it("queries inventory_items scoped to organization_id, status='active', and approval_status='CONFIRMED', ordered by name", async () => {
+    const { client, from, itemsSelect, itemsEqOrg, itemsEqStatus, itemsEqApprovalStatus, order } = createFakeSupabase({ itemRows: [] });
     await listActiveInventoryItemsForOrganization(client, "org-1");
 
     expect(from).toHaveBeenCalledWith("inventory_items");
     expect(itemsSelect).toHaveBeenCalledWith("id, name, category_id, base_unit_id, inventory_categories(name)");
     expect(itemsEqOrg).toHaveBeenCalledWith("organization_id", "org-1");
     expect(itemsEqStatus).toHaveBeenCalledWith("status", "active");
+    expect(itemsEqApprovalStatus).toHaveBeenCalledWith("approval_status", "CONFIRMED");
     expect(order).toHaveBeenCalledWith("name");
   });
 

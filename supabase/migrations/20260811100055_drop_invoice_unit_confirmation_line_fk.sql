@@ -1,0 +1,27 @@
+-- Fixes the real Step 4 "Send for Final Review" failure (SQLSTATE 23503):
+-- every purchase_document_lines-touching RPC in this codebase -- save
+-- draft, submit for verification, verify, amendments, review corrections,
+-- discard/withdraw -- deletes and reinserts the full line set on every
+-- call (see the "Line UUIDs are not stable across a save ... nothing
+-- references purchase_document_lines.id from elsewhere" design note in
+-- 20260811100025). A hard FK from a companion table to
+-- purchase_document_lines(purchase_document_id, line_key) is therefore
+-- unsafe: Postgres enforces a non-deferred FK at the DELETE statement
+-- itself, not at COMMIT, so the very next save/submit on a document with
+-- ANY confirmed invoice-unit line fails immediately with "update or
+-- delete on table purchase_document_lines violates foreign key
+-- constraint pdl_invoice_unit_confirmations_pd_line_fk" -- exactly the
+-- generic "Something went wrong" error reported on Step 4.
+--
+-- purchase_document_line_classifications and receipt_lines.matched_line_key
+-- already treat line_key as a SOFT pointer for this exact reason -- no
+-- physical FK, only RPC-level existence checks at write time (already
+-- present in confirm_receiving_line_invoice_unit, 20260811100054). This
+-- brings purchase_document_line_invoice_unit_confirmations in line with
+-- that same, deliberate, already-established convention instead of the
+-- broken one introduced last migration. Org-scoping is untouched --
+-- pdl_invoice_unit_confirmations_pd_org_fk (purchase_document_id,
+-- organization_id) remains, so a confirmation can never be created for
+-- a purchase_document_id outside the caller's own organization.
+alter table public.purchase_document_line_invoice_unit_confirmations
+  drop constraint pdl_invoice_unit_confirmations_pd_line_fk;

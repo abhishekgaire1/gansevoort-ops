@@ -1,13 +1,17 @@
 "use server";
 
+import { after } from "next/server";
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
+import { classifyPurchaseDocumentLines } from "@/app/lib/itemMaster/classifyPurchaseDocumentLines";
+import { getPreparationStatus, type PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
+import { getPurchaseDocumentReviewSummary as getReviewSummary, type PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
+import { getReceiptHistory, type ReceiptHistoryEntry } from "@/app/lib/purchaseDocuments/getReceiptHistory";
 import { initializePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/initializePurchaseDocumentDraftRpc";
 import { savePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/savePurchaseDocumentDraftRpc";
 import { submitPurchaseDocumentForVerificationRpc } from "@/app/lib/purchaseDocuments/submitPurchaseDocumentForVerificationRpc";
 import { verifyPurchaseDocumentRpc } from "@/app/lib/purchaseDocuments/verifyPurchaseDocumentRpc";
 import { returnPurchaseDocumentToDraftRpc } from "@/app/lib/purchaseDocuments/returnPurchaseDocumentToDraftRpc";
-import { saveReviewCorrectionsRpc } from "@/app/lib/purchaseDocuments/saveReviewCorrectionsRpc";
 import { initiateAmendmentRpc } from "@/app/lib/purchaseDocuments/initiateAmendmentRpc";
 import { discardPurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/discardPurchaseDocumentDraftRpc";
 import { withdrawPurchaseDocumentSubmissionRpc } from "@/app/lib/purchaseDocuments/withdrawPurchaseDocumentSubmissionRpc";
@@ -21,6 +25,7 @@ import {
   StaleVersionError,
   VerifiedLockedError,
   VendorNotActiveError,
+  PreparationIncompleteError,
 } from "@/app/lib/purchaseDocuments/errors";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 
@@ -31,19 +36,79 @@ function safeMessage(err: unknown): string {
   if (err instanceof StaleVersionError) return "This document was updated elsewhere. Reload to see the latest version.";
   if (err instanceof VerifiedLockedError) return "This document is verified and can no longer be changed.";
   if (err instanceof VendorNotActiveError) return "The selected vendor is not active.";
+  if (err instanceof PreparationIncompleteError) {
+    return "This document isn't ready for final review yet -- every line needs a confirmed item mapping, and inventory lines need receiving quantities recorded first.";
+  }
   return "Something went wrong. Try again.";
 }
 
-function reasonFor(err: unknown): "not_preparer" | "cannot_self_verify" | "stale" | "locked" | "invalid_vendor" | "misconfigured" {
+/** Every business-rule error this module knows how to translate into a
+ * specific manager-facing message. Anything else is a genuinely
+ * unexpected failure (a constraint violation, a bad cast, a bug) -- see
+ * logIfUnexpected below for why those must never be silently discarded. */
+function isKnownPurchaseDocumentError(err: unknown): boolean {
+  return (
+    err instanceof NotPreparerError ||
+    err instanceof CannotSelfVerifyError ||
+    err instanceof StaleVersionError ||
+    err instanceof VerifiedLockedError ||
+    err instanceof VendorNotActiveError ||
+    err instanceof PreparationIncompleteError
+  );
+}
+
+/** The manager-facing message can stay friendly, but an UNEXPECTED error
+ * (not one of the typed business-rule errors above) must never just
+ * vanish behind "Something went wrong" -- that's exactly what let a real
+ * foreign-key bug (20260811100054's confirmed-invoice-unit FK breaking
+ * every delete-and-reinsert save/submit) hide for as long as it did.
+ * Logs the actual Postgres/RPC error server-side for diagnosis; a known
+ * business-rule rejection (e.g. PreparationIncompleteError, expected and
+ * already explained to the manager) is not worth logging as a warning. */
+function logIfUnexpected(actionName: string, err: unknown, context: Record<string, unknown>): void {
+  if (!isKnownPurchaseDocumentError(err)) {
+    console.error(`${actionName}: unexpected error`, { ...context, error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err });
+  }
+}
+
+function reasonFor(
+  err: unknown
+): "not_preparer" | "cannot_self_verify" | "stale" | "locked" | "invalid_vendor" | "preparation_incomplete" | "misconfigured" {
   if (err instanceof NotPreparerError) return "not_preparer";
   if (err instanceof CannotSelfVerifyError) return "cannot_self_verify";
   if (err instanceof StaleVersionError) return "stale";
   if (err instanceof VerifiedLockedError) return "locked";
   if (err instanceof VendorNotActiveError) return "invalid_vendor";
+  if (err instanceof PreparationIncompleteError) return "preparation_incomplete";
   return "misconfigured";
 }
 
-type FailureReason = "not_authorized" | "not_preparer" | "cannot_self_verify" | "stale" | "locked" | "invalid_vendor" | "misconfigured";
+type FailureReason =
+  | "not_authorized"
+  | "not_preparer"
+  | "cannot_self_verify"
+  | "stale"
+  | "locked"
+  | "invalid_vendor"
+  | "preparation_incomplete"
+  | "misconfigured";
+
+/** Best-effort, fire-and-forget scheduling -- mirrors documentUpload.ts's
+ * extraction-scheduling shape. Called after submit, review-correction save,
+ * and verify (the three points that can produce a STALE or never-classified
+ * line per plan §4) -- never from withdraw/return, which only send the
+ * document back to DRAFT for a fresh classification opportunity at its
+ * next submit. A failure here must never surface as a failure of the
+ * action that scheduled it; the page-load recovery check and the manual
+ * "Run Item Matching" button both independently pick up anything missed. */
+function scheduleClassification(purchaseDocumentId: string, organizationId: string): void {
+  try {
+    after(() => classifyPurchaseDocumentLines(purchaseDocumentId, organizationId));
+  } catch {
+    // Nothing to do here -- the item mapping panel's own recovery check
+    // and manual "Run Item Matching" button cover this case.
+  }
+}
 
 export type CreateOrOpenPurchaseDocumentDraftResult =
   | { ok: true; purchaseDocumentId: string; status: PurchaseDocumentStatus; created: boolean }
@@ -64,8 +129,14 @@ export async function createOrOpenPurchaseDocumentDraft(documentId: string): Pro
       organizationId: auth.manager.organizationId,
       appUserId: auth.manager.appUserId,
     });
+    // Item matching begins as soon as a real draft with real lines exists
+    // -- never deferred until Send for Final Review, which the completion
+    // gate (20260811100047) now blocks on classification already being
+    // complete. Harmless/no-op if there's nothing to classify yet.
+    scheduleClassification(result.purchaseDocumentId, auth.manager.organizationId);
     return { ok: true, purchaseDocumentId: result.purchaseDocumentId, status: result.status, created: result.created };
   } catch (err) {
+    logIfUnexpected("createOrOpenPurchaseDocumentDraft", err, { documentId });
     return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
   }
 }
@@ -97,8 +168,10 @@ export async function savePurchaseDocumentDraft(input: SavePurchaseDocumentDraft
       header: input.header,
       lines: input.lines,
     });
+    scheduleClassification(input.purchaseDocumentId, auth.manager.organizationId);
     return { ok: true, version: result.version };
   } catch (err) {
+    logIfUnexpected("savePurchaseDocumentDraft", err, { purchaseDocumentId: input.purchaseDocumentId, expectedVersion: input.expectedVersion });
     return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
   }
 }
@@ -133,12 +206,18 @@ export async function submitPurchaseDocumentForVerification(
       header,
       lines,
     });
+    scheduleClassification(purchaseDocumentId, auth.manager.organizationId);
     return { ok: true, status: result.status, version: result.version };
   } catch (err) {
+    logIfUnexpected("submitPurchaseDocumentForVerification", err, { purchaseDocumentId, expectedVersion });
     return {
       ok: false,
       reason: reasonFor(err),
-      message: err instanceof StaleVersionError ? "This document isn't ready to submit yet, or was updated elsewhere." : safeMessage(err),
+      message: err instanceof StaleVersionError
+        ? "This document isn't ready to submit yet, or was updated elsewhere."
+        : isKnownPurchaseDocumentError(err)
+          ? safeMessage(err)
+          : "We couldn't send this invoice for final review. Please try again.",
     };
   }
 }
@@ -173,8 +252,10 @@ export async function verifyPurchaseDocument(
       header,
       lines,
     });
+    scheduleClassification(purchaseDocumentId, auth.manager.organizationId);
     return { ok: true, verifiedAt: result.verifiedAt };
   } catch (err) {
+    logIfUnexpected("verifyPurchaseDocument", err, { purchaseDocumentId, expectedVersion });
     return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
   }
 }
@@ -204,6 +285,7 @@ export async function returnPurchaseDocumentToDraft(
     });
     return { ok: true, status: result.status, version: result.version };
   } catch (err) {
+    logIfUnexpected("returnPurchaseDocumentToDraft", err, { purchaseDocumentId, expectedVersion });
     return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
   }
 }
@@ -241,45 +323,6 @@ export async function checkPurchaseDocumentDuplicates(
   return { ok: true, duplicates };
 }
 
-export interface SaveReviewCorrectionsActionInput {
-  purchaseDocumentId: string;
-  expectedVersion: number;
-  header: PurchaseDocumentHeaderDraft;
-  lines: PurchaseDocumentLine[];
-}
-
-export type SaveReviewCorrectionsActionResult =
-  | { ok: true; version: number }
-  | { ok: false; reason: FailureReason; message: string };
-
-/** Non-preparer-only: the independent verifier's controlled write path for
- * READY_FOR_VERIFICATION. Writes its own exactly-attributed audit event
- * server-side (see the RPC) -- this action has no diff logic itself. */
-export async function saveReviewCorrections(input: SaveReviewCorrectionsActionInput): Promise<SaveReviewCorrectionsActionResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) {
-    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
-  }
-
-  try {
-    const result = await saveReviewCorrectionsRpc(getServiceRoleClient(), {
-      purchaseDocumentId: input.purchaseDocumentId,
-      organizationId: auth.manager.organizationId,
-      appUserId: auth.manager.appUserId,
-      expectedVersion: input.expectedVersion,
-      header: input.header,
-      lines: input.lines,
-    });
-    return { ok: true, version: result.version };
-  } catch (err) {
-    return {
-      ok: false,
-      reason: reasonFor(err),
-      message: err instanceof CannotSelfVerifyError ? "You prepared this document and cannot review-correct your own submission." : safeMessage(err),
-    };
-  }
-}
-
 export type InitiateAmendmentResult =
   | { ok: true; purchaseDocumentId: string; revisionNumber: number }
   | { ok: false; reason: FailureReason; message: string };
@@ -307,6 +350,7 @@ export async function initiatePurchaseDocumentAmendment(
     });
     return { ok: true, purchaseDocumentId: result.purchaseDocumentId, revisionNumber: result.revisionNumber };
   } catch (err) {
+    logIfUnexpected("initiatePurchaseDocumentAmendment", err, { purchaseDocumentId });
     return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
   }
 }
@@ -341,6 +385,7 @@ export async function discardPurchaseDocumentDraft(
     });
     return { ok: true, status: result.status, version: result.version };
   } catch (err) {
+    logIfUnexpected("discardPurchaseDocumentDraft", err, { purchaseDocumentId, expectedVersion });
     return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
   }
 }
@@ -375,6 +420,56 @@ export async function withdrawPurchaseDocumentSubmission(
     });
     return { ok: true, status: result.status, version: result.version };
   } catch (err) {
+    logIfUnexpected("withdrawPurchaseDocumentSubmission", err, { purchaseDocumentId, expectedVersion });
     return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
   }
+}
+
+export type GetPurchaseDocumentPreparationStatusResult = { ok: true; status: PreparationStatus } | { ok: false; reason: "not_authorized"; message: string };
+
+/** The read-only preview of whether Send for Final Review would currently
+ * succeed -- backs the button's disabled state and its per-line reasons.
+ * Never the enforcement itself; submitPurchaseDocumentForVerification's
+ * own RPC call is the only thing that can't be bypassed. */
+export async function getPurchaseDocumentPreparationStatus(purchaseDocumentId: string): Promise<GetPurchaseDocumentPreparationStatusResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  const status = await getPreparationStatus(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
+  return { ok: true, status };
+}
+
+export type GetPurchaseDocumentReviewSummaryResult =
+  | { ok: true; summary: PurchaseDocumentReviewSummary }
+  | { ok: false; reason: "not_authorized"; message: string };
+
+/** Step 4's read-only "what am I about to send" summary -- purely an
+ * aggregation of what earlier steps already produced (classifications,
+ * receiving config, receipt facts). Never a second opinion on readiness;
+ * getPurchaseDocumentPreparationStatus above remains the only source of
+ * truth for that. */
+export async function getPurchaseDocumentReviewSummary(purchaseDocumentId: string): Promise<GetPurchaseDocumentReviewSummaryResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  const summary = await getReviewSummary(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
+  return { ok: true, summary };
+}
+
+export type GetReceiptHistoryResult = { ok: true; history: ReceiptHistoryEntry[] } | { ok: false; reason: "not_authorized"; message: string };
+
+/** The VERIFIED page's read-only receipt timeline -- every receipt ever
+ * recorded for this document, each marked Effective/Superseded. */
+export async function getReceiptHistoryForPurchaseDocument(purchaseDocumentId: string): Promise<GetReceiptHistoryResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  const history = await getReceiptHistory(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
+  return { ok: true, history };
 }

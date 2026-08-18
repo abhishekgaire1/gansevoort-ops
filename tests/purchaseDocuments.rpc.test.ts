@@ -15,7 +15,28 @@ import { NotPreparerError, CannotSelfVerifyError, StaleVersionError } from "@/ap
 import { findPossibleDuplicatePurchaseDocuments } from "@/app/lib/purchaseDocuments/duplicateDetection";
 import { getReceivingQueue } from "@/app/lib/documents/receivingQueue";
 import { setupRpcTestFixtures, setupOtherOrgFixtures, type RpcTestFixtures } from "./testFixtures";
+import { confirmAllCurrentLinesNonInventory, confirmLineWithSnapshot, getLineKeys } from "./itemMasterTestHelpers";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentType, PurchaseDocumentStatus } from "@/app/lib/purchaseDocuments/types";
+
+/**
+ * The first-manager completion gate (20260811100047) now requires every
+ * CURRENT line to have a CONFIRMED classification before
+ * submit_purchase_document_for_verification succeeds -- added AFTER this
+ * entire test file, whose ~2500 lines test maker-checker/amendment/
+ * revision/discard/duplicate-detection behavior that has nothing to do
+ * with item classification. confirmAllCurrentLinesNonInventory (imported
+ * above) satisfies the gate cheaply (a throwaway NON_INVENTORY item needs
+ * no receiving data) wherever a test needs a document to actually reach
+ * READY_FOR_VERIFICATION/VERIFIED -- it's a no-op for tests expecting
+ * submit to fail for an unrelated reason (stale version, wrong preparer,
+ * etc.), since those still fail before the gate is ever reached.
+ */
+async function submitReady(
+  input: Parameters<typeof submitPurchaseDocumentForVerificationRpc>[1]
+): ReturnType<typeof submitPurchaseDocumentForVerificationRpc> {
+  await confirmAllCurrentLinesNonInventory(fx.supabase, input.organizationId, input.appUserId, input.purchaseDocumentId);
+  return submitPurchaseDocumentForVerificationRpc(fx.supabase, input);
+}
 
 /**
  * MANUAL / ON-DEMAND ONLY -- not run in CI (`npm test` does not include
@@ -198,7 +219,7 @@ async function createPurchaseDocumentWithNumber(opts: {
 
   let version = saved.version;
   if (opts.status === "READY_FOR_VERIFICATION" || opts.status === "VERIFIED") {
-    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+    const submitted = await submitReady({
       purchaseDocumentId: draft.purchaseDocumentId,
       organizationId: opts.organizationId,
       appUserId: opts.appUserId,
@@ -229,7 +250,7 @@ async function createReadyForVerificationDocument(): Promise<{ purchaseDocumentI
     organizationId: fx.organizationId,
     appUserId: fx.changeableEmployeeAppUserId,
   });
-  const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+  const submitted = await submitReady({
     purchaseDocumentId: draft.purchaseDocumentId,
     organizationId: fx.organizationId,
     appUserId: fx.changeableEmployeeAppUserId,
@@ -265,7 +286,7 @@ async function createReadyForVerificationDocumentWithLine(opts: {
     header: { ...HEADER, vendorId: fx.vendorId, documentNumber, total },
     lines: [{ ...LINE_A, lineKey }],
   });
-  const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+  const submitted = await submitReady({
     purchaseDocumentId: draft.purchaseDocumentId,
     organizationId: fx.organizationId,
     appUserId: fx.changeableEmployeeAppUserId,
@@ -454,7 +475,7 @@ describe("submit_purchase_document_for_verification", () => {
     });
 
     await expect(
-      submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      submitReady({
         purchaseDocumentId: draft.purchaseDocumentId,
         organizationId: fx.organizationId,
         appUserId: fx.changeableEmployeeAppUserId,
@@ -471,7 +492,7 @@ describe("submit_purchase_document_for_verification", () => {
       lines: [LINE_A],
     });
 
-    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+    const submitted = await submitReady({
       purchaseDocumentId: draft.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.changeableEmployeeAppUserId,
@@ -489,7 +510,7 @@ describe("submit_purchase_document_for_verification", () => {
     });
 
     await expect(
-      submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+      submitReady({
         purchaseDocumentId: draft.purchaseDocumentId,
         organizationId: fx.organizationId,
         appUserId: fx.lockedEmployeeAppUserId,
@@ -517,6 +538,19 @@ describe("submit_purchase_document_for_verification: atomic save-and-submit (reg
       header: { ...HEADER, vendorId: fx.vendorId },
       lines: [{ ...LINE_A, description: "OLD" }],
     });
+    // The completion gate (20260811100047) needs a CONFIRMED classification
+    // matching the content that's ABOUT to be submitted ("NEW") -- not
+    // whatever is currently persisted ("OLD"), since the atomic submit's
+    // own DELETE+INSERT would otherwise mark it STALE inside the same
+    // transaction the gate check runs in. confirmLineWithSnapshot writes
+    // that classification directly, snapshotted against "NEW" in advance.
+    const [oldLineKey] = await getLineKeys(fx.supabase, draft.purchaseDocumentId);
+    await confirmLineWithSnapshot(fx.supabase, fx.organizationId, draft.purchaseDocumentId, oldLineKey, {
+      vendorSku: LINE_A.vendorSku,
+      description: "NEW",
+      packageUnit: LINE_A.packageUnit,
+      measuredUnit: LINE_A.measuredUnit,
+    });
 
     // Client-style: the browser's current form state is "NEW" -- Submit is
     // clicked WITHOUT a save first. This is the exact shape of the
@@ -528,7 +562,7 @@ describe("submit_purchase_document_for_verification: atomic save-and-submit (reg
       appUserId: fx.changeableEmployeeAppUserId,
       expectedVersion: saved.version,
       header: { ...HEADER, vendorId: fx.vendorId },
-      lines: [{ ...LINE_A, description: "NEW" }],
+      lines: [{ ...LINE_A, lineKey: oldLineKey, description: "NEW" }],
     });
     expect(submitted.status).toBe("READY_FOR_VERIFICATION");
 
@@ -558,6 +592,7 @@ describe("submit_purchase_document_for_verification: atomic save-and-submit (reg
     });
     const keepKey = randomUUID();
     const removeKey = randomUUID();
+    const addedKey = randomUUID();
     const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
       purchaseDocumentId: draft.purchaseDocumentId,
       organizationId: fx.organizationId,
@@ -569,8 +604,20 @@ describe("submit_purchase_document_for_verification: atomic save-and-submit (reg
         { ...LINE_A, lineKey: removeKey, description: "To Be Removed" },
       ],
     });
+    // keepKey's description doesn't change below (only quantity/price,
+    // which the staleness snapshot doesn't track) so the ordinary approve
+    // RPC is fine for it. addedKey doesn't exist in purchase_document_lines
+    // yet AND its final description ("New Item") only appears in the
+    // atomic submit below -- confirmLineWithSnapshot pre-classifies it
+    // directly against that exact future content.
+    await confirmAllCurrentLinesNonInventory(fx.supabase, fx.organizationId, fx.changeableEmployeeAppUserId, draft.purchaseDocumentId);
+    await confirmLineWithSnapshot(fx.supabase, fx.organizationId, draft.purchaseDocumentId, addedKey, {
+      vendorSku: LINE_A.vendorSku,
+      description: "New Item",
+      packageUnit: LINE_A.packageUnit,
+      measuredUnit: LINE_A.measuredUnit,
+    });
 
-    const addedKey = randomUUID();
     const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
       purchaseDocumentId: draft.purchaseDocumentId,
       organizationId: fx.organizationId,
@@ -616,12 +663,25 @@ describe("submit_purchase_document_for_verification: atomic save-and-submit (reg
       appUserId: fx.changeableEmployeeAppUserId,
     });
     const explicitKey = randomUUID();
+    // Pre-establish explicitKey via an ordinary save (so the completion
+    // gate can classify it) before the atomic submit below re-supplies the
+    // SAME key -- the test's own assertion is that the key survives
+    // exactly, which this preserves.
+    const saved = await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId },
+      lines: [{ ...LINE_A, lineKey: explicitKey }],
+    });
+    await confirmAllCurrentLinesNonInventory(fx.supabase, fx.organizationId, fx.changeableEmployeeAppUserId, draft.purchaseDocumentId);
 
     const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
       purchaseDocumentId: draft.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.changeableEmployeeAppUserId,
-      expectedVersion: 1,
+      expectedVersion: saved.version,
       header: { ...HEADER, vendorId: fx.vendorId },
       lines: [{ ...LINE_A, lineKey: explicitKey }],
     });
@@ -660,6 +720,19 @@ describe("submit_purchase_document_for_verification: atomic save-and-submit (reg
       appUserId: fx.changeableEmployeeAppUserId,
     });
 
+    // Pre-establish a line_key, classified directly against the exact
+    // content "Tab A" is about to atomically submit (the test's own
+    // subject is version staleness, not item classification --
+    // confirmLineWithSnapshot avoids the staleness trigger firing inside
+    // Tab A's own atomic submit transaction).
+    const tabAKey = randomUUID();
+    await confirmLineWithSnapshot(fx.supabase, fx.organizationId, draft.purchaseDocumentId, tabAKey, {
+      vendorSku: LINE_A.vendorSku,
+      description: "From Tab A",
+      packageUnit: LINE_A.packageUnit,
+      measuredUnit: LINE_A.measuredUnit,
+    });
+
     // "Tab A" submits first, using version 1.
     const submittedA = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
       purchaseDocumentId: draft.purchaseDocumentId,
@@ -667,7 +740,7 @@ describe("submit_purchase_document_for_verification: atomic save-and-submit (reg
       appUserId: fx.changeableEmployeeAppUserId,
       expectedVersion: 1,
       header: { ...HEADER, vendorId: fx.vendorId, total: 111 },
-      lines: [{ ...LINE_A, description: "From Tab A" }],
+      lines: [{ ...LINE_A, lineKey: tabAKey, description: "From Tab A" }],
     });
     expect(submittedA.status).toBe("READY_FOR_VERIFICATION");
 
@@ -699,14 +772,26 @@ describe("submit_purchase_document_for_verification: atomic save-and-submit (reg
       reason: "amendment atomic-submit regression test",
     });
 
-    // Edited Rev 2 values, submitted directly -- no Save Draft call.
+    // initiate_purchase_document_amendment already copies Rev 1's line(s)
+    // into Rev 2 with a fresh (but persisted) line_key -- reuse that exact
+    // key, classified directly against the "Amended Line" content the
+    // atomic submit below is about to insert (never what Rev 2 actually
+    // starts with, which would go STALE inside that same transaction).
+    const [rev2LineKey] = await getLineKeys(fx.supabase, amendment.purchaseDocumentId);
+    await confirmLineWithSnapshot(fx.supabase, fx.organizationId, amendment.purchaseDocumentId, rev2LineKey, {
+      vendorSku: LINE_A.vendorSku,
+      description: "Amended Line",
+      packageUnit: LINE_A.packageUnit,
+      measuredUnit: LINE_A.measuredUnit,
+    });
+
     const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
       purchaseDocumentId: amendment.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.lockedEmployeeAppUserId,
       expectedVersion: 1,
       header: { ...HEADER, vendorId: fx.vendorId, total: 275 },
-      lines: [{ ...LINE_A, description: "Amended Line" }],
+      lines: [{ ...LINE_A, lineKey: rev2LineKey, description: "Amended Line" }],
     });
     expect(submitted.status).toBe("READY_FOR_VERIFICATION");
 
@@ -838,7 +923,7 @@ describe("audit trail: submit -> return -> resubmit -> verify", () => {
       appUserId: fx.changeableEmployeeAppUserId,
     });
 
-    const submittedA = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+    const submittedA = await submitReady({
       purchaseDocumentId: draft.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.changeableEmployeeAppUserId,
@@ -862,7 +947,7 @@ describe("audit trail: submit -> return -> resubmit -> verify", () => {
       lines: [LINE_A, { ...LINE_A, vendorSku: "DELIVERY", description: "Delivery Fee", packageQuantity: 1, lineTotal: 15, unitPrice: 15 }],
     });
 
-    const submittedB = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+    const submittedB = await submitReady({
       purchaseDocumentId: draft.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.changeableEmployeeAppUserId,
@@ -1649,7 +1734,7 @@ describe("initiate_purchase_document_amendment", () => {
       header: { ...HEADER, vendorId: fx.vendorId, total: 350 },
       lines: [LINE_A],
     });
-    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+    const submitted = await submitReady({
       purchaseDocumentId: amendment.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.lockedEmployeeAppUserId,
@@ -1767,7 +1852,7 @@ describe("verify_purchase_document: exact submissionAuditEventId cycle grouping 
     });
 
     // Preparer resubmits unchanged -- a NEW SUBMITTED event/id.
-    const submitted2 = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+    const submitted2 = await submitReady({
       purchaseDocumentId: ready.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.changeableEmployeeAppUserId,
@@ -1827,7 +1912,7 @@ describe("verify_purchase_document: notification recipient deduplication", () =>
       header: { ...HEADER, vendorId: fx.vendorId, total: 130 },
       lines: [LINE_A],
     });
-    const submitted = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
+    const submitted = await submitReady({
       purchaseDocumentId: amendment.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.lockedEmployeeAppUserId,
@@ -2009,12 +2094,30 @@ describe("atomic submit + return-to-draft + atomic resubmit + verify -- return-f
       appUserId: fx.changeableEmployeeAppUserId,
     });
     const lineKey = randomUUID();
+    // Pre-establish lineKey with the SAME content the atomic submits below
+    // use ("Submitted Value" never changes across this test) so the
+    // completion gate's classification stays CONFIRMED, never STALE --
+    // the staleness trigger (20260811100037) fires on genuine content
+    // changes by design, which is correct: a line whose description
+    // changes really does need re-classification before it can be
+    // submitted again under the new completion gate. This test's own
+    // subject is line_key/status stability across return-to-draft and
+    // resubmit, not content-change-without-reclassification.
+    await savePurchaseDocumentDraftRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: 1,
+      header: { ...HEADER, vendorId: fx.vendorId, documentNumber: "ATOMIC-RETURN-FLOW" },
+      lines: [{ ...LINE_A, lineKey, description: "Submitted Value" }],
+    });
+    await confirmAllCurrentLinesNonInventory(fx.supabase, fx.organizationId, fx.changeableEmployeeAppUserId, draft.purchaseDocumentId);
 
     const submittedA = await submitPurchaseDocumentForVerificationRpc(fx.supabase, {
       purchaseDocumentId: draft.purchaseDocumentId,
       organizationId: fx.organizationId,
       appUserId: fx.changeableEmployeeAppUserId,
-      expectedVersion: 1,
+      expectedVersion: 2,
       header: { ...HEADER, vendorId: fx.vendorId, documentNumber: "ATOMIC-RETURN-FLOW" },
       lines: [{ ...LINE_A, lineKey, description: "Submitted Value" }],
     });
@@ -2041,7 +2144,7 @@ describe("atomic submit + return-to-draft + atomic resubmit + verify -- return-f
       appUserId: fx.changeableEmployeeAppUserId,
       expectedVersion: returned.version,
       header: { ...HEADER, vendorId: fx.vendorId, documentNumber: "ATOMIC-RETURN-FLOW" },
-      lines: [{ ...LINE_A, lineKey, description: "Resubmitted After Return" }],
+      lines: [{ ...LINE_A, lineKey, description: "Submitted Value" }],
     });
     expect(submittedB.status).toBe("READY_FOR_VERIFICATION");
 
@@ -2051,7 +2154,7 @@ describe("atomic submit + return-to-draft + atomic resubmit + verify -- return-f
       appUserId: fx.lockedEmployeeAppUserId,
       expectedVersion: submittedB.version,
       header: { ...HEADER, vendorId: fx.vendorId, documentNumber: "ATOMIC-RETURN-FLOW" },
-      lines: [{ ...LINE_A, lineKey, description: "Resubmitted After Return" }],
+      lines: [{ ...LINE_A, lineKey, description: "Submitted Value" }],
     });
     expect(verified.verifiedAt).toBeTruthy();
 
