@@ -10,6 +10,7 @@ import { ItemMappingPanel } from "./ItemMappingPanel";
 import { ReceivingPanel } from "./ReceivingPanel";
 import { Step4ReviewSend } from "./Step4ReviewSend";
 import { deriveWizardProgress, type WizardStepId } from "@/app/lib/purchaseDocuments/deriveWizardProgress";
+import { lineLevelBlockers } from "@/app/lib/purchaseDocuments/preparationBlockers";
 import { WIZARD_STEP_SLUGS, wizardStepFromSlug } from "@/app/lib/purchaseDocuments/wizardStepSlug";
 import { continueFromStep1 } from "@/app/lib/purchaseDocuments/continueFromStep1";
 import type { PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
@@ -41,6 +42,7 @@ import type { VendorSummary } from "@/app/actions/vendors";
 export function PreparationWizard({
   purchaseDocumentId,
   documentId,
+  documentStatus,
   editable,
   version: initialVersion,
   header: initialHeader,
@@ -63,6 +65,11 @@ export function PreparationWizard({
 }: {
   purchaseDocumentId: string;
   documentId: string;
+  /** The document's lifecycle status -- Step 4 derives its primary action
+   * from this (Send only while DRAFT; an inert "Sent" state once
+   * READY_FOR_VERIFICATION), so an already-submitted document never
+   * renders an actionable Send button again. */
+  documentStatus: "DRAFT" | "READY_FOR_VERIFICATION";
   editable: boolean;
   version: number;
   header: PurchaseDocumentHeaderDraft;
@@ -143,10 +150,20 @@ export function PreparationWizard({
     if (result.ok) setStep2Resolved(result.lines.length > 0 && result.lines.every((l) => l.status === "CONFIRMED"));
   }, [purchaseDocumentId]);
 
-  const { steps, activeStep } = deriveWizardProgress({
+  // Step 3 completes on LINE-LEVEL receiving completeness only.
+  // Document-level requirements (delivery verifier, plausible date) are
+  // Step 4's job -- their controls live there, and the authoritative
+  // submit RPC still enforces the full gate regardless. Gating Step 3's
+  // Continue on the full `ready` deadlocked the wizard: Step 4 was
+  // unreachable until a delivery verifier was set, and the verifier can
+  // only be set on Step 4.
+  const receivingComplete = preparationStatus ? preparationStatus.receivingComplete : null;
+  const receivingBlockers = preparationStatus ? lineLevelBlockers(preparationStatus.blockers) : [];
+
+  const { steps, activeStep, furthestReachableStep } = deriveWizardProgress({
     step1Complete,
     step2Complete: step2Resolved,
-    step3Complete: preparationStatus ? preparationStatus.ready : null,
+    step3Complete: receivingComplete,
     requestedStep,
   });
 
@@ -215,6 +232,15 @@ export function PreparationWizard({
     const result = await submitPurchaseDocumentForVerification(purchaseDocumentId, version, header, lines);
     setSendPending(false);
     if (!result.ok) {
+      if (result.reason === "stale") {
+        // The genuine stale-tab race: this tab held an outdated view (e.g.
+        // another tab already submitted). Say specifically what happened
+        // and reload the authoritative state -- the refreshed page then
+        // renders the correct lifecycle (e.g. the inert Sent state).
+        setSendError("This invoice was already sent for final review, or changed in another tab — reloading the latest state…");
+        router.refresh();
+        return;
+      }
       setSendError(result.message);
       return;
     }
@@ -245,7 +271,7 @@ export function PreparationWizard({
 
   return (
     <div className="mt-4 flex flex-col gap-4">
-      <Stepper steps={steps} activeStep={activeStep} onNavigate={setRequestedStep} />
+      <Stepper steps={steps} activeStep={activeStep} furthestReachableStep={furthestReachableStep} onNavigate={setRequestedStep} />
 
       {activeStep === 1 ? (
         <Step1ReviewInvoice
@@ -289,14 +315,28 @@ export function PreparationWizard({
 
       {activeStep === 3 ? (
         <div className="mt-4 flex flex-col gap-4">
-          <ReceivingPanel purchaseDocumentId={purchaseDocumentId} readOnly={!editable} onChange={refetchPreparationStatus} />
+          <ReceivingPanel purchaseDocumentId={purchaseDocumentId} readOnly={!editable} collapseWhenReceived onChange={refetchPreparationStatus} />
+          {editable && receivingComplete === false && receivingBlockers.length > 0 ? (
+            // Never just a disabled button -- the exact line-level reasons,
+            // from the SAME source of truth as the gate itself.
+            <div className="rounded-2xl border border-amber-800 bg-amber-950/20 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">Cannot continue yet</p>
+              <ul className="mt-2 flex flex-col gap-1 text-sm text-amber-200">
+                {receivingBlockers.map((blocker, index) => (
+                  <li key={index}>
+                    • {blocker.description ?? "A line"} — {blocker.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {editable ? (
             <div className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => setRequestedStep(4)}
-                disabled={!preparationStatus?.ready}
-                title={!preparationStatus?.ready ? "Finish receiving every inventory line before continuing." : undefined}
+                disabled={!receivingComplete}
+                title={!receivingComplete ? "Finish receiving every inventory line before continuing." : undefined}
                 className="self-start rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
               >
                 Continue to Review & Send
@@ -309,6 +349,8 @@ export function PreparationWizard({
       {activeStep === 4 ? (
         <Step4ReviewSend
           header={header}
+          lines={lines}
+          documentStatus={documentStatus}
           vendorName={vendorName}
           preparationStatus={preparationStatus}
           deliveryVerifiedByName={deliveryVerifiedByName}

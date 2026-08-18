@@ -2,16 +2,24 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getReceivingLines } from "@/app/lib/receiving/getReceivingLines";
 
-export interface PreparationBlocker {
-  /** Null for a document-level blocker (delivery verifier, document
-   * date) rather than a specific line. */
-  lineKey: string | null;
-  description: string | null;
-  reason: string;
-}
+import { lineLevelBlockers, type PreparationBlocker } from "@/app/lib/purchaseDocuments/preparationBlockers";
+
+export type { PreparationBlocker };
 
 export interface PreparationStatus {
+  /** The FULL Send-for-Final-Review gate: every line-level receiving
+   * requirement AND every document-level one (delivery verifier,
+   * plausible date). Mirrors exactly what
+   * submit_purchase_document_for_verification enforces. */
   ready: boolean;
+  /** Step 3 -- Receive Delivery's own completion: every required
+   * INVENTORY line has an effective receipt with quantity/location/
+   * required measurement. Document-level requirements are deliberately
+   * EXCLUDED -- they are Step 4 concerns (the delivery-verifier control
+   * lives there), and gating Step 3's Continue on them created a real
+   * deadlock: Step 4 unreachable until a verifier is set, verifier only
+   * settable on Step 4. */
+  receivingComplete: boolean;
   blockers: PreparationBlocker[];
 }
 
@@ -51,7 +59,7 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
     effectiveReceiptIds.length > 0
       ? await supabase
           .from("receipt_lines")
-          .select("matched_line_key, actual_received_package_quantity, actual_verified_base_quantity, location_id")
+          .select("matched_line_key, actual_received_package_quantity, actual_received_package_unit, actual_verified_base_quantity, location_id")
           .in("receipt_id", effectiveReceiptIds)
           // Same deterministic "most recent wins" ordering as
           // getReviewSummary.ts's identical map-building query -- never
@@ -101,6 +109,33 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
         description: line.description,
         reason: `Verified ${line.baseUnitCode ?? "measurement"} is required -- this item's vendor purchase unit varies by delivery.`,
       });
+      continue;
+    }
+
+    // DOWNSTREAM INVALIDATION: an already-recorded receipt whose facts no
+    // longer agree with the item's CURRENT configuration (e.g. Manager 1
+    // went back to Step 2 and remapped the item, or its units/behavior/
+    // conversion changed) must never be silently preserved as
+    // authoritative -- the affected line needs its receiving re-confirmed
+    // (Edit Receiving records an append-only correction under the new
+    // configuration; record_receipt re-validates it server-side).
+    // Unrelated lines are judged strictly per-line and stay untouched.
+    const receivedUnit = (receiptLine.actual_received_package_unit as string | null)?.trim().toLowerCase() ?? null;
+    const matchesUnit = (code: string | null) => code !== null && receivedUnit === code.trim().toLowerCase();
+    const unitStillConfigured = receivedUnit === null || matchesUnit(line.baseUnitCode) || matchesUnit(line.purchaseUnitCode);
+    const fixedConversionConsistent =
+      line.receivingBehavior !== "FIXED_CONVERSION" ||
+      receiptLine.actual_verified_base_quantity === null ||
+      line.fixedConversionFactor === null ||
+      !matchesUnit(line.purchaseUnitCode) ||
+      Number(receiptLine.actual_verified_base_quantity) === Number(receiptLine.actual_received_package_quantity) * line.fixedConversionFactor;
+
+    if (!unitStillConfigured || !fixedConversionConsistent) {
+      blockers.push({
+        lineKey: line.lineKey,
+        description: line.description,
+        reason: "Receiving needs review -- this item's unit configuration changed after the delivery was recorded. Re-confirm the line via Edit Receiving.",
+      });
     }
   }
 
@@ -128,5 +163,9 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
     });
   }
 
-  return { ready: blockers.length === 0, blockers };
+  return {
+    ready: blockers.length === 0,
+    receivingComplete: lineLevelBlockers(blockers).length === 0,
+    blockers,
+  };
 }

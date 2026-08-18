@@ -836,8 +836,6 @@ describe("segregation of duties: verify_purchase_document / return_purchase_docu
   it("a different manager CAN verify -- verified_by is stored separately from and never equal to the uploader, and zero inventory_movements are created", async () => {
     const { purchaseDocumentId, version } = await createReadyForVerificationDocument();
 
-    const beforeMovements = await fx.supabase.from("inventory_movements").select("id", { count: "exact", head: true });
-
     const result = await verifyPurchaseDocumentRpc(fx.supabase, {
       purchaseDocumentId,
       organizationId: fx.organizationId,
@@ -855,8 +853,17 @@ describe("segregation of duties: verify_purchase_document / return_purchase_docu
     expect(row!.verified_by_app_user_id).toBe(fx.lockedEmployeeAppUserId);
     expect(row!.verified_by_app_user_id).not.toBe(fx.changeableEmployeeAppUserId);
 
-    const afterMovements = await fx.supabase.from("inventory_movements").select("id", { count: "exact", head: true });
-    expect(afterMovements.count).toBe(beforeMovements.count);
+    // Document-scoped, never a global movement count (other concurrently
+    // running test files legitimately create their own movements since
+    // 2A.4's inbound posting): Final Verify itself creates ZERO inventory
+    // -- proven by this document having no posting record and therefore no
+    // linked movement. Only the explicit Post to Inventory action ever
+    // will (tests/inventoryPosting.rpc.test.ts).
+    const { count: postingCount } = await fx.supabase
+      .from("purchase_document_inventory_postings")
+      .select("id", { count: "exact", head: true })
+      .eq("purchase_document_id", purchaseDocumentId);
+    expect(postingCount).toBe(0);
 
     // Frozen: even the original preparer can no longer touch it -- the
     // RPC's status='DRAFT' gate fails regardless of which version is
@@ -1941,12 +1948,20 @@ describe("verify_purchase_document: notification recipient deduplication", () =>
 });
 
 describe("verify_purchase_document: atomic save-and-verify (regression for the browser 'unsaved edits silently discarded' bug)", () => {
+  // These corrections deliberately edit unitPrice -- a pure commercial
+  // fact -- rather than description/SKU/units: since 20260811100070,
+  // editing a classification-IDENTITY field (description included)
+  // correctly marks the line's mapping STALE mid-transaction, and verify's
+  // new authoritative completeness re-check then refuses with GA013 until
+  // the mapping is re-confirmed (that behavior has its own coverage in
+  // reviewerCorrections.rpc.test.ts). The atomic-persistence regression
+  // being guarded here is field-agnostic.
   it("reviewer's unsaved local edit is persisted and verified atomically -- VERIFIED reflects the edit, REVIEW_CORRECTED records OLD -> CORRECTED, finalCorrectionCount and the notification both reflect it", async () => {
     const ready = await createReadyForVerificationDocumentWithLine({ total: 100 });
     // Confirm the persisted (pre-verify) state really is "OLD" -- the
     // reviewer's browser never called Save Corrections.
-    const { data: preLine } = await fx.supabase.from("purchase_document_lines").select("description").eq("purchase_document_id", ready.purchaseDocumentId).single();
-    expect(preLine!.description).toBe(LINE_A.description); // still whatever was submitted, not yet corrected
+    const { data: preLine } = await fx.supabase.from("purchase_document_lines").select("unit_price").eq("purchase_document_id", ready.purchaseDocumentId).single();
+    expect(Number(preLine!.unit_price)).toBe(LINE_A.unitPrice); // still whatever was submitted, not yet corrected
 
     const verified = await verifyPurchaseDocumentRpc(fx.supabase, {
       purchaseDocumentId: ready.purchaseDocumentId,
@@ -1954,15 +1969,15 @@ describe("verify_purchase_document: atomic save-and-verify (regression for the b
       appUserId: fx.lockedEmployeeAppUserId,
       expectedVersion: ready.version,
       header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: ready.total },
-      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "CORRECTED" }],
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, unitPrice: 2.99 }],
     });
     expect(verified.verifiedAt).toBeTruthy();
 
     const { data: row } = await fx.supabase.from("purchase_documents").select("status").eq("id", ready.purchaseDocumentId).single();
     expect(row!.status).toBe("VERIFIED");
 
-    const { data: postLine } = await fx.supabase.from("purchase_document_lines").select("description").eq("purchase_document_id", ready.purchaseDocumentId).single();
-    expect(postLine!.description).toBe("CORRECTED"); // never the stale pre-click value
+    const { data: postLine } = await fx.supabase.from("purchase_document_lines").select("unit_price").eq("purchase_document_id", ready.purchaseDocumentId).single();
+    expect(Number(postLine!.unit_price)).toBe(2.99); // never the stale pre-click value
 
     const { data: correctedEvents } = await fx.supabase
       .from("audit_events")
@@ -1971,9 +1986,11 @@ describe("verify_purchase_document: atomic save-and-verify (regression for the b
       .eq("action", "PURCHASE_DOCUMENT_REVIEW_CORRECTED");
     expect(correctedEvents).toHaveLength(1);
     expect(correctedEvents![0].actor_app_user_id).toBe(fx.lockedEmployeeAppUserId); // the actual verifying reviewer
-    const diff = correctedEvents![0].after_state as { lineChanges: { kind: string; fields: { field: string; before: string; after: string }[] }[] };
+    const diff = correctedEvents![0].after_state as { lineChanges: { kind: string; fields: { field: string; before: unknown; after: unknown }[] }[] };
     const modified = diff.lineChanges.find((c) => c.kind === "modified")!;
-    expect(modified.fields).toContainEqual({ field: "description", before: LINE_A.description, after: "CORRECTED" });
+    // The SQL diff reports snake_case column names (unlike the TS
+    // mirror's camelCase input fields).
+    expect(modified.fields).toContainEqual({ field: "unit_price", before: LINE_A.unitPrice, after: 2.99 });
 
     const { data: verifiedEvent } = await fx.supabase
       .from("audit_events")
@@ -2002,7 +2019,7 @@ describe("verify_purchase_document: atomic save-and-verify (regression for the b
       appUserId: fx.lockedEmployeeAppUserId,
       expectedVersion: ready.version,
       header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: ready.total },
-      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "ALREADY SAVED" }],
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, unitPrice: 3.49 }],
     });
 
     await verifyPurchaseDocumentRpc(fx.supabase, {
@@ -2013,7 +2030,7 @@ describe("verify_purchase_document: atomic save-and-verify (regression for the b
       // Identical to what was just saved -- the UI always sends current
       // state, which here happens to equal the already-persisted state.
       header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: ready.total },
-      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "ALREADY SAVED" }],
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, unitPrice: 3.49 }],
     });
 
     const { data: correctedEvents } = await fx.supabase
@@ -2033,7 +2050,7 @@ describe("verify_purchase_document: atomic save-and-verify (regression for the b
       appUserId: fx.lockedEmployeeAppUserId,
       expectedVersion: ready.version,
       header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 500 },
-      lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "First Verifier" }],
+      lines: [{ ...LINE_A, lineKey: ready.lineKey, unitPrice: 2.22 }],
     });
     expect(verified.verifiedAt).toBeTruthy();
 
@@ -2046,7 +2063,7 @@ describe("verify_purchase_document: atomic save-and-verify (regression for the b
         appUserId: fx.lockedEmployeeAppUserId,
         expectedVersion: ready.version,
         header: { ...HEADER, vendorId: fx.vendorId, documentNumber: ready.documentNumber, total: 999 },
-        lines: [{ ...LINE_A, lineKey: ready.lineKey, description: "Second Attempt" }],
+        lines: [{ ...LINE_A, lineKey: ready.lineKey, unitPrice: 3.33 }],
       })
     ).rejects.toBeInstanceOf(StaleVersionError);
 

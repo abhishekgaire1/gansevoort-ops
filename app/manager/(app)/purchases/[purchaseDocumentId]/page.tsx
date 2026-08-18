@@ -8,6 +8,7 @@ import { VerifiedPurchaseDocumentSummary } from "./_components/VerifiedPurchaseD
 import { DiscardedPurchaseDocumentSummary } from "./_components/DiscardedPurchaseDocumentSummary";
 import type { NormalizedInvoiceExtraction, ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
 import type { RevisionSummary } from "@/app/lib/purchaseDocuments/types";
+import type { MappingProposals, ReceivingProposals } from "@/app/lib/purchaseDocuments/reviewProposals";
 
 /**
  * The editable verification workspace -- separate from
@@ -282,19 +283,40 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
 
   // READY_FOR_VERIFICATION reviewer corrections need the immutable
   // submitted baseline to show "Submitted: X" vs. "Current: Y" and drive
-  // the live correction-count preview.
+  // the live correction-count preview -- plus any PERSISTED provisional
+  // proposal overlay (mapping/receiving), so an accidental refresh never
+  // loses the reviewer's pending corrections.
   let submittedHeader = headerRow;
   let submittedLines = lineRows;
+  let initialMappingProposals: MappingProposals = {};
+  let initialReceivingProposals: ReceivingProposals = {};
+  let initialOverlayVersion = 0;
   if (purchaseDocument.status === "READY_FOR_VERIFICATION") {
     const { data: submittedEvent } = await serviceClient
       .from("audit_events")
-      .select("after_state")
+      .select("id, after_state")
       .eq("entity_type", "purchase_document")
       .eq("entity_id", purchaseDocumentId)
       .eq("action", "PURCHASE_DOCUMENT_SUBMITTED")
       .order("occurred_at", { ascending: false })
       .limit(1)
       .maybeSingle();
+    const { data: overlay } = await serviceClient
+      .from("purchase_document_review_proposals")
+      .select("mapping_proposals, receiving_proposals, version, submission_audit_event_id")
+      .eq("organization_id", auth.manager.organizationId)
+      .eq("purchase_document_id", purchaseDocumentId)
+      .maybeSingle();
+    // A stale-bound overlay (an earlier submission's -- should be
+    // impossible now that Return AND Withdraw both discard it) is never
+    // surfaced as current review state: the reviewer starts clean and the
+    // save RPC self-heals the dead row on the first save (expected
+    // version 0).
+    if (overlay && submittedEvent && overlay.submission_audit_event_id === submittedEvent.id) {
+      initialMappingProposals = (overlay.mapping_proposals ?? {}) as typeof initialMappingProposals;
+      initialReceivingProposals = (overlay.receiving_proposals ?? {}) as typeof initialReceivingProposals;
+      initialOverlayVersion = Number(overlay.version);
+    }
     const snapshot = submittedEvent?.after_state as Record<string, unknown> | undefined;
     if (snapshot) {
       submittedHeader = {
@@ -361,6 +383,9 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
       deliveryVerifiedByName={deliveryVerifiedByName}
       preparerName={preparerName}
       preparedAt={purchaseDocument.updated_at}
+      initialMappingProposals={initialMappingProposals}
+      initialReceivingProposals={initialReceivingProposals}
+      initialOverlayVersion={initialOverlayVersion}
     />
   );
 }

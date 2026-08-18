@@ -265,7 +265,7 @@ describe("VERIFIED lock -- backend enforcement, not just a hidden button", () =>
     expect(originalStillIntact!.actual_received_package_quantity).toBe(2); // untouched by the additional delivery
   });
 
-  it("rejects a normal preparation mutation during READY_FOR_VERIFICATION too -- Manager 2's review window is not casually editable", async () => {
+  it("rejects the PREPARER's own mutation during READY_FOR_VERIFICATION -- the reviewer-correction window never opens for the preparer", async () => {
     const { purchaseDocumentId } = await createDraftPurchaseDocumentWithLines(fx.supabase, {
       organizationId: fx.organizationId,
       vendorId: fx.vendorId,
@@ -292,9 +292,11 @@ describe("VERIFIED lock -- backend enforcement, not just a hidden button", () =>
       expectedVersion: 1,
     });
 
-    // Manager 2 (or anyone) attempting a normal classification-approval
-    // RPC directly, bypassing save_purchase_document_review_corrections,
-    // is rejected -- the sanctioned-write flag is never set for this path.
+    // The PREPARER attempting a classification-approval RPC on their own
+    // READY submission is rejected -- 20260811100070's reviewer-correction
+    // window opens ONLY for a different (non-preparer) manager, never for
+    // the preparer (the non-preparer sanctioned path is covered in
+    // reviewerCorrections.rpc.test.ts).
     await expect(
       approveLineClassificationNewItemRpc(fx.supabase, {
         purchaseDocumentId,
@@ -308,7 +310,7 @@ describe("VERIFIED lock -- backend enforcement, not just a hidden button", () =>
         baseUnitCode: null,
         rememberVendorMapping: false,
       })
-    ).rejects.toThrow(/ready for verification/i);
+    ).rejects.toThrow(/cannot review-correct its item resolution/);
   });
 
   it("a controlled amendment (new DRAFT revision) remains fully editable -- the lock never leaks across revisions", async () => {

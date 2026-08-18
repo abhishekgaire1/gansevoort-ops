@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, RevisionSummary } from "@/app/lib/purchaseDocuments/types";
+import { formatMoney } from "@/app/lib/formatMoney";
 
 /**
  * Read-only, terminal-state view for a DISCARDED purchase_document -- no
@@ -27,12 +28,6 @@ const DOCUMENT_TYPE_LABEL: Record<string, string> = {
   RECEIPT: "Receipt",
   CREDIT_MEMO: "Credit Memo",
 };
-
-function money(value: number | null, currency: string | null): string {
-  if (value === null) return "—";
-  const symbol = currency && currency.length <= 3 ? currency : "$";
-  return `${symbol}${value.toFixed(2)}`;
-}
 
 export function DiscardedPurchaseDocumentSummary(props: Props) {
   const typeLabel = props.header.documentType ? (DOCUMENT_TYPE_LABEL[props.header.documentType] ?? props.header.documentType) : "Document";
@@ -83,7 +78,7 @@ export function DiscardedPurchaseDocumentSummary(props: Props) {
               props.lines.map((line) => (
                 <div key={line.lineKey ?? line.description} className="flex items-center justify-between gap-4 px-4 py-3">
                   <p className="min-w-0 truncate text-sm text-zinc-300">{line.description ?? "—"}</p>
-                  <p className="shrink-0 text-sm text-zinc-400">{money(line.lineTotal, props.header.currency)}</p>
+                  <p className="shrink-0 text-sm text-zinc-400">{formatMoney(line.lineTotal, props.header.currency)}</p>
                 </div>
               ))
             )}

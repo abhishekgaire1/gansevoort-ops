@@ -40,3 +40,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# generated DEV reset manifests -- operational snapshots produced by
+# scripts/reset-gansevoort-dev-operational-data.ts (the script itself IS
+# tracked); kept locally for records, never version-controlled
+/scripts/manifests/

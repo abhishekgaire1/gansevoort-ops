@@ -1,4 +1,5 @@
 import type { NormalizedInvoiceExtraction, NormalizedInvoiceLine, ReviewFlag } from "./types";
+import { formatMoney } from "@/app/lib/formatMoney";
 
 /**
  * Deterministic, non-AI validation of an already-normalized extraction.
@@ -45,7 +46,7 @@ export function validateInvoiceExtraction(extraction: NormalizedInvoiceExtractio
   }
 
   extraction.lines.forEach((line, index) => {
-    issues.push(...validateLineItem(line, index));
+    issues.push(...validateLineItem(line, index, extraction.currency));
   });
 
   if (extraction.total !== null && extraction.lines.length > 0) {
@@ -58,7 +59,7 @@ export function validateInvoiceExtraction(extraction: NormalizedInvoiceExtractio
           severity: "warning",
           code: "INVOICE_TOTAL_MISMATCH",
           field: "total",
-          message: `Line totals + tax + fees (${computedTotal.toFixed(2)}) do not match the extracted total (${extraction.total.toFixed(2)}).`,
+          message: `Line totals + tax + fees (${formatMoney(computedTotal, extraction.currency)}) do not match the extracted total (${formatMoney(extraction.total, extraction.currency)}).`,
         });
       }
     }
@@ -75,7 +76,7 @@ export function validateInvoiceExtraction(extraction: NormalizedInvoiceExtractio
  * stay type-aware and live in that module instead, since "Invoice #" vs.
  * "Receipt #" vs. "Credit Memo #" genuinely differ by document type.
  */
-export function validateLineItem(line: NormalizedInvoiceLine, index: number): ReviewFlag[] {
+export function validateLineItem(line: NormalizedInvoiceLine, index: number, currency?: string | null): ReviewFlag[] {
   const issues: ReviewFlag[] = [];
   const prefix = `lines[${index}]`;
 
@@ -119,7 +120,7 @@ export function validateLineItem(line: NormalizedInvoiceLine, index: number): Re
         severity: "warning",
         code: "LINE_TOTAL_MISMATCH",
         field: `${prefix}.lineTotal`,
-        message: `Line ${index + 1}: calculated ${expected.toFixed(2)} vs. extracted ${line.lineTotal.toFixed(2)}.`,
+        message: `Line ${index + 1}: calculated ${formatMoney(expected, currency)} vs. extracted ${formatMoney(line.lineTotal, currency)}.`,
       });
     }
   }

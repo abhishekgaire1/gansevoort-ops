@@ -36,29 +36,59 @@ export interface DeriveWizardProgressInput {
    * awaiting the manager's review -- surfaces "needs_attention" instead of
    * plain "current"/"not_started" for step 2. */
   step2NeedsAttention?: boolean;
-  /** The manager's own explicit backward-navigation choice, if any --
-   * clamped below to never exceed the furthest reachable step (no
-   * skipping ahead of an incomplete step). */
+  /** The manager's own explicit navigation choice (a Continue click, a
+   * Stepper click, or the ?step= URL param they navigated to/refreshed
+   * on). Clamped below to never exceed the furthest reachable step, but
+   * NEVER auto-advanced: null means "no explicit navigation yet," which
+   * lands on step 1 -- not on the furthest reachable step. */
   requestedStep?: WizardStepId | null;
 }
 
 export interface WizardProgress {
   steps: WizardStepStatus[];
   activeStep: WizardStepId;
+  /** The furthest step the manager is ALLOWED to visit -- distinct from
+   * activeStep (what they're currently viewing) and from per-step
+   * completion. Exposed so callers/tests can reason about reachability
+   * without re-deriving it. */
+  furthestReachableStep: WizardStepId;
 }
 
+/**
+ * COMPLETION, REACHABILITY, and the ACTIVE STEP are three separate
+ * concepts (a real browser-tested bug conflated them):
+ *   1. completion -- which steps are finished (the checkmarks);
+ *   2. reachability -- the furthest step the manager MAY visit, derived
+ *      from completion;
+ *   3. activeStep -- the step the manager is CURRENTLY viewing, which
+ *      changes ONLY through an explicit navigation (requestedStep) and is
+ *      merely CLAMPED by reachability, never pulled forward by it.
+ * Completing a step therefore marks it complete, unlocks the next step,
+ * and enables its Continue button -- but the manager stays exactly where
+ * they are (step1Complete=true, furthestReachable=2, activeStep=1 is a
+ * valid, stable state) until they deliberately click Continue/the
+ * Stepper. Previously `activeStep` defaulted to `furthestReachable`
+ * whenever no explicit request existed, so the instant the last required
+ * Step 1 field became valid (live validation runs per keystroke) the
+ * wizard auto-jumped to Step 2 -- and async completions (AI matching
+ * finishing, a receipt recording) auto-jumped Steps 2/3 the same way.
+ */
 export function deriveWizardProgress(input: DeriveWizardProgressInput): WizardProgress {
   const step2Known = input.step2Complete === true;
   const step3Known = input.step3Complete === true;
 
-  // The furthest step the manager has actually reached -- the first one
-  // that isn't yet complete, or step 4 if everything upstream is done.
+  // Reachability: the first not-yet-complete step (or 4 when everything
+  // upstream is done).
   let furthestReachable: WizardStepId = 1;
   if (input.step1Complete) furthestReachable = 2;
   if (input.step1Complete && step2Known) furthestReachable = 3;
   if (input.step1Complete && step2Known && step3Known) furthestReachable = 4;
 
-  const activeStep: WizardStepId = input.requestedStep ? (Math.min(input.requestedStep, furthestReachable) as WizardStepId) : furthestReachable;
+  // Active step: explicit navigation only, clamped by reachability. No
+  // explicit navigation yet = step 1. (Refresh keeps the manager's place
+  // because every explicit navigation also writes ?step=, which feeds
+  // back in here as requestedStep.)
+  const activeStep: WizardStepId = Math.min(input.requestedStep ?? 1, furthestReachable) as WizardStepId;
 
   function stateFor(id: WizardStepId, complete: boolean): WizardStepState {
     if (complete) return "complete";
@@ -74,5 +104,5 @@ export function deriveWizardProgress(input: DeriveWizardProgressInput): WizardPr
     { id: 4, state: stateFor(4, false) },
   ];
 
-  return { steps, activeStep };
+  return { steps, activeStep, furthestReachableStep: furthestReachable };
 }

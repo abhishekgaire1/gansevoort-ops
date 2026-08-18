@@ -12,6 +12,9 @@ export const PURCHASE_DOCUMENT_SQLSTATE = {
   VENDOR_NOT_ACTIVE: "GA005",
   NOT_PREPARER: "GA006",
   PREPARATION_INCOMPLETE: "GA013",
+  REVIEW_PROPOSALS_CONFLICT: "GA018",
+  REVIEW_PROPOSALS_OWNED_ELSEWHERE: "GA019",
+  STALE_REVIEW_PROPOSALS: "GA020",
 } as const;
 
 /** The purchase document's version didn't match, or it wasn't in the
@@ -71,10 +74,45 @@ export class PreparationIncompleteError extends Error {
   }
 }
 
+/** A reviewer-proposal save from stale local state -- another tab (or a
+ * concurrent save) already advanced the overlay's version. Reload before
+ * continuing; never silently overwrite. */
+export class ReviewProposalsConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewProposalsConflictError";
+  }
+}
+
+/** The active proposal overlay belongs to a different reviewer -- no
+ * silent takeover of another manager's in-progress review. */
+export class ReviewProposalsOwnedElsewhereError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewProposalsOwnedElsewhereError";
+  }
+}
+
+/** The proposal overlay (or one of its targets) belongs to an EARLIER
+ * submission of this document -- it can never promote into the current
+ * one. Reload the current review. */
+export class StaleReviewProposalsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StaleReviewProposalsError";
+  }
+}
+
 export function mapPurchaseDocumentRpcError(error: { code?: string; message: string }): Error {
   switch (error.code) {
     case PURCHASE_DOCUMENT_SQLSTATE.STALE_OR_WRONG_STATUS:
       return new StaleVersionError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.REVIEW_PROPOSALS_CONFLICT:
+      return new ReviewProposalsConflictError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.REVIEW_PROPOSALS_OWNED_ELSEWHERE:
+      return new ReviewProposalsOwnedElsewhereError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.STALE_REVIEW_PROPOSALS:
+      return new StaleReviewProposalsError(error.message);
     case PURCHASE_DOCUMENT_SQLSTATE.VERIFIED_LOCKED:
       return new VerifiedLockedError(error.message);
     case PURCHASE_DOCUMENT_SQLSTATE.CANNOT_SELF_VERIFY:

@@ -27,17 +27,21 @@ const STATE_CLASS: Record<WizardStepState, string> = {
  * The persistent four-step navigation for the manager preparation workflow.
  * Every step's state is derived from existing backend data (see
  * deriveWizardProgress.ts) -- this component only renders it and reports
- * clicks; it holds no workflow state of its own. A step is clickable only
- * when it is complete or current -- a manager can always look back, never
+ * clicks; it holds no workflow state of its own. Clickability comes from
+ * REACHABILITY (never from the visual state): a manager can navigate
+ * freely among every step up to the furthest reachable one -- backward to
+ * completed steps AND forward again to a reachable later step -- but never
  * skip ahead of what's actually been resolved.
  */
 export function Stepper({
   steps,
   activeStep,
+  furthestReachableStep,
   onNavigate,
 }: {
   steps: { id: WizardStepId; state: WizardStepState }[];
   activeStep: WizardStepId;
+  furthestReachableStep: WizardStepId;
   onNavigate: (step: WizardStepId) => void;
 }) {
   return (
@@ -45,7 +49,7 @@ export function Stepper({
       <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">Invoice Preparation</p>
       <ol className="flex flex-col gap-1.5 sm:flex-row sm:gap-2">
         {steps.map((step) => {
-          const clickable = step.state === "complete" || step.state === "current" || step.state === "needs_attention";
+          const clickable = step.id <= furthestReachableStep;
           return (
             <li key={step.id} className="flex-1">
               <button

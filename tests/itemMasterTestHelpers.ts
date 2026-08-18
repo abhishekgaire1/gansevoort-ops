@@ -82,7 +82,12 @@ export async function createDraftPurchaseDocumentWithLines(
 }
 
 export async function getLineKeys(supabase: SupabaseClient, purchaseDocumentId: string): Promise<string[]> {
-  const { data } = await supabase.from("purchase_document_lines").select("line_key").eq("purchase_document_id", purchaseDocumentId).order("line_number");
+  const { data, error } = await supabase.from("purchase_document_lines").select("line_key").eq("purchase_document_id", purchaseDocumentId).order("line_number");
+  // Fail loudly: a swallowed error here returns [], and the caller's
+  // destructured undefined lineKey then surfaces as a baffling
+  // "function not found in schema cache" PostgREST error (supabase-js
+  // strips undefined params) far from the real cause.
+  if (error) throw new Error(`getLineKeys failed: ${error.message}`);
   return (data ?? []).map((r) => r.line_key as string);
 }
 

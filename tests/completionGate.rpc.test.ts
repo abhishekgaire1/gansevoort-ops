@@ -466,3 +466,189 @@ describe("first-manager completion gate", () => {
     expect(submitted.status).toBe("READY_FOR_VERIFICATION");
   });
 });
+
+/**
+ * Regression: the Step 3 wizard deadlock found in the clean 2A.4 browser
+ * test. getPreparationStatus.ready includes DOCUMENT-level requirements
+ * (delivery verifier, plausible date) whose controls live on Step 4 --
+ * but Step 3's "Continue to Review & Send" was gated on the full `ready`,
+ * making Step 4 unreachable exactly when the only remaining blocker was
+ * one that could only be resolved ON Step 4. The fix splits the gate:
+ * `receivingComplete` (line-level only) drives Step 3 completion, while
+ * `ready` remains the authoritative Send gate (and the submit RPC still
+ * enforces everything regardless).
+ */
+describe("receivingComplete vs ready -- the Step 3 / Step 4 gate split", () => {
+  async function receiveLine(purchaseDocumentId: string, lineKey: string, withLocation: boolean, correctsReceiptId?: string): Promise<string> {
+    const result = await recordReceiptRpc(fx.supabase, {
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      receiptKind: correctsReceiptId ? "CORRECTION" : "DELIVERY",
+      purchaseDocumentId: correctsReceiptId ? undefined : purchaseDocumentId,
+      correctsReceiptId,
+      lines: [
+        {
+          lineNumberSnapshot: 1,
+          matchedLineKey: lineKey,
+          vendorSkuSnapshot: "SPLIT-GATE",
+          descriptionSnapshot: "Split Gate Item",
+          invoicePackageQuantity: 3,
+          invoicePackageUnit: "PIECE",
+          invoiceMeasuredQuantity: null,
+          invoiceMeasuredUnit: null,
+          actualReceivedPackageQuantity: 3,
+          actualReceivedPackageUnit: "PIECE",
+          actualVerifiedBaseQuantity: null,
+          actualVerifiedBaseUnitId: null,
+          locationId: withLocation ? locationId : null,
+        },
+      ],
+    });
+    return result.receiptId;
+  }
+
+  async function draftWithConfirmedInventoryLine(): Promise<{ purchaseDocumentId: string; documentId: string; lineKey: string }> {
+    const { purchaseDocumentId, documentId } = await createDraftPurchaseDocumentWithLines(fx.supabase, {
+      organizationId: fx.organizationId,
+      vendorId: fx.vendorId,
+      uploadedByAppUserId: fx.changeableEmployeeAppUserId,
+      lines: [{ vendorSku: `SPLIT-${crypto.randomUUID().slice(0, 8)}`, description: "Split Gate Item", packageUnit: "PIECE", measuredUnit: "PIECE" }],
+    });
+    const [lineKey] = await getLineKeys(fx.supabase, purchaseDocumentId);
+    await approveLineClassificationNewItemRpc(fx.supabase, {
+      purchaseDocumentId,
+      lineKey,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      finalName: `Split Gate Item ${purchaseDocumentId.slice(0, 8)}`,
+      disposition: "INVENTORY",
+      categoryId,
+      spendCategoryId,
+      baseUnitCode: "PIECE",
+      rememberVendorMapping: false,
+    });
+    return { purchaseDocumentId, documentId, lineKey };
+  }
+
+  it("THE deadlock regression: fully received + located but NO delivery verifier -- receivingComplete is TRUE (Step 4 reachable), ready stays FALSE, and every remaining blocker is document-level", async () => {
+    const { purchaseDocumentId, lineKey } = await draftWithConfirmedInventoryLine();
+    await receiveLine(purchaseDocumentId, lineKey, true);
+
+    const status = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(status.receivingComplete).toBe(true); // Step 3 complete -- Continue enabled
+    expect(status.ready).toBe(false); // Send still correctly gated
+    expect(status.blockers.length).toBeGreaterThan(0);
+    expect(status.blockers.every((b) => b.lineKey === null)).toBe(true); // nothing line-level remains
+    expect(status.blockers.some((b) => /delivery verified/i.test(b.reason))).toBe(true);
+  });
+
+  it("a missing storage location is a LINE-level blocker: receivingComplete false, with the exact line and reason", async () => {
+    const { purchaseDocumentId, documentId, lineKey } = await draftWithConfirmedInventoryLine();
+    await setDeliveryVerifier(documentId);
+    await receiveLine(purchaseDocumentId, lineKey, false);
+
+    const status = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(status.receivingComplete).toBe(false);
+    const lineBlockers = status.blockers.filter((b) => b.lineKey !== null);
+    expect(lineBlockers).toHaveLength(1);
+    expect(lineBlockers[0].lineKey).toBe(lineKey);
+    expect(lineBlockers[0].reason).toMatch(/location/i);
+  });
+
+  it("a missing required verified measurement is a LINE-level blocker: receivingComplete false", async () => {
+    const { purchaseDocumentId, documentId } = await createDraftPurchaseDocumentWithLines(fx.supabase, {
+      organizationId: fx.organizationId,
+      vendorId: fx.vendorId,
+      uploadedByAppUserId: fx.changeableEmployeeAppUserId,
+      lines: [{ vendorSku: `SPLIT-M-${crypto.randomUUID().slice(0, 8)}`, description: "Split Measure Item", packageUnit: "BOX", measuredUnit: "LB" }],
+    });
+    await setDeliveryVerifier(documentId);
+    const [lineKey] = await getLineKeys(fx.supabase, purchaseDocumentId);
+    await approveLineClassificationNewItemRpc(fx.supabase, {
+      purchaseDocumentId,
+      lineKey,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      finalName: `Split Measure Item ${purchaseDocumentId.slice(0, 8)}`,
+      disposition: "INVENTORY",
+      categoryId,
+      spendCategoryId,
+      baseUnitCode: "LB",
+      purchaseUnitCode: "BOX",
+      receivingBehavior: "MEASURE_EACH_DELIVERY",
+      rememberVendorMapping: false,
+    });
+    await recordReceiptRpc(fx.supabase, {
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      receiptKind: "DELIVERY",
+      purchaseDocumentId,
+      lines: [
+        {
+          lineNumberSnapshot: 1,
+          matchedLineKey: lineKey,
+          vendorSkuSnapshot: "SPLIT-M",
+          descriptionSnapshot: "Split Measure Item",
+          invoicePackageQuantity: 1,
+          invoicePackageUnit: "BOX",
+          invoiceMeasuredQuantity: null,
+          invoiceMeasuredUnit: null,
+          actualReceivedPackageQuantity: 1,
+          actualReceivedPackageUnit: "BOX",
+          actualVerifiedBaseQuantity: null, // never weighed
+          actualVerifiedBaseUnitId: null,
+          locationId,
+        },
+      ],
+    });
+
+    const status = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(status.receivingComplete).toBe(false);
+    const lineBlockers = status.blockers.filter((b) => b.lineKey !== null);
+    expect(lineBlockers.some((b) => /verified/i.test(b.reason))).toBe(true);
+  });
+
+  it("a purely NON_INVENTORY document is receivingComplete (and ready) with no receiving at all", async () => {
+    const { purchaseDocumentId } = await createDraftPurchaseDocumentWithLines(fx.supabase, {
+      organizationId: fx.organizationId,
+      vendorId: fx.vendorId,
+      uploadedByAppUserId: fx.changeableEmployeeAppUserId,
+      lines: [{ vendorSku: `SPLIT-NI-${crypto.randomUUID().slice(0, 8)}`, description: "Split Freight" }],
+    });
+    await confirmAllCurrentLinesNonInventory(fx.supabase, fx.organizationId, fx.changeableEmployeeAppUserId, purchaseDocumentId);
+
+    const status = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(status.receivingComplete).toBe(true);
+    expect(status.ready).toBe(true);
+  });
+
+  it("an additional complete delivery never makes an already-complete document incomplete", async () => {
+    const { purchaseDocumentId, documentId, lineKey } = await draftWithConfirmedInventoryLine();
+    await setDeliveryVerifier(documentId);
+    await receiveLine(purchaseDocumentId, lineKey, true);
+
+    let status = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(status.receivingComplete).toBe(true);
+    expect(status.ready).toBe(true);
+
+    await receiveLine(purchaseDocumentId, lineKey, true); // a genuinely separate additional delivery
+
+    status = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(status.receivingComplete).toBe(true);
+    expect(status.ready).toBe(true);
+  });
+
+  it("the gate follows the EFFECTIVE corrected receipt, never the superseded original", async () => {
+    const { purchaseDocumentId, documentId, lineKey } = await draftWithConfirmedInventoryLine();
+    await setDeliveryVerifier(documentId);
+
+    const originalReceiptId = await receiveLine(purchaseDocumentId, lineKey, false); // recorded WITHOUT a location
+    let status = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(status.receivingComplete).toBe(false);
+
+    await receiveLine(purchaseDocumentId, lineKey, true, originalReceiptId); // CORRECTION supplies the location
+    status = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(status.receivingComplete).toBe(true); // the effective (corrected) receipt satisfies the gate
+    expect(status.ready).toBe(true);
+  });
+});

@@ -110,6 +110,15 @@ export function ItemMappingPanel({
   const [bulkConfirmPending, setBulkConfirmPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [overrideFormLineKey, setOverrideFormLineKey] = useState<string | null>(null);
+  // A CONFIRMED line stays clean by default; while the document is still
+  // DRAFT, Manager 1 can deliberately reopen it via [Edit Mapping] to
+  // correct the canonical item/disposition before Send for Final Review.
+  // Re-approval goes through the exact same audited approve RPCs (which
+  // upsert the line's classification, preserve vendor-memory rules, and
+  // are preparer-gated + status-locked server-side), so nothing here
+  // weakens the freeze: after submission these controls are read-only AND
+  // the RPCs reject the write regardless.
+  const [editingMappingLineKey, setEditingMappingLineKey] = useState<string | null>(null);
   const [showNewItemModal, setShowNewItemModal] = useState(false);
   const [autoOpened, setAutoOpened] = useState(false);
   const [showAllMappings, setShowAllMappings] = useState(false);
@@ -293,6 +302,7 @@ export function ItemMappingPanel({
       return;
     }
     setOverrideFormLineKey(null);
+    setEditingMappingLineKey(null);
     await load();
   }
 
@@ -303,6 +313,7 @@ export function ItemMappingPanel({
       setError(result.message);
       return;
     }
+    setEditingMappingLineKey(null);
     await load();
   }
 
@@ -468,6 +479,41 @@ export function ItemMappingPanel({
                     Mark Non-Inventory
                   </button>
                 </div>
+              ) : null}
+
+              {!readOnly && line.status === "CONFIRMED" ? (
+                editingMappingLineKey === line.lineKey ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey)}
+                      className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300"
+                    >
+                      Choose Different Item
+                    </button>
+                    <button type="button" onClick={() => handleMarkNonInventory(line)} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300">
+                      Mark Non-Inventory
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingMappingLineKey(null);
+                        setOverrideFormLineKey(null);
+                      }}
+                      className="text-xs text-zinc-400 underline underline-offset-2"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setEditingMappingLineKey(line.lineKey)}
+                    className="self-start text-xs text-zinc-400 underline underline-offset-2 hover:text-zinc-200"
+                  >
+                    Edit Mapping
+                  </button>
+                )
               ) : null}
 
               {overrideFormLineKey === line.lineKey ? (

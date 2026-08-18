@@ -11,6 +11,9 @@ import { initializePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/
 import { savePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/savePurchaseDocumentDraftRpc";
 import { submitPurchaseDocumentForVerificationRpc } from "@/app/lib/purchaseDocuments/submitPurchaseDocumentForVerificationRpc";
 import { verifyPurchaseDocumentRpc } from "@/app/lib/purchaseDocuments/verifyPurchaseDocumentRpc";
+import { saveReviewCorrectionsRpc } from "@/app/lib/purchaseDocuments/saveReviewCorrectionsRpc";
+import { saveReviewProposalsRpc } from "@/app/lib/purchaseDocuments/saveReviewProposalsRpc";
+import type { MappingProposals, ReceivingProposals } from "@/app/lib/purchaseDocuments/reviewProposals";
 import { returnPurchaseDocumentToDraftRpc } from "@/app/lib/purchaseDocuments/returnPurchaseDocumentToDraftRpc";
 import { initiateAmendmentRpc } from "@/app/lib/purchaseDocuments/initiateAmendmentRpc";
 import { discardPurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/discardPurchaseDocumentDraftRpc";
@@ -26,6 +29,9 @@ import {
   VerifiedLockedError,
   VendorNotActiveError,
   PreparationIncompleteError,
+  ReviewProposalsConflictError,
+  ReviewProposalsOwnedElsewhereError,
+  StaleReviewProposalsError,
 } from "@/app/lib/purchaseDocuments/errors";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 
@@ -38,6 +44,15 @@ function safeMessage(err: unknown): string {
   if (err instanceof VendorNotActiveError) return "The selected vendor is not active.";
   if (err instanceof PreparationIncompleteError) {
     return "This document isn't ready for final review yet -- every line needs a confirmed item mapping, and inventory lines need receiving quantities recorded first.";
+  }
+  if (err instanceof ReviewProposalsConflictError) {
+    return "This final review changed in another tab. Reload the latest review before continuing.";
+  }
+  if (err instanceof ReviewProposalsOwnedElsewhereError) {
+    return "Another manager already has pending review corrections on this document. Coordinate with them, or have them finish or release the review.";
+  }
+  if (err instanceof StaleReviewProposalsError) {
+    return "This review belongs to an earlier submission. Reload the current submission.";
   }
   return "Something went wrong. Try again.";
 }
@@ -53,7 +68,10 @@ function isKnownPurchaseDocumentError(err: unknown): boolean {
     err instanceof StaleVersionError ||
     err instanceof VerifiedLockedError ||
     err instanceof VendorNotActiveError ||
-    err instanceof PreparationIncompleteError
+    err instanceof PreparationIncompleteError ||
+    err instanceof ReviewProposalsConflictError ||
+    err instanceof ReviewProposalsOwnedElsewhereError ||
+    err instanceof StaleReviewProposalsError
   );
 }
 
@@ -73,13 +91,26 @@ function logIfUnexpected(actionName: string, err: unknown, context: Record<strin
 
 function reasonFor(
   err: unknown
-): "not_preparer" | "cannot_self_verify" | "stale" | "locked" | "invalid_vendor" | "preparation_incomplete" | "misconfigured" {
+):
+  | "not_preparer"
+  | "cannot_self_verify"
+  | "stale"
+  | "locked"
+  | "invalid_vendor"
+  | "preparation_incomplete"
+  | "review_conflict"
+  | "review_owned_elsewhere"
+  | "stale_review"
+  | "misconfigured" {
   if (err instanceof NotPreparerError) return "not_preparer";
   if (err instanceof CannotSelfVerifyError) return "cannot_self_verify";
   if (err instanceof StaleVersionError) return "stale";
   if (err instanceof VerifiedLockedError) return "locked";
   if (err instanceof VendorNotActiveError) return "invalid_vendor";
   if (err instanceof PreparationIncompleteError) return "preparation_incomplete";
+  if (err instanceof ReviewProposalsConflictError) return "review_conflict";
+  if (err instanceof ReviewProposalsOwnedElsewhereError) return "review_owned_elsewhere";
+  if (err instanceof StaleReviewProposalsError) return "stale_review";
   return "misconfigured";
 }
 
@@ -91,6 +122,9 @@ type FailureReason =
   | "locked"
   | "invalid_vendor"
   | "preparation_incomplete"
+  | "review_conflict"
+  | "review_owned_elsewhere"
+  | "stale_review"
   | "misconfigured";
 
 /** Best-effort, fire-and-forget scheduling -- mirrors documentUpload.ts's
@@ -256,6 +290,87 @@ export async function verifyPurchaseDocument(
     return { ok: true, verifiedAt: result.verifiedAt };
   } catch (err) {
     logIfUnexpected("verifyPurchaseDocument", err, { purchaseDocumentId, expectedVersion });
+    return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
+  }
+}
+
+export type SaveReviewCorrectionsActionResult =
+  | { ok: true; version: number }
+  | { ok: false; reason: FailureReason; message: string };
+
+/** Manager 2's controlled persist of header/line invoice-fact corrections
+ * during READY_FOR_VERIFICATION -- non-preparer-only (the RPC rejects the
+ * preparer with GA004, same maker-checker rule as verify). Needed before
+ * Final Verify whenever a correction touches a classification-IDENTITY
+ * field (SKU/description/units): persisting first lets the invalidation
+ * trigger flag the affected mappings as needing review, so the reviewer
+ * re-confirms them against the CORRECTED facts -- resolving them against
+ * the stale pre-correction facts can never converge. Schedules the same
+ * background re-classification as every other line-changing save. */
+export async function savePurchaseDocumentReviewCorrections(
+  purchaseDocumentId: string,
+  expectedVersion: number,
+  header: PurchaseDocumentHeaderDraft,
+  lines: PurchaseDocumentLine[]
+): Promise<SaveReviewCorrectionsActionResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  try {
+    const result = await saveReviewCorrectionsRpc(getServiceRoleClient(), {
+      purchaseDocumentId,
+      organizationId: auth.manager.organizationId,
+      appUserId: auth.manager.appUserId,
+      expectedVersion,
+      header,
+      lines,
+    });
+    scheduleClassification(purchaseDocumentId, auth.manager.organizationId);
+    return { ok: true, version: result.version };
+  } catch (err) {
+    logIfUnexpected("savePurchaseDocumentReviewCorrections", err, { purchaseDocumentId, expectedVersion });
+    return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
+  }
+}
+
+export type SaveReviewProposalsActionResult =
+  | { ok: true; version: number; mappingCount: number; receivingCount: number }
+  | { ok: false; reason: FailureReason; message: string };
+
+/** Persists Manager 2's PROVISIONAL correction overlay (mapping +
+ * receiving proposals) so a refresh never loses review work. Changes NO
+ * authoritative state -- effective receipts and confirmed classifications
+ * are untouched until Final Verify promotes the overlay atomically, and
+ * Return to Preparer / Withdraw Submission discard it (keeping a copy in
+ * their audit events). Non-preparer-only; READY_FOR_VERIFICATION only.
+ * `expectedVersion` (0 = creating) is the optimistic-concurrency token:
+ * a stale save is rejected with reason "review_conflict" instead of
+ * overwriting another tab's proposals. */
+export async function savePurchaseDocumentReviewProposals(
+  purchaseDocumentId: string,
+  expectedVersion: number,
+  mappingProposals: MappingProposals,
+  receivingProposals: ReceivingProposals
+): Promise<SaveReviewProposalsActionResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  try {
+    const result = await saveReviewProposalsRpc(getServiceRoleClient(), {
+      purchaseDocumentId,
+      organizationId: auth.manager.organizationId,
+      appUserId: auth.manager.appUserId,
+      expectedVersion,
+      mappingProposals,
+      receivingProposals,
+    });
+    return { ok: true, version: result.version, mappingCount: result.mappingCount, receivingCount: result.receivingCount };
+  } catch (err) {
+    logIfUnexpected("savePurchaseDocumentReviewProposals", err, { purchaseDocumentId, expectedVersion });
     return { ok: false, reason: reasonFor(err), message: safeMessage(err) };
   }
 }

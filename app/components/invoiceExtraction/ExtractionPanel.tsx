@@ -1,4 +1,5 @@
 import type { NormalizedInvoiceExtraction, ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
+import { formatMoney } from "@/app/lib/formatMoney";
 
 /**
  * Shared between the dev AI test harness and the real document detail page
@@ -29,10 +30,10 @@ export function ExtractionPanel({
         <Field label="Invoice #" value={normalized.invoiceNumber} />
         <Field label="Invoice Date" value={normalized.invoiceDate} />
         <Field label="PO #" value={normalized.purchaseOrderNumber} />
-        <Field label="Subtotal" value={formatMoney(normalized.subtotal)} />
-        <Field label="Tax" value={formatMoney(normalized.tax)} />
-        <Field label="Fees" value={formatMoney(normalized.fees)} />
-        <Field label="Total" value={formatMoney(normalized.total)} />
+        <Field label="Subtotal" value={normalized.subtotal !== null ? formatMoney(normalized.subtotal, normalized.currency) : null} />
+        <Field label="Tax" value={normalized.tax !== null ? formatMoney(normalized.tax, normalized.currency) : null} />
+        <Field label="Fees" value={normalized.fees !== null ? formatMoney(normalized.fees, normalized.currency) : null} />
+        <Field label="Total" value={normalized.total !== null ? formatMoney(normalized.total, normalized.currency) : null} />
       </dl>
 
       <div className="mt-4 overflow-x-auto">
@@ -59,9 +60,9 @@ export function ExtractionPanel({
                 <td className="px-2 py-1">{line.packageUnit ?? "—"}</td>
                 <td className="px-2 py-1">{line.measuredQuantity ?? "—"}</td>
                 <td className="px-2 py-1">{line.measuredUnit ?? "—"}</td>
-                <td className="px-2 py-1">{line.unitPrice ?? "—"}</td>
+                <td className="px-2 py-1">{formatMoney(line.unitPrice, normalized.currency)}</td>
                 <td className="px-2 py-1">{line.priceBasisUnit ?? "—"}</td>
-                <td className="px-2 py-1">{line.lineTotal ?? "—"}</td>
+                <td className="px-2 py-1">{formatMoney(line.lineTotal, normalized.currency)}</td>
               </tr>
             ))}
           </tbody>
@@ -101,10 +102,6 @@ export function ExtractionPanel({
       </div>
     </div>
   );
-}
-
-function formatMoney(value: number | null): string | null {
-  return value === null ? null : value.toFixed(2);
 }
 
 function Field({ label, value }: { label: string; value: string | null }) {

@@ -120,10 +120,16 @@ export async function getReceivingQueue(organizationId: string, filters: Receivi
     p_limit: QUEUE_RESULT_LIMIT,
   });
 
-  if (error || !data) {
-    return [];
+  if (error) {
+    // Never silently degrade to an empty queue -- a transient DB error
+    // must surface as an error, not as "there are no documents" (a
+    // manager acting on a silently-empty queue is far worse than seeing
+    // a failure they can retry). Discovered during 2A.4: under heavy
+    // concurrent load the swallowed error made the whole Receiving Queue
+    // read as empty with no signal anywhere.
+    throw new Error(`search_receiving_queue failed: ${error.message}`);
   }
-  const results = data as SearchReceivingQueueRow[];
+  const results = (data ?? []) as SearchReceivingQueueRow[];
   if (results.length === 0) {
     return [];
   }

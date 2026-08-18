@@ -5,10 +5,13 @@ import {
   recordReceipt,
   listEffectiveReceiptsForPurchaseDocument,
   getReceivingLinesForPurchaseDocument,
+  getEffectiveReceivingLinesForPurchaseDocument,
+  correctEffectiveReceiving,
   listLocations,
   type EffectiveReceiptRow,
   type LocationSummary,
 } from "@/app/actions/receiving";
+import type { ReceivingLineEdit } from "@/app/lib/receiving/effectiveReceivingEdit";
 import { computeReceivingPrefill, recomputeFixedConversionVerifiedQuantity } from "@/app/lib/receiving/computeReceivingPrefill";
 import { mergeReceivingLineState, type ReceivingLineDraft } from "@/app/lib/receiving/mergeReceivingLineState";
 import type { ReceivingLineInfo } from "@/app/lib/receiving/getReceivingLines";
@@ -62,10 +65,20 @@ function lineIsReady(l: LineReceiptState): boolean {
 export function ReceivingPanel({
   purchaseDocumentId,
   readOnly,
+  collapseWhenReceived,
   onChange,
 }: {
   purchaseDocumentId: string;
   readOnly?: boolean;
+  /** Step 3's wizard mode: once a delivery has been recorded, the
+   * editable entry form collapses into a recorded-delivery summary, and
+   * "Record Additional Delivery" becomes an explicit, de-emphasized
+   * secondary action for a genuinely separate later/partial delivery --
+   * never the implied next step of an already-complete receipt. The
+   * recorded EFFECTIVE receipt is what drives wizard completion; an
+   * unopened additional-delivery form must never make a complete
+   * delivery look incomplete. */
+  collapseWhenReceived?: boolean;
   /** Fires after every load AND every successful receipt submission --
    * lets the wizard re-check the authoritative completion gate
    * (getPreparationStatus). Whether step 3 is actually "done" is never
@@ -82,6 +95,120 @@ export function ReceivingPanel({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [alreadyReceived, setAlreadyReceived] = useState(false);
+  const [showAdditionalForm, setShowAdditionalForm] = useState(false);
+
+  // Edit Receiving (DRAFT only): a SEPARATE mode from recording an
+  // additional delivery -- it corrects the existing effective receiving
+  // facts via append-only receipt corrections, never a new delivery event.
+  interface EditLineDraft {
+    receiptLineId: string;
+    matchedLineKey: string;
+    itemLabel: string;
+    info: ReceivingLineInfo | null;
+    receivedQuantity: string;
+    receivedUnit: string;
+    verifiedQuantity: string;
+    locationId: string;
+    conditionStatus: LineReceiptState["conditionStatus"];
+    original: { receivedQuantity: string; receivedUnit: string; verifiedQuantity: string; locationId: string; conditionStatus: string };
+  }
+  const [editState, setEditState] = useState<EditLineDraft[] | null>(null);
+  const [editPending, setEditPending] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editSessionKey, setEditSessionKey] = useState(() => crypto.randomUUID());
+
+  async function handleOpenEditReceiving() {
+    setEditError(null);
+    setEditSessionKey(crypto.randomUUID()); // a fresh edit session = a fresh idempotency scope
+    const result = await getEffectiveReceivingLinesForPurchaseDocument(purchaseDocumentId);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    const infoByLineKey = new Map(lineState.map((l) => [l.lineKey, l.info]));
+    setEditState(
+      result.lines.map((line) => {
+        const info = infoByLineKey.get(line.matchedLineKey) ?? null;
+        return {
+          receiptLineId: line.receiptLineId,
+          matchedLineKey: line.matchedLineKey,
+          itemLabel: line.descriptionSnapshot ?? info?.description ?? "—",
+          info,
+          receivedQuantity: line.receivedQuantity !== null ? String(line.receivedQuantity) : "",
+          receivedUnit: line.receivedUnit ?? "",
+          verifiedQuantity: line.verifiedBaseQuantity !== null ? String(line.verifiedBaseQuantity) : "",
+          locationId: line.locationId ?? "",
+          conditionStatus: line.conditionStatus as LineReceiptState["conditionStatus"],
+          original: {
+            receivedQuantity: line.receivedQuantity !== null ? String(line.receivedQuantity) : "",
+            receivedUnit: line.receivedUnit ?? "",
+            verifiedQuantity: line.verifiedBaseQuantity !== null ? String(line.verifiedBaseQuantity) : "",
+            locationId: line.locationId ?? "",
+            conditionStatus: line.conditionStatus,
+          },
+        };
+      })
+    );
+  }
+
+  function updateEditLine(receiptLineId: string, patch: Partial<Pick<EditLineDraft, "receivedQuantity" | "receivedUnit" | "verifiedQuantity" | "locationId" | "conditionStatus">>) {
+    setEditState((prev) =>
+      (prev ?? []).map((line) => {
+        if (line.receiptLineId !== receiptLineId) return line;
+        const next = { ...line, ...patch };
+        // Same FIXED_CONVERSION consistency rule as the entry form: a
+        // corrected received quantity/unit immediately re-derives the
+        // verified base quantity (record_receipt re-validates it
+        // server-side regardless).
+        if (line.info?.receivingBehavior === "FIXED_CONVERSION" && (patch.receivedQuantity !== undefined || patch.receivedUnit !== undefined)) {
+          next.verifiedQuantity = recomputeFixedConversionVerifiedQuantity(line.info, next.receivedQuantity, next.receivedUnit);
+        }
+        return next;
+      })
+    );
+  }
+
+  async function handleSaveReceivingChanges() {
+    if (!editState || editPending) return;
+    const edits: ReceivingLineEdit[] = editState
+      .filter(
+        (line) =>
+          line.receivedQuantity !== line.original.receivedQuantity ||
+          line.receivedUnit !== line.original.receivedUnit ||
+          line.verifiedQuantity !== line.original.verifiedQuantity ||
+          line.locationId !== line.original.locationId ||
+          line.conditionStatus !== line.original.conditionStatus
+      )
+      .map((line) => ({
+        receiptLineId: line.receiptLineId,
+        receivedQuantity: Number(line.receivedQuantity),
+        receivedUnit: line.receivedUnit || null,
+        verifiedBaseQuantity: line.verifiedQuantity.trim() !== "" ? Number(line.verifiedQuantity) : null,
+        locationId: line.locationId || null,
+        conditionStatus: line.conditionStatus,
+      }));
+
+    if (edits.length === 0) {
+      setEditState(null); // nothing changed -- just close
+      return;
+    }
+    const invalid = edits.find((edit) => !Number.isFinite(edit.receivedQuantity) || edit.receivedQuantity < 0);
+    if (invalid) {
+      setEditError("Each corrected line needs a valid received quantity.");
+      return;
+    }
+
+    setEditPending(true);
+    setEditError(null);
+    const result = await correctEffectiveReceiving({ purchaseDocumentId, editSessionKey, edits });
+    setEditPending(false);
+    if (!result.ok) {
+      setEditError(result.message);
+      return; // retry-safe: same session key replays the same corrections
+    }
+    setEditState(null);
+    await load();
+  }
   // A stable key for the CURRENT logical submission attempt -- a
   // double-click or slow-network retry before this rotates sends the
   // SAME key, so record_receipt collapses it into one receipt instead of
@@ -119,7 +246,6 @@ export function ReceivingPanel({
     // Deliberate fetch-on-mount, same pattern as NotificationBell's own
     // fetch-on-mount effect -- there's no props/state this could be
     // derived from during render.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
 
@@ -243,10 +369,19 @@ export function ReceivingPanel({
     }
     setNotes("");
     setSubmissionKey(crypto.randomUUID());
+    setShowAdditionalForm(false); // a successful submit collapses back to the recorded summary
     await load();
   }
 
   const exceptionCount = lineState.filter((l) => !lineIsReady(l)).length;
+
+  // Collapsed recorded-summary mode: an effective delivery exists and the
+  // manager hasn't explicitly started an additional one. The editable
+  // entry form is hidden entirely -- it exists again only through the
+  // explicit secondary action below.
+  const editing = editState !== null;
+  const collapsed = Boolean(collapseWhenReceived) && !readOnly && alreadyReceived && !showAdditionalForm && !editing;
+  const formVisible = !readOnly && lineState.length > 0 && !collapsed && !editing;
 
   return (
     <div className="mt-4 flex flex-col gap-4">
@@ -270,7 +405,46 @@ export function ReceivingPanel({
 
         {error ? <p className="mt-3 text-sm text-red-400">{error}</p> : null}
 
-        {!readOnly && lineState.length > 0 ? (
+        {collapsed ? (
+          <div className="mt-4 border-t border-zinc-800 pt-4">
+            <p className="text-sm font-semibold text-emerald-400">✓ Delivery recorded</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              The recorded delivery above is the authoritative receiving record for this document. Only record another
+              receipt for a genuinely separate later or partial delivery.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {/* EDIT corrects the existing delivery's facts (append-only
+                  correction); ADDITIONAL records a genuinely separate
+                  physical delivery. Deliberately distinct actions. */}
+              <button
+                type="button"
+                onClick={handleOpenEditReceiving}
+                className="rounded-full border border-zinc-700 px-4 py-1.5 text-xs text-zinc-300 hover:text-zinc-100"
+              >
+                Edit Receiving
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAdditionalForm(true)}
+                className="rounded-full border border-zinc-700 px-4 py-1.5 text-xs text-zinc-300 hover:text-zinc-100"
+              >
+                Record Additional Delivery
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {editing ? (
+          <div className="mt-4 border-t border-zinc-800 pt-4">
+            <p className="text-sm font-semibold text-zinc-200">Edit Receiving</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              Corrections are recorded as a new receiving correction -- the original receipt is preserved in history, and
+              the corrected values become the effective receiving record.
+            </p>
+          </div>
+        ) : null}
+
+        {formVisible ? (
           <>
             <div className="mt-4 flex flex-wrap items-end gap-2 border-t border-zinc-800 pt-4">
               <label className="flex flex-col gap-1 text-xs text-zinc-400">
@@ -303,7 +477,111 @@ export function ReceivingPanel({
         ) : null}
       </div>
 
-      {lineState.length > 0 ? (
+      {editing ? (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col divide-y divide-zinc-800 rounded-2xl border border-zinc-800">
+            {(editState ?? []).map((line) => (
+              <div key={line.receiptLineId} className="flex flex-col gap-2 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-100">{line.itemLabel}</span>
+                  <span className="shrink-0 text-xs text-zinc-500">
+                    Was: {line.original.receivedQuantity || "—"} {line.original.receivedUnit}
+                    {line.original.verifiedQuantity ? ` · ${line.original.verifiedQuantity} ${line.info?.baseUnitCode ?? ""}` : ""}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+                    Received
+                    <div className="flex gap-1">
+                      <input
+                        type="number"
+                        value={line.receivedQuantity}
+                        onChange={(e) => updateEditLine(line.receiptLineId, { receivedQuantity: e.target.value })}
+                        placeholder="Qty"
+                        className="w-20 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
+                      />
+                      <input
+                        type="text"
+                        value={line.receivedUnit}
+                        onChange={(e) => updateEditLine(line.receiptLineId, { receivedUnit: e.target.value })}
+                        placeholder="Unit"
+                        className="w-20 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
+                      />
+                    </div>
+                    {line.info?.receivingBehavior === "FIXED_CONVERSION" && line.verifiedQuantity.trim() !== "" ? (
+                      <span className="text-xs text-zinc-500">
+                        → {line.verifiedQuantity} {line.info.baseUnitCode}
+                      </span>
+                    ) : null}
+                  </label>
+
+                  {line.info?.requiresVerifiedMeasurement ? (
+                    <label className="flex flex-col gap-0.5 text-xs text-amber-400">
+                      Verified {line.info.baseUnitCode} <span className="text-amber-500">REQUIRED</span>
+                      <input
+                        type="number"
+                        value={line.verifiedQuantity}
+                        onChange={(e) => updateEditLine(line.receiptLineId, { verifiedQuantity: e.target.value })}
+                        placeholder={line.info.baseUnitCode ?? ""}
+                        className="w-28 rounded-lg border border-amber-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
+                      />
+                    </label>
+                  ) : null}
+
+                  <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+                    Location
+                    <select
+                      value={line.locationId}
+                      onChange={(e) => updateEditLine(line.receiptLineId, { locationId: e.target.value })}
+                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
+                    >
+                      <option value="">Select…</option>
+                      {locations.map((loc) => (
+                        <option key={loc.id} value={loc.id}>
+                          {loc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+                    Condition
+                    <select
+                      value={line.conditionStatus}
+                      onChange={(e) => updateEditLine(line.receiptLineId, { conditionStatus: e.target.value as LineReceiptState["conditionStatus"] })}
+                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
+                    >
+                      <option value="RECEIVED_AS_INVOICED">As invoiced</option>
+                      <option value="SHORT">Short</option>
+                      <option value="DAMAGED">Damaged</option>
+                      <option value="WRONG_ITEM">Wrong item</option>
+                      <option value="NOT_RECEIVED">Not received</option>
+                      <option value="EXCESS">Excess</option>
+                      <option value="OTHER">Other</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+          {editError ? <p className="text-sm text-red-400">{editError}</p> : null}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleSaveReceivingChanges}
+              disabled={editPending}
+              className="self-start rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
+            >
+              {editPending ? "Saving receiving changes…" : "Save Receiving Changes"}
+            </button>
+            <button type="button" onClick={() => setEditState(null)} className="text-xs text-zinc-400 underline underline-offset-2">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {lineState.length > 0 && !collapsed && !editing ? (
         <div className="flex flex-col divide-y divide-zinc-800 rounded-2xl border border-zinc-800">
           {lineState.map((l) => {
             const ready = lineIsReady(l);
@@ -461,7 +739,7 @@ export function ReceivingPanel({
         <p className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-500">No inventory lines to receive on this document.</p>
       ) : null}
 
-      {!readOnly && lineState.length > 0 ? (
+      {formVisible ? (
         <div className="flex flex-col gap-3">
           <label className="flex flex-col gap-1 text-xs text-zinc-400">
             Notes
@@ -469,8 +747,13 @@ export function ReceivingPanel({
           </label>
           <div className="flex items-center gap-3">
             <button type="button" onClick={handleSubmit} disabled={pending} className="self-start rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40">
-              {pending ? "Recording receipt…" : alreadyReceived ? "Record Additional Receipt" : "Confirm Receiving"}
+              {pending ? "Recording receipt…" : alreadyReceived ? "Record Additional Delivery Receipt" : "Confirm Receiving"}
             </button>
+            {alreadyReceived && collapseWhenReceived ? (
+              <button type="button" onClick={() => setShowAdditionalForm(false)} className="text-xs text-zinc-400 underline underline-offset-2">
+                Cancel
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}

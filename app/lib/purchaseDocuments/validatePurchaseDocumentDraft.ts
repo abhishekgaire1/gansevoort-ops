@@ -1,6 +1,7 @@
 import { validateLineItem } from "@/app/lib/ai/tasks/invoiceExtraction/validate";
 import type { ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
 import type { PurchaseDocumentDraft, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
+import { formatMoney } from "@/app/lib/formatMoney";
 
 /**
  * Deterministic, non-AI validation of a purchase document DRAFT's current
@@ -87,7 +88,7 @@ export function validatePurchaseDocumentDraft(draft: PurchaseDocumentDraft): Rev
   }
 
   draft.lines.forEach((line, index) => {
-    issues.push(...validateLineItem(line, index));
+    issues.push(...validateLineItem(line, index, draft.currency));
   });
 
   if (draft.total !== null && draft.lines.length > 0) {
@@ -100,7 +101,7 @@ export function validatePurchaseDocumentDraft(draft: PurchaseDocumentDraft): Rev
           severity: "warning",
           code: "TOTAL_MISMATCH",
           field: "total",
-          message: `Line totals + tax + fees (${computedTotal.toFixed(2)}) do not match the entered total (${draft.total.toFixed(2)}).`,
+          message: `Line totals + tax + fees (${formatMoney(computedTotal, draft.currency)}) do not match the entered total (${formatMoney(draft.total, draft.currency)}).`,
         });
       }
     }

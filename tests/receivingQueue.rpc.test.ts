@@ -116,7 +116,12 @@ describe("search_receiving_queue -- filtering happens before the limit, not afte
 
       // 200 unrelated, newer filler documents -- no vendor, no
       // purchase_document, exactly the volume that would previously have
-      // truncated the queue query before any filter ran.
+      // truncated the queue query before any filter ran. Spaced ONE
+      // MILLISECOND apart (never seconds): they only need to be strictly
+      // newer than the target, and stamping them minutes into the FUTURE
+      // would occupy every unfiltered queue's newest-200 window for other
+      // concurrently-running test files' own assertions -- a real
+      // cross-file interference observed under the full suite.
       const fillerRows = Array.from({ length: 200 }, (_, i) => ({
         organization_id: fx.organizationId,
         uploaded_by_app_user_id: fx.changeableEmployeeAppUserId,
@@ -125,7 +130,7 @@ describe("search_receiving_queue -- filtering happens before the limit, not afte
         content_type: "application/pdf",
         byte_size: 1000,
         file_sha256: randomBytes(32).toString("hex"),
-        created_at: new Date(baseTimeMs + (i + 1) * 1000).toISOString(),
+        created_at: new Date(baseTimeMs + i + 1).toISOString(),
       }));
       const { error: fillerError } = await fx.supabase.from("documents").insert(fillerRows);
       if (fillerError) throw fillerError;

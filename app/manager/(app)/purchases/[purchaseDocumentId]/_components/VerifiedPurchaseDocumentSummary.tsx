@@ -6,7 +6,11 @@ import { useRouter } from "next/navigation";
 import { getDocumentDownloadUrl } from "@/app/actions/documentAccess";
 import { initiatePurchaseDocumentAmendment, getPurchaseDocumentReviewSummary, getReceiptHistoryForPurchaseDocument } from "@/app/actions/purchaseDocuments";
 import { ReceivingPanel } from "./ReceivingPanel";
-import { getInventoryPostingSummary, inventoryPostingBadgeLabel } from "@/app/lib/purchaseDocuments/getInventoryPostingStatus";
+import { inventoryPostingBadgeLabel } from "@/app/lib/purchaseDocuments/getInventoryPostingStatus";
+import { postPurchaseDocumentToInventory, getPurchaseDocumentInventoryPosting } from "@/app/actions/inventory";
+import type { InventoryPostingDetail } from "@/app/lib/inventory/getInventoryPostingDetail";
+import type { InventoryPostingBlocker } from "@/app/lib/inventory/errors";
+import { formatMoney } from "@/app/lib/formatMoney";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, RevisionSummary } from "@/app/lib/purchaseDocuments/types";
 import type { PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
 import type { ReceiptHistoryEntry } from "@/app/lib/purchaseDocuments/getReceiptHistory";
@@ -27,7 +31,7 @@ import type { ReceiptHistoryEntry } from "@/app/lib/purchaseDocuments/getReceipt
  * this app already treats as authoritative -- getPurchaseDocumentReviewSummary
  * (item resolution, receiving, non-inventory, exceptions -- all derived
  * from CURRENT lines and EFFECTIVE receipts), getReceiptHistory (the full
- * receipt timeline), and getInventoryPostingSummary (the actual posting
+ * receipt timeline), and getPurchaseDocumentInventoryPosting (the actual posting
  * source of truth, never receipt existence or receiving completeness).
  * Nothing here recomputes a business fact independently.
  */
@@ -71,12 +75,6 @@ interface Props {
   revisions: RevisionSummary[];
 }
 
-function money(value: number | null, currency: string | null): string {
-  if (value === null) return "—";
-  const symbol = currency && currency.length <= 3 ? currency : "$";
-  return `${symbol}${value.toFixed(2)}`;
-}
-
 function quantityUnit(quantity: number | null, unit: string | null): string {
   if (quantity === null) return "—";
   return unit ? `${quantity} ${unit}` : String(quantity);
@@ -103,17 +101,24 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
 
   const [summary, setSummary] = useState<PurchaseDocumentReviewSummary | null>(null);
   const [history, setHistory] = useState<ReceiptHistoryEntry[] | null>(null);
+  const [posting, setPosting] = useState<InventoryPostingDetail | null>(null);
+  const [postPending, setPostPending] = useState(false);
+  const [postError, setPostError] = useState<string | null>(null);
+  const [postBlockers, setPostBlockers] = useState<InventoryPostingBlocker[]>([]);
 
   useEffect(() => {
     if (!props.isCurrentVerified) return;
     let cancelled = false;
-    Promise.all([getPurchaseDocumentReviewSummary(props.purchaseDocumentId), getReceiptHistoryForPurchaseDocument(props.purchaseDocumentId)]).then(
-      ([summaryResult, historyResult]) => {
-        if (cancelled) return;
-        if (summaryResult.ok) setSummary(summaryResult.summary);
-        if (historyResult.ok) setHistory(historyResult.history);
-      }
-    );
+    Promise.all([
+      getPurchaseDocumentReviewSummary(props.purchaseDocumentId),
+      getReceiptHistoryForPurchaseDocument(props.purchaseDocumentId),
+      getPurchaseDocumentInventoryPosting(props.purchaseDocumentId),
+    ]).then(([summaryResult, historyResult, postingResult]) => {
+      if (cancelled) return;
+      if (summaryResult.ok) setSummary(summaryResult.summary);
+      if (historyResult.ok) setHistory(historyResult.history);
+      if (postingResult.ok) setPosting(postingResult.detail);
+    });
     return () => {
       cancelled = true;
     };
@@ -121,7 +126,6 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
 
   const typeLabel = props.header.documentType ? (DOCUMENT_TYPE_LABEL[props.header.documentType] ?? props.header.documentType) : "Document";
   const receivingAllComplete = summary ? summary.receivingCompleteCount === summary.receivingTotalCount && summary.receivingTotalCount > 0 : false;
-  const posting = summary ? getInventoryPostingSummary(summary.receivingTotalCount) : null;
   const inventoryCount = summary ? summary.items.filter((i) => i.disposition === "INVENTORY").length : null;
   const nonInventoryCount = summary ? summary.items.filter((i) => i.disposition === "NON_INVENTORY").length : null;
 
@@ -146,6 +150,24 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
     if (result.ok) {
       window.open(result.url, "_blank", "noopener,noreferrer");
     }
+  }
+
+  async function handlePostToInventory() {
+    if (postPending) return; // already in flight -- a double-click must never fire twice (the RPC is idempotent regardless)
+    setPostPending(true);
+    setPostError(null);
+    setPostBlockers([]);
+    const result = await postPurchaseDocumentToInventory(props.purchaseDocumentId);
+    setPostPending(false);
+    if (!result.ok) {
+      setPostError(result.message);
+      if (result.reason === "blocked") setPostBlockers(result.blockers);
+      return;
+    }
+    // Refresh the posting section (and the header badge) from the real
+    // posting records -- never assume success shaped the data.
+    const refreshed = await getPurchaseDocumentInventoryPosting(props.purchaseDocumentId);
+    if (refreshed.ok) setPosting(refreshed.detail);
   }
 
   async function handleInitiateAmendment() {
@@ -193,7 +215,7 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
         <div className="mt-4 flex flex-wrap items-end justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
           <div>
             <p className="text-xs uppercase tracking-wide text-zinc-500">Total</p>
-            <p className="text-2xl font-semibold text-zinc-50">{money(props.header.total, props.header.currency)}</p>
+            <p className="text-2xl font-semibold text-zinc-50">{formatMoney(props.header.total, props.header.currency)}</p>
           </div>
           <div className="text-right text-xs text-zinc-500">
             {summary ? (
@@ -202,10 +224,10 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
               </p>
             ) : null}
             {props.isCurrentVerified ? (
-              posting?.status === "NOT_POSTED" ? (
+              posting === null || posting.status === "NOT_POSTED" ? (
                 <p className="mt-0.5">Inventory posting: Not posted</p>
-              ) : posting?.lastPostedAt ? (
-                <p className="mt-0.5">Inventory posted {new Date(posting.lastPostedAt).toLocaleString()}</p>
+              ) : posting.postings.length > 0 ? (
+                <p className="mt-0.5">Inventory posted {new Date(posting.postings[posting.postings.length - 1].postedAt).toLocaleString()}</p>
               ) : null
             ) : null}
           </div>
@@ -240,8 +262,8 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
                       </td>
                       <td className="py-2 pr-3 text-zinc-300">{line.packageQuantity ?? "—"}</td>
                       <td className="py-2 pr-3 text-zinc-300">{unit ?? "—"}</td>
-                      <td className="py-2 pr-3 text-zinc-300">{money(line.unitPrice, props.header.currency)}</td>
-                      <td className="py-2 text-right text-zinc-100">{money(line.lineTotal, props.header.currency)}</td>
+                      <td className="py-2 pr-3 text-zinc-300">{formatMoney(line.unitPrice, props.header.currency)}</td>
+                      <td className="py-2 text-right text-zinc-100">{formatMoney(line.lineTotal, props.header.currency)}</td>
                     </tr>
                   );
                 })}
@@ -252,19 +274,19 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
           <div className="mt-4 ml-auto flex max-w-xs flex-col gap-1 text-sm">
             <div className="flex justify-between text-zinc-400">
               <span>Subtotal</span>
-              <span>{money(props.header.subtotal, props.header.currency)}</span>
+              <span>{formatMoney(props.header.subtotal, props.header.currency)}</span>
             </div>
             <div className="flex justify-between text-zinc-400">
               <span>Tax</span>
-              <span>{money(props.header.tax, props.header.currency)}</span>
+              <span>{formatMoney(props.header.tax, props.header.currency)}</span>
             </div>
             <div className="flex justify-between text-zinc-400">
               <span>Fees</span>
-              <span>{money(props.header.fees, props.header.currency)}</span>
+              <span>{formatMoney(props.header.fees, props.header.currency)}</span>
             </div>
             <div className="flex justify-between border-t border-zinc-800 pt-1 font-semibold text-zinc-100">
               <span>Total</span>
-              <span>{money(props.header.total, props.header.currency)}</span>
+              <span>{formatMoney(props.header.total, props.header.currency)}</span>
             </div>
           </div>
 
@@ -400,27 +422,69 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
             <Section title="Inventory Posting">
               {!posting ? (
                 <p className="text-sm text-zinc-500">Loading…</p>
-              ) : posting.status === "NOT_POSTED" ? (
-                <p className="text-sm text-zinc-400">Not posted</p>
               ) : (
                 <>
-                  <p className={posting.status === "POSTED" ? "text-sm font-semibold text-emerald-400" : "text-sm font-semibold text-amber-300"}>
-                    {posting.status === "POSTED" ? "✓ Posted" : "⚠ Partially Posted"}
-                  </p>
-                  <p className="mt-1 text-sm text-zinc-300">
-                    {posting.postedLineCount} / {posting.totalInventoryLines} lines posted
-                  </p>
-                  {posting.lastPostedAt ? <DetailField label="Posted at" value={new Date(posting.lastPostedAt).toLocaleString()} /> : null}
-                  <ul className="mt-3 flex flex-col divide-y divide-zinc-800">
-                    {posting.postedLines.map((line) => (
-                      <li key={line.lineKey} className="py-2 text-sm">
-                        <p className="text-zinc-100">{line.description ?? "—"}</p>
-                        <p className="text-xs text-zinc-500">
-                          +{line.postedQuantity} {line.postedUnit} · {line.locationName ?? "—"}
-                        </p>
-                      </li>
-                    ))}
-                  </ul>
+                  {posting.status === "NOT_POSTED" ? (
+                    <p className="text-sm text-zinc-400">Not posted</p>
+                  ) : (
+                    <>
+                      <p className={posting.status === "POSTED" ? "text-sm font-semibold text-emerald-400" : "text-sm font-semibold text-amber-300"}>
+                        {posting.status === "POSTED" ? "✓ Inventory Posted" : "⚠ Partially Posted"}
+                      </p>
+                      <p className="mt-1 text-sm text-zinc-300">
+                        {posting.postedLineCount} / {posting.requiredLineCount} inventory lines posted
+                      </p>
+                      {posting.postings.map((record) => (
+                        <div key={record.postingId} className="mt-3 rounded-lg border border-zinc-800 p-3">
+                          <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-zinc-500">
+                            <span>Posted at {new Date(record.postedAt).toLocaleString()}</span>
+                            {record.postedByName ? <span>Posted by {record.postedByName}</span> : null}
+                          </div>
+                          <ul className="mt-2 flex flex-col divide-y divide-zinc-800">
+                            {record.lines.map((line) => (
+                              <li key={line.movementId + line.itemName} className="py-2 text-sm">
+                                <p className="text-zinc-100">{line.itemName ?? "—"}</p>
+                                <p className="text-xs text-zinc-500">
+                                  +{line.postedBaseQuantity} {line.baseUnitCode} · {line.locationName ?? "—"}
+                                  <span className="ml-2 text-zinc-600">movement {line.movementId.slice(0, 8)}</span>
+                                </p>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </>
+                  )}
+
+                  {props.isCurrentVerified && posting.status !== "POSTED" && posting.requiredLineCount > 0 ? (
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={handlePostToInventory}
+                        disabled={postPending}
+                        className="rounded-full bg-emerald-400 px-5 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
+                      >
+                        {postPending ? "Posting inventory…" : "Post to Inventory"}
+                      </button>
+                    </div>
+                  ) : null}
+                  {posting.status === "NOT_POSTED" && posting.requiredLineCount === 0 ? (
+                    <p className="mt-1 text-xs text-zinc-500">No inventory lines to post on this document.</p>
+                  ) : null}
+                  {postError ? (
+                    <div className="mt-3 rounded-lg border border-red-900 bg-red-950/20 p-3 text-sm text-red-300">
+                      <p>{postError}</p>
+                      {postBlockers.length > 0 ? (
+                        <ul className="mt-2 flex flex-col gap-1 text-xs">
+                          {postBlockers.map((blocker, index) => (
+                            <li key={index}>
+                              • {blocker.description ?? "Line"} — {blocker.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </>
               )}
             </Section>
@@ -435,7 +499,7 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
                         <p className="font-medium text-zinc-100">{line.description ?? "—"}</p>
                         {line.spendCategoryPath ? <p className="text-xs text-zinc-500">Spend Category: {line.spendCategoryPath}</p> : null}
                       </div>
-                      <span className="text-zinc-200">{money(line.lineTotal, props.header.currency)}</span>
+                      <span className="text-zinc-200">{formatMoney(line.lineTotal, props.header.currency)}</span>
                     </li>
                   ))}
                 </ul>

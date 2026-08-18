@@ -88,12 +88,15 @@ describe("getReceivingQueue -- forwards filters to search_receiving_queue verbat
     });
   });
 
-  it("returns an empty array (rather than throwing) if the RPC errors", async () => {
+  it("throws (never silently returns an empty queue) if the RPC errors -- a manager acting on a silently-empty queue is worse than a visible, retryable failure", async () => {
+    // Changed in 2A.4: the old swallow-into-[] behavior made a transient
+    // DB error (e.g. a statement timeout under load) read as "there are
+    // no documents", with no signal anywhere -- a real defect observed
+    // against real Postgres, not a hypothetical.
     const rpc = vi.fn().mockResolvedValue({ data: null, error: { message: "boom" } });
     getServiceRoleClientMock.mockReturnValue({ rpc, from: vi.fn() });
 
-    const result = await getReceivingQueue("org-1");
-    expect(result).toEqual([]);
+    await expect(getReceivingQueue("org-1")).rejects.toThrow(/search_receiving_queue failed: boom/);
   });
 });
 

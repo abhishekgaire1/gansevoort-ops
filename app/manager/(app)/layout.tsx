@@ -27,6 +27,9 @@ export default async function ManagerAppLayout({ children }: { children: ReactNo
           Gansevoort Manager
         </Link>
         <div className="flex items-center gap-6">
+          <Link href="/manager/inventory" className="text-sm text-zinc-400 hover:text-zinc-200">
+            Inventory
+          </Link>
           <Link href="/manager/items" className="text-sm text-zinc-400 hover:text-zinc-200">
             Items
           </Link>

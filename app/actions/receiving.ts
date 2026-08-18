@@ -7,6 +7,7 @@ import { correctDocumentDeliveryVerifierRpc } from "@/app/lib/itemMaster/correct
 import { setInventoryItemDefaultReceivingLocationRpc } from "@/app/lib/itemMaster/setInventoryItemDefaultReceivingLocationRpc";
 import { confirmReceivingLineInvoiceUnitRpc } from "@/app/lib/receiving/confirmReceivingLineInvoiceUnitRpc";
 import { getReceivingLines, type ReceivingLineInfo } from "@/app/lib/receiving/getReceivingLines";
+import { getEffectiveReceivingLines, applyReceivingEdits, type EffectiveReceivingLine, type ReceivingLineEdit } from "@/app/lib/receiving/effectiveReceivingEdit";
 import { ReceiptNotFoundOrInvalidError, EmployeeNotFoundOrInactiveError, FixedConversionQuantityMismatchError } from "@/app/lib/itemMaster/errors";
 import type { ReceiptKind, ReceiptLineInput } from "@/app/lib/receiving/types";
 
@@ -224,5 +225,61 @@ export async function correctDocumentDeliveryVerifier(
       return { ok: false, reason: "invalid_employee", message: "That employee is not active in this organization." };
     }
     return { ok: false, reason: "misconfigured", message: "Could not correct the delivery verifier. Try again." };
+  }
+}
+
+export type GetEffectiveReceivingLinesResult = { ok: true; lines: EffectiveReceivingLine[] } | AuthFailure;
+
+/** The current EFFECTIVE receiving state, for Edit Receiving's prefill --
+ * always the corrected/latest truth, never a superseded receipt. */
+export async function getEffectiveReceivingLinesForPurchaseDocument(purchaseDocumentId: string): Promise<GetEffectiveReceivingLinesResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  const lines = await getEffectiveReceivingLines(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
+  return { ok: true, lines };
+}
+
+export type CorrectEffectiveReceivingResult =
+  | { ok: true; correctedReceiptIds: string[] }
+  | AuthFailure
+  | { ok: false; reason: "invalid_receipt" | "quantity_mismatch" | "locked" | "misconfigured"; message: string };
+
+/** Edit Receiving's save: applies manager edits as APPEND-ONLY receipt
+ * corrections (the original receipt/lines are never mutated -- see
+ * applyReceivingEdits). DRAFT only: during READY_FOR_VERIFICATION,
+ * Manager 2's receiving corrections are PROPOSALS
+ * (purchase_document_review_proposals) promoted atomically by Final
+ * Verify -- record_receipt rejects a direct correction during final
+ * review (20260811100071), and VERIFIED remains locked by the receipts
+ * lock trigger regardless of UI. */
+export async function correctEffectiveReceiving(input: {
+  purchaseDocumentId: string;
+  editSessionKey: string;
+  edits: ReceivingLineEdit[];
+}): Promise<CorrectEffectiveReceivingResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  try {
+    const result = await applyReceivingEdits(getServiceRoleClient(), {
+      organizationId: auth.manager.organizationId,
+      appUserId: auth.manager.appUserId,
+      purchaseDocumentId: input.purchaseDocumentId,
+      editSessionKey: input.editSessionKey,
+      edits: input.edits,
+    });
+    return { ok: true, correctedReceiptIds: result.correctedReceiptIds };
+  } catch (err) {
+    if (err instanceof ReceiptNotFoundOrInvalidError) {
+      return { ok: false, reason: "invalid_receipt", message: "The receipt being corrected could not be found." };
+    }
+    if (err instanceof FixedConversionQuantityMismatchError) {
+      return { ok: false, reason: "quantity_mismatch", message: "A corrected quantity doesn't match the item's confirmed unit conversion. Re-check and try again." };
+    }
+    if (err instanceof Error && /VERIFIED|ready for verification/i.test(err.message)) {
+      return { ok: false, reason: "locked", message: "This document's preparation is locked and receiving can no longer be corrected here." };
+    }
+    return { ok: false, reason: "misconfigured", message: err instanceof Error && /effective receiving state/.test(err.message) ? err.message : "Could not save the receiving changes. Try again." };
   }
 }

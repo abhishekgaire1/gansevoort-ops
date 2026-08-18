@@ -5,19 +5,26 @@ import { getPurchaseDocumentReviewSummary } from "@/app/actions/purchaseDocument
 import { listActiveEmployees, correctDocumentDeliveryVerifier, type EmployeeSummary } from "@/app/actions/receiving";
 import type { PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
 import type { PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
-import type { PurchaseDocumentHeaderDraft } from "@/app/lib/purchaseDocuments/types";
+import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine } from "@/app/lib/purchaseDocuments/types";
+import { buildFinalReviewRows, type FinalReviewRow } from "@/app/lib/purchaseDocuments/finalReviewTable";
+import { deriveSendActionState } from "@/app/lib/purchaseDocuments/sendActionState";
+import { formatMoney } from "@/app/lib/formatMoney";
 
 /**
- * Step 4 -- Manager 1's last look before sending to Manager 2. Two
- * distinct jobs, kept clearly separate:
- *   1. Readiness (top) -- driven ENTIRELY by preparationStatus, the same
- *      RPC-enforced rule submit_purchase_document_for_verification itself
- *      uses (see getPreparationStatus.ts) -- never recomputed here.
- *   2. The detailed read-only review below it -- purely a formatted
- *      display of getPurchaseDocumentReviewSummary, itself just an
- *      aggregation of what earlier steps already produced. Nothing here
- *      is editable; a manager who spots a problem navigates back via the
- *      stepper (onNavigateToStep) to actually fix it.
+ * Step 4 -- Manager 1's final check before submission. Three layers, each
+ * shown exactly ONCE (the previous layout repeated every line name across
+ * separate Items/Receiving/Non-Inventory sections):
+ *   1. A compact readiness strip -- driven ENTIRELY by preparationStatus,
+ *      the same RPC-enforced rule submit_purchase_document_for_verification
+ *      itself uses. Never recomputed here.
+ *   2. A compact document grid (header + preparation facts).
+ *   3. ONE consolidated read-only line table -- invoice commercials
+ *      (qty/unit/price/total) side by side with mapping and effective
+ *      receiving facts, merged by buildFinalReviewRows from the SAME
+ *      authoritative read models the gates use (no new calculations).
+ * Nothing here is editable; a manager who spots a problem navigates back
+ * via the stepper/back links to fix it, and this summary refreshes on
+ * return.
  */
 
 const DOCUMENT_TYPE_LABEL: Record<string, string> = {
@@ -26,31 +33,21 @@ const DOCUMENT_TYPE_LABEL: Record<string, string> = {
   CREDIT_MEMO: "Credit Memo",
 };
 
-const RECEIVING_BEHAVIOR_LABEL: Record<string, string> = {
-  SAME_UNIT: "Same unit",
-  FIXED_CONVERSION: "Fixed conversion",
-  MEASURE_EACH_DELIVERY: "Measured each delivery",
-  COUNT_EACH_DELIVERY: "Counted each delivery",
-};
-
-function money(value: number | null, currency: string | null): string {
-  if (value === null) return "—";
-  const symbol = currency && currency.length <= 3 ? currency : "$";
-  return `${symbol}${value.toFixed(2)}`;
-}
-
 function date(value: string | null): string {
   if (!value) return "—";
   return new Date(value).toLocaleDateString();
 }
 
-function quantityUnit(quantity: number | null, unit: string | null): string {
-  if (quantity === null) return "—";
-  return unit ? `${quantity} ${unit}` : String(quantity);
-}
+const STATUS_BADGE_CLASS: Record<FinalReviewRow["status"]["kind"], string> = {
+  ready: "bg-emerald-400/10 text-emerald-300",
+  needs_review: "bg-amber-400/10 text-amber-300",
+  exception: "bg-orange-400/10 text-orange-300",
+};
 
 export function Step4ReviewSend({
   header,
+  lines,
+  documentStatus,
   vendorName,
   preparationStatus,
   deliveryVerifiedByName,
@@ -66,6 +63,14 @@ export function Step4ReviewSend({
   onPreparationStatusChange,
 }: {
   header: PurchaseDocumentHeaderDraft;
+  /** The current draft lines exactly as they will be submitted -- the
+   * authoritative source for the table's commercial columns. */
+  lines: PurchaseDocumentLine[];
+  /** Lifecycle truth for the primary action: Send exists only while
+   * DRAFT; once READY_FOR_VERIFICATION the button becomes an inert
+   * "✓ Sent" state (Withdraw Submission is the separate explicit action
+   * to take it back). The submit RPC remains the integrity boundary. */
+  documentStatus: "DRAFT" | "READY_FOR_VERIFICATION";
   vendorName: string | null;
   preparationStatus: PreparationStatus | null;
   deliveryVerifiedByName: string | null;
@@ -140,14 +145,18 @@ export function Step4ReviewSend({
 
   const locationsComplete = summary ? summary.receiving.every((r) => r.locationName !== null) : null;
   const exceptionCount = summary?.exceptions.length ?? 0;
+  const rows = buildFinalReviewRows({ lines, summary, blockers });
+  const sendAction = deriveSendActionState({ status: documentStatus, editable, ready });
 
   return (
     <div className="mt-4 flex flex-col gap-4">
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">{ready ? "Ready for Final Review" : "Almost Ready"}</h2>
-
-        <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-          <SummaryRow label="Invoice" ok className="✓ Reviewed" />
+      {/* ============ COMPACT READINESS STRIP ============ */}
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">{ready ? "Ready for Final Review" : "Almost Ready"}</h2>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3 lg:grid-cols-6">
+          <SummaryRow label="Invoice" ok className="Reviewed" />
           <SummaryRow
             label="Items"
             ok={summary ? summary.itemsConfirmedCount === summary.itemsTotalCount : null}
@@ -162,11 +171,105 @@ export function Step4ReviewSend({
           <SummaryRow
             label="Exceptions"
             ok={exceptionCount === 0}
-            className={exceptionCount === 0 ? "None" : `${exceptionCount} documented exception${exceptionCount === 1 ? "" : "s"}`}
+            className={exceptionCount === 0 ? "None" : `${exceptionCount} documented`}
           />
+          <SummaryRow label="Delivery verifier" ok={!missingDeliveryVerifier} className={missingDeliveryVerifier ? "Missing" : (deliveryVerifiedByName ?? "Set")} />
         </div>
       </div>
 
+      {/* ============ COMPACT DOCUMENT GRID ============ */}
+      <Section title="Document">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+          <DetailField label="Vendor" value={vendorName} />
+          <DetailField label={`${typeLabel} #`} value={header.documentNumber} />
+          <DetailField label="Document Type" value={typeLabel} />
+          <DetailField label="Invoice Date" value={date(header.documentDate)} />
+          <DetailField label="Delivery Date" value={date(header.deliveryDate)} />
+          <DetailField label="PO #" value={header.poNumber} />
+          <DetailField label="Prepared by" value={preparerName} />
+          <DetailField label="Delivery verified by" value={deliveryVerifiedByName} />
+          <DetailField label="Subtotal" value={formatMoney(header.subtotal, header.currency)} />
+          <DetailField label="Tax" value={formatMoney(header.tax, header.currency)} />
+          <DetailField label="Fees" value={formatMoney(header.fees, header.currency)} />
+          <DetailField label="Total" value={formatMoney(header.total, header.currency)} emphasize />
+          <DetailField label="Last updated" value={preparedAt ? new Date(preparedAt).toLocaleString() : null} />
+        </div>
+      </Section>
+
+      {/* ============ THE CONSOLIDATED LINE REVIEW ============ */}
+      <Section
+        title="Line Review"
+        countLabel={
+          summary
+            ? `${summary.itemsTotalCount} lines · ${summary.itemsConfirmedCount} resolved · ${summary.receivingCompleteCount}/${summary.receivingTotalCount} received`
+            : undefined
+        }
+      >
+        {exceptionCount > 0 ? (
+          <ul className="mb-3 flex flex-col gap-1 rounded-lg border border-amber-900 bg-amber-950/20 p-3 text-xs text-amber-200">
+            {summary!.exceptions.map((exception, index) => (
+              <li key={index}>• {exception.message}</li>
+            ))}
+          </ul>
+        ) : null}
+
+        {summary === null ? (
+          <p className="text-sm text-zinc-500">Loading…</p>
+        ) : (
+          <div className="max-h-[32rem] overflow-auto rounded-lg border border-zinc-800">
+            <table className="w-full min-w-[1080px] text-left text-sm">
+              <thead className="sticky top-0 z-10 bg-zinc-950 text-xs uppercase tracking-wide text-zinc-500">
+                <tr>
+                  <th className="px-3 py-2 font-normal">Type</th>
+                  <th className="px-3 py-2 font-normal">SKU</th>
+                  <th className="px-3 py-2 font-normal">Item</th>
+                  <th className="px-3 py-2 font-normal">Matched Item</th>
+                  <th className="px-3 py-2 text-right font-normal">Qty</th>
+                  <th className="px-3 py-2 font-normal">Unit</th>
+                  <th className="px-3 py-2 text-right font-normal">Unit Price</th>
+                  <th className="px-3 py-2 text-right font-normal">Line Total</th>
+                  <th className="px-3 py-2 font-normal">Received</th>
+                  <th className="px-3 py-2 font-normal">Inventory Qty</th>
+                  <th className="px-3 py-2 font-normal">Location</th>
+                  <th className="px-3 py-2 font-normal">Condition</th>
+                  <th className="px-3 py-2 font-normal">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800">
+                {rows.map((row, index) => (
+                  <tr key={row.lineKey ?? index} className="align-top">
+                    <td className="px-3 py-2 text-xs text-zinc-400">{row.typeLabel}</td>
+                    <td className="px-3 py-2 text-xs text-zinc-400">{row.sku ?? "—"}</td>
+                    <td className="max-w-56 px-3 py-2">
+                      <p className="text-zinc-100">{row.description ?? "—"}</p>
+                      {row.secondary ? <p className="mt-0.5 text-xs text-zinc-500">{row.secondary}</p> : null}
+                    </td>
+                    <td className="max-w-52 px-3 py-2 text-zinc-300">{row.matchedLabel ?? "—"}</td>
+                    <td className="px-3 py-2 text-right text-zinc-200">{row.quantity ?? "—"}</td>
+                    <td className="px-3 py-2 text-zinc-400">{row.unit ?? "—"}</td>
+                    <td className="px-3 py-2 text-right text-zinc-300">{formatMoney(row.unitPrice, header.currency)}</td>
+                    <td className="px-3 py-2 text-right text-zinc-100">{formatMoney(row.lineTotal, header.currency)}</td>
+                    <td className="px-3 py-2 text-zinc-200">{row.receivedLabel ?? "—"}</td>
+                    <td className="px-3 py-2 text-zinc-300">{row.inventoryQuantityLabel ?? "—"}</td>
+                    <td className="px-3 py-2 text-zinc-300">{row.locationName ?? "—"}</td>
+                    <td className="px-3 py-2 text-zinc-400">{row.conditionLabel ?? "—"}</td>
+                    <td className="px-3 py-2">
+                      <span
+                        className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_BADGE_CLASS[row.status.kind]}`}
+                        title={row.problems.length > 0 ? row.problems.join("\n") : undefined}
+                      >
+                        {row.status.kind === "ready" ? "✓ Ready" : row.status.label}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+
+      {/* ============ BLOCKERS -- NEXT TO THE PRIMARY ACTION ============ */}
       {!ready && blockers.length > 0 ? (
         <div className="rounded-2xl border border-amber-800 bg-amber-950/20 p-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">
@@ -231,142 +334,35 @@ export function Step4ReviewSend({
         </div>
       ) : null}
 
-      {/* ============ INVOICE ============ */}
-      <Section title="Invoice">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-          <DetailField label="Vendor" value={vendorName} />
-          <DetailField label="Invoice #" value={header.documentNumber} />
-          <DetailField label="Document Type" value={typeLabel} />
-          <DetailField label="Invoice Date" value={date(header.documentDate)} />
-          <DetailField label="Delivery Date" value={date(header.deliveryDate)} />
-          <DetailField label="PO #" value={header.poNumber} />
-          <DetailField label="Subtotal" value={money(header.subtotal, header.currency)} />
-          <DetailField label="Tax" value={money(header.tax, header.currency)} />
-          <DetailField label="Fees" value={money(header.fees, header.currency)} />
-          <DetailField label="Total" value={money(header.total, header.currency)} emphasize />
-        </div>
-      </Section>
-
-      {/* ============ PREPARATION ============ */}
-      <Section title="Preparation">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-          <DetailField label="Prepared by" value={preparerName} />
-          <DetailField label="Delivery verified by" value={deliveryVerifiedByName} />
-          <DetailField label="Last updated" value={preparedAt ? new Date(preparedAt).toLocaleString() : null} />
-        </div>
-      </Section>
-
-      {/* ============ ITEMS ============ */}
-      <Section title="Items" countLabel={summary ? `${summary.itemsConfirmedCount} / ${summary.itemsTotalCount} resolved` : undefined}>
-        {summary ? (
-          <ul className="flex flex-col divide-y divide-zinc-800">
-            {summary.items.map((item) => (
-              <li key={item.lineKey} className="flex flex-col gap-0.5 py-2 text-sm">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="font-medium text-zinc-100">{item.description ?? item.vendorSku ?? "—"}</span>
-                  {item.status !== "CONFIRMED" ? <span className="text-xs font-semibold text-amber-400">{item.status.replace(/_/g, " ")}</span> : null}
-                </div>
-                <p className="text-xs text-zinc-500">
-                  {item.vendorSku ? `Vendor SKU ${item.vendorSku}` : "No vendor SKU"}
-                  {item.canonicalItemName ? ` → ${item.canonicalItemName}` : ""}
-                </p>
-                {item.disposition === "INVENTORY" ? (
-                  <p className="text-xs text-zinc-500">
-                    {[item.categoryName, item.baseUnitCode, item.receivingBehavior ? RECEIVING_BEHAVIOR_LABEL[item.receivingBehavior] : null]
-                      .filter(Boolean)
-                      .join(" · ")}
-                    {item.spendCategoryPath ? <span className="block">{item.spendCategoryPath}</span> : null}
-                  </p>
-                ) : item.disposition === "NON_INVENTORY" ? (
-                  <p className="text-xs text-zinc-500">Non-Inventory{item.spendCategoryPath ? ` · ${item.spendCategoryPath}` : ""}</p>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-zinc-500">Loading…</p>
-        )}
-      </Section>
-
-      {/* ============ RECEIVING ============ */}
-      <Section title="Receiving" countLabel={summary ? `${summary.receivingCompleteCount} / ${summary.receivingTotalCount} complete` : undefined}>
-        {summary && summary.receiving.length > 0 ? (
-          <ul className="flex flex-col divide-y divide-zinc-800">
-            {summary.receiving.map((line) => (
-              <li key={line.lineKey} className="flex flex-col gap-2 py-3 text-sm">
-                <p className="font-medium text-zinc-100">{line.description ?? "—"}</p>
-                <div className="flex flex-wrap gap-x-6 gap-y-2">
-                  <DetailField label="Expected" value={quantityUnit(line.expectedQuantity, line.expectedUnit)} />
-                  <DetailField label="Received" value={quantityUnit(line.receivedQuantity, line.receivedUnit)} />
-                  {line.inventoryQuantity !== null ? <DetailField label="Inventory Quantity" value={quantityUnit(line.inventoryQuantity, line.verifiedUnit)} /> : null}
-                  {line.requiresVerifiedMeasurement ? <DetailField label={`Verified ${line.verifiedUnit ?? ""}`} value={quantityUnit(line.verifiedQuantity, line.verifiedUnit)} /> : null}
-                  <DetailField label="Location" value={line.locationName} />
-                  <DetailField
-                    label="Condition"
-                    value={line.conditionStatus === "RECEIVED_AS_INVOICED" ? "As invoiced" : (line.conditionStatus?.replace(/_/g, " ") ?? null)}
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : summary ? (
-          <p className="text-sm text-zinc-500">No inventory lines to receive.</p>
-        ) : (
-          <p className="text-sm text-zinc-500">Loading…</p>
-        )}
-      </Section>
-
-      {/* ============ NON-INVENTORY ============ */}
-      {summary && summary.nonInventory.length > 0 ? (
-        <Section title="Non-Inventory">
-          <ul className="flex flex-col divide-y divide-zinc-800">
-            {summary.nonInventory.map((line) => (
-              <li key={line.lineKey} className="flex items-baseline justify-between gap-3 py-2 text-sm">
-                <div>
-                  <p className="font-medium text-zinc-100">{line.description ?? "—"}</p>
-                  {line.spendCategoryPath ? <p className="text-xs text-zinc-500">Spend Category: {line.spendCategoryPath}</p> : null}
-                </div>
-                <span className="text-zinc-200">{money(line.lineTotal, header.currency)}</span>
-              </li>
-            ))}
-          </ul>
-        </Section>
-      ) : null}
-
-      {/* ============ EXCEPTIONS ============ */}
-      <Section title="Exceptions">
-        {summary ? (
-          summary.exceptions.length === 0 ? (
-            <p className="text-sm text-emerald-400">✓ None</p>
-          ) : (
-            <ul className="flex flex-col gap-1 text-sm text-amber-200">
-              {summary.exceptions.map((exception, i) => (
-                <li key={i}>• {exception.message}</li>
-              ))}
-            </ul>
-          )
-        ) : (
-          <p className="text-sm text-zinc-500">Loading…</p>
-        )}
-      </Section>
-
       {sendError ? <p className="text-sm text-red-400">{sendError}</p> : null}
 
-      <div className="flex items-center gap-3">
+      {/* ============ ACTIONS ============ */}
+      <div className="flex flex-wrap items-center gap-4">
+        {sendAction.kind === "send" ? (
+          <button
+            type="button"
+            onClick={onSend}
+            disabled={sendPending || !sendAction.enabled}
+            title={!sendAction.enabled ? "Resolve the items above before sending for final review." : undefined}
+            className="rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
+          >
+            {sendPending ? "Sending for final review…" : "Send for Final Review"}
+          </button>
+        ) : sendAction.kind === "sent" ? (
+          <div className="flex flex-col gap-0.5">
+            <span className="inline-flex cursor-default items-center gap-2 self-start rounded-full border border-emerald-800 bg-emerald-950/30 px-6 py-2 text-sm font-semibold text-emerald-300">
+              ✓ Sent for Final Review
+            </span>
+            <span className="text-xs text-zinc-500">
+              Awaiting final review by another manager.
+              {editable === false ? " Use Withdraw Submission above to make changes." : ""}
+            </span>
+          </div>
+        ) : null}
         <button type="button" onClick={() => onNavigateToStep(3)} className="text-xs text-zinc-400 underline">
           ← Back to Receiving
         </button>
       </div>
-
-      <button
-        type="button"
-        onClick={onSend}
-        disabled={sendPending || !ready}
-        title={!ready ? "Resolve the items above before sending for final review." : undefined}
-        className="self-start rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
-      >
-        {sendPending ? "Sending for final review…" : "Send for Final Review"}
-      </button>
     </div>
   );
 }

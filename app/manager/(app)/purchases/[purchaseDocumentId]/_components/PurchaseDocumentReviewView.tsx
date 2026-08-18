@@ -9,6 +9,7 @@ import { PreparationWizard } from "./PreparationWizard";
 import { FinalReviewView } from "./FinalReviewView";
 import type { PossibleDuplicatePurchaseDocument } from "@/app/lib/purchaseDocuments/duplicateDetection";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
+import type { MappingProposals, ReceivingProposals } from "@/app/lib/purchaseDocuments/reviewProposals";
 import type { ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
 import type { VendorSummary } from "@/app/actions/vendors";
 
@@ -62,6 +63,12 @@ interface Props {
   deliveryVerifiedByName: string | null;
   preparerName: string | null;
   preparedAt: string | null;
+  /** Manager 2's PERSISTED provisional correction overlay (empty objects
+   * when none) -- see reviewProposals.ts. */
+  initialMappingProposals: MappingProposals;
+  initialReceivingProposals: ReceivingProposals;
+  /** The overlay's optimistic-concurrency version (0 = none exists). */
+  initialOverlayVersion: number;
 }
 
 /**
@@ -75,8 +82,10 @@ interface Props {
  *     Confirm Items -> Receive Delivery -> Review & Send), for the
  *     preparer while editable, or read-only if they're merely looking back
  *     at their own already-submitted draft.
- *   - FinalReviewView: the second manager's own concise, read-only-
- *     operational final-review experience -- never the preparation wizard.
+ *   - FinalReviewView: the second manager's split-pane final-review
+ *     experience (original document beside one consolidated review table,
+ *     with controlled, audited reviewer corrections) -- never the
+ *     preparation wizard.
  */
 export function PurchaseDocumentReviewView(props: Props) {
   const router = useRouter();
@@ -274,6 +283,9 @@ export function PurchaseDocumentReviewView(props: Props) {
           lines={props.lines}
           submittedHeader={props.submittedHeader}
           submittedLines={props.submittedLines}
+          viewUrl={viewUrl}
+          viewError={viewError}
+          contentType={props.contentType}
           vendors={props.vendors}
           vendorName={props.vendorName}
           declaredVendorName={props.declaredVendorName}
@@ -281,6 +293,10 @@ export function PurchaseDocumentReviewView(props: Props) {
           declaredDocumentType={props.declaredDocumentType}
           aiSuggestedDocumentType={props.aiSuggestedDocumentType}
           deliveryVerifiedByName={props.deliveryVerifiedByName}
+          preparerName={props.preparerName}
+          initialMappingProposals={props.initialMappingProposals}
+          initialReceivingProposals={props.initialReceivingProposals}
+          initialOverlayVersion={props.initialOverlayVersion}
           onReturned={() => router.refresh()}
           onVerified={() => router.refresh()}
         />
@@ -288,6 +304,7 @@ export function PurchaseDocumentReviewView(props: Props) {
         <PreparationWizard
           purchaseDocumentId={props.purchaseDocumentId}
           documentId={props.documentId}
+          documentStatus={props.status}
           editable={editableAsPreparer}
           version={props.version}
           header={props.header}
