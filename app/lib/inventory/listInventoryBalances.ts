@@ -16,6 +16,12 @@ export interface InventoryBalanceRow {
   fullReferenceQuantity: number | null;
   referenceSource: "RESTOCK" | "MANAGER_OVERRIDE" | null;
   referenceSetAt: string | null;
+  /** True when this balance includes a nonzero share of the historical,
+   * FROZEN-at-2A.5-cutover pro-rata legacy-withdrawal estimate (see
+   * 20260811100073 / inventory_legacy_location_allocations) -- never
+   * recomputed against future activity. Server-computed; the UI must
+   * never re-derive this itself. */
+  includesLegacyEstimate: boolean;
 }
 
 export async function listInventoryBalances(supabase: SupabaseClient, organizationId: string): Promise<InventoryBalanceRow[]> {
@@ -32,5 +38,6 @@ export async function listInventoryBalances(supabase: SupabaseClient, organizati
     fullReferenceQuantity: row.out_full_reference_quantity === null ? null : Number(row.out_full_reference_quantity),
     referenceSource: (row.out_reference_source as "RESTOCK" | "MANAGER_OVERRIDE" | null) ?? null,
     referenceSetAt: (row.out_reference_set_at as string | null) ?? null,
+    includesLegacyEstimate: row.out_includes_legacy_estimate === true,
   }));
 }

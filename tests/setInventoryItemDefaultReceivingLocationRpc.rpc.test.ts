@@ -24,7 +24,9 @@ async function findOrCreateNamedLocation(name: string): Promise<string> {
   if (existing) return existing.id as string;
   const { data: created } = await fx.supabase
     .from("locations")
-    .insert({ organization_id: fx.organizationId, name, timezone: "America/New_York" })
+    // is_storage_eligible explicit, never relying on the (now false) DB
+    // default -- 20260811100073.
+    .insert({ organization_id: fx.organizationId, name, timezone: "America/New_York", is_storage_eligible: true })
     .select("id")
     .single();
   return created!.id as string;

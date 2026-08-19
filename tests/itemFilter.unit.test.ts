@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveItemCategories, filterItems, type FilterableItem } from "@/app/kiosk/_lib/itemFilter";
+import { deriveItemCategories, filterItemsByCategory, type FilterableItem } from "@/app/kiosk/_lib/itemFilter";
 
 // CI-safe: pure logic, no network, no database.
 //
@@ -31,30 +31,16 @@ describe("deriveItemCategories", () => {
   });
 });
 
-describe("filterItems", () => {
-  it("returns every item for an empty query and no category filter", () => {
-    expect(filterItems(ITEMS, "", null)).toHaveLength(4);
-  });
-
-  it("matches by case-insensitive substring on name", () => {
-    expect(filterItems(ITEMS, "chicken", null).map((i) => i.id)).toEqual(["item-1", "item-4"]);
-    expect(filterItems(ITEMS, "CHICKEN", null).map((i) => i.id)).toEqual(["item-1", "item-4"]);
-  });
-
-  it("trims surrounding whitespace from the query", () => {
-    expect(filterItems(ITEMS, "  eggs  ", null).map((i) => i.id)).toEqual(["item-2"]);
+describe("filterItemsByCategory", () => {
+  it("returns every item when no category is active", () => {
+    expect(filterItemsByCategory(ITEMS, null)).toHaveLength(4);
   });
 
   it("matches by category when a category is active", () => {
-    expect(filterItems(ITEMS, "", "cat-dry").map((i) => i.id)).toEqual(["item-3", "item-4"]);
+    expect(filterItemsByCategory(ITEMS, "cat-dry").map((i) => i.id)).toEqual(["item-3", "item-4"]);
   });
 
-  it("combines query and category with AND", () => {
-    expect(filterItems(ITEMS, "chicken", "cat-dry").map((i) => i.id)).toEqual(["item-4"]);
-    expect(filterItems(ITEMS, "chicken", "cat-dairy")).toEqual([]);
-  });
-
-  it("returns an empty list when nothing matches", () => {
-    expect(filterItems(ITEMS, "nonexistent item", null)).toEqual([]);
+  it("returns an empty list when the category has no items", () => {
+    expect(filterItemsByCategory(ITEMS, "cat-nonexistent")).toEqual([]);
   });
 });

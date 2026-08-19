@@ -504,13 +504,17 @@ async function main(): Promise<void> {
       canChangeStation: false,
     },
     {
-      // auto-resolve, but allowed to change station
+      // auto-resolve, but allowed to change station -- the primary
+      // "normal Dev login" fixture for the 2A.5 kiosk flow (PIN -> auto
+      // resolves straight to this default station -> Change Station still
+      // available from the header). Pinned to Beverage Station to match
+      // the browser-testing walkthrough exactly.
       employeeCode: "DEV-EMP-2",
       firstName: "Dev",
       lastName: "EmployeeTwo",
       roleName: "employee",
       pinEnvVar: "DEV_SEED_EMPLOYEE_2_PIN",
-      defaultStationName: `${DEV}Salad Station`,
+      defaultStationName: `${DEV}Beverage Station`,
       autoResolveStation: true,
       canChangeStation: true,
     },

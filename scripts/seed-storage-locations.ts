@@ -27,6 +27,16 @@ import { findGansevoortOrgId } from "./lib/findGansevoortOrgId";
  * never renames/removes the existing "Gansevoort Liberty Market — WTC"
  * row -- this only ADDS the five approved storage locations, idempotently.
  *
+ * Milestone 2A.5 (20260811100073) added locations.is_storage_eligible,
+ * defaulting to false and backfilled true only for locations with actual
+ * PRE-EXISTING inventory/receiving usage (a generic, data-driven migration
+ * rule -- never a name match). These five names are exactly the set THIS
+ * script already declares authoritative for Gansevoort storage, so on
+ * every run it also explicitly marks each one is_storage_eligible = true
+ * -- on insert for a newly created row, and via an idempotent UPDATE for a
+ * reused row the migration's usage-based backfill didn't happen to catch
+ * (e.g. a location seeded here but never yet actually received into).
+ *
  * Run manually: `npx tsx scripts/seed-storage-locations.ts`. `--dry-run`
  * inspects and prints the plan without writing; `--yes` skips the
  * confirmation prompt.
@@ -56,20 +66,34 @@ async function confirm(message: string): Promise<void> {
   }
 }
 
-async function findOrInsertLocation(supabase: SupabaseClient, organizationId: string, name: string, timezone: string, dryRun: boolean): Promise<{ created: boolean; name: string }> {
-  const { data: existing, error } = await supabase.from("locations").select("id, name").eq("organization_id", organizationId).ilike("name", name).maybeSingle();
+async function findOrInsertLocation(
+  supabase: SupabaseClient,
+  organizationId: string,
+  name: string,
+  timezone: string,
+  dryRun: boolean
+): Promise<{ created: boolean; upgraded: boolean; name: string }> {
+  const { data: existing, error } = await supabase.from("locations").select("id, name, is_storage_eligible").eq("organization_id", organizationId).ilike("name", name).maybeSingle();
   if (error) throw error;
   if (existing) {
-    return { created: false, name: existing.name as string };
+    if (existing.is_storage_eligible) {
+      return { created: false, upgraded: false, name: existing.name as string };
+    }
+    if (dryRun) {
+      return { created: false, upgraded: true, name: existing.name as string };
+    }
+    const { error: updateError } = await supabase.from("locations").update({ is_storage_eligible: true }).eq("id", existing.id);
+    if (updateError) throw updateError;
+    return { created: false, upgraded: true, name: existing.name as string };
   }
 
   if (dryRun) {
-    return { created: true, name };
+    return { created: true, upgraded: false, name };
   }
 
-  const { error: insertError } = await supabase.from("locations").insert({ organization_id: organizationId, name, timezone });
+  const { error: insertError } = await supabase.from("locations").insert({ organization_id: organizationId, name, timezone, is_storage_eligible: true });
   if (insertError) throw insertError;
-  return { created: true, name };
+  return { created: true, upgraded: false, name };
 }
 
 async function main() {
@@ -95,15 +119,20 @@ async function main() {
   );
 
   const created: string[] = [];
+  const upgraded: string[] = [];
   const reused: string[] = [];
   for (const name of STORAGE_LOCATIONS) {
     const result = await findOrInsertLocation(supabase, organizationId, name, timezone as string, dryRun);
-    (result.created ? created : reused).push(result.name);
+    if (result.created) created.push(result.name);
+    else if (result.upgraded) upgraded.push(result.name);
+    else reused.push(result.name);
   }
 
   console.log(`\n${dryRun ? "[DRY RUN] Would create" : "Created"} (${created.length}):`);
   for (const n of created) console.log(`  + ${n}`);
-  console.log(`Reused existing (${reused.length}):`);
+  console.log(`${dryRun ? "[DRY RUN] Would mark" : "Marked"} is_storage_eligible=true on existing row (${upgraded.length}):`);
+  for (const n of upgraded) console.log(`  ↑ ${n}`);
+  console.log(`Reused, already eligible (${reused.length}):`);
   for (const n of reused) console.log(`  = ${n}`);
 
   console.log(dryRun ? "\nDry run complete -- nothing was written." : "\nDone.");

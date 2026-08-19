@@ -23,19 +23,82 @@ import { setupRpcTestFixtures, type RpcTestFixtures } from "./testFixtures";
  */
 
 let fx: RpcTestFixtures;
+let locationId: string;
 
-async function movementCountFor(stationId: string, appUserId: string): Promise<number> {
+/**
+ * Scoped to a single client_request_id (unique per organization -- see
+ * 20260811100015_withdrawal_idempotency.sql's partial unique index),
+ * NEVER to station_id/performed_by_app_user_id: those are shared canonical
+ * fixture values (setupRpcTestFixtures resolves the same "TEST RPC Fixture
+ * Org" station and TEST-RPC-CHANGEABLE app user every other .rpc.test.ts
+ * file also uses), so a broad count scoped to them is contaminated by
+ * whatever unrelated tests are concurrently writing movements for that same
+ * station/employee under Vitest's default parallel-file execution. A fresh
+ * randomUUID() clientRequestId belongs to exactly this test, making a count
+ * scoped to it immune to that cross-talk regardless of what else is running.
+ */
+async function movementCountForRequest(clientRequestId: string): Promise<number> {
   const { count, error } = await fx.supabase
     .from("inventory_movements")
     .select("id", { count: "exact", head: true })
-    .eq("station_id", stationId)
-    .eq("performed_by_app_user_id", appUserId);
+    .eq("organization_id", fx.organizationId)
+    .eq("client_request_id", clientRequestId);
   if (error) throw error;
   return count ?? 0;
 }
 
+/**
+ * Milestone 2A.5 (20260811100073): record_inventory_withdrawal now
+ * validates the requested quantity against the SOURCE LOCATION's real
+ * ledger balance -- this file's tests predate that and never posted any
+ * inventory for their fixture items, so every one of them would now fail
+ * with GA022 (insufficient inventory) purely as test-setup fallout, not
+ * because of anything the test itself is exercising. Seeds one enormous,
+ * real PURCHASE_RECEIPT (raw insert, same shape
+ * post_purchase_document_inventory writes -- location_attribution
+ * defaults to 'EXACT') for each fixture item at the fixture location,
+ * once, idempotent-safe to re-run (ledger truth is cumulative; a bigger
+ * number only ever means "more abundant," never wrong). Deliberately NOT
+ * routed through the full purchase-document workflow -- this file tests
+ * withdrawal in isolation, and a raw ledger insert is the same
+ * lower-level mechanism 2A.4's own posting RPC itself uses.
+ */
+async function seedAbundantStock(inventoryItemId: string, baseUnitId: string): Promise<void> {
+  const { data: movement, error: movementError } = await fx.supabase
+    .from("inventory_movements")
+    .insert({
+      organization_id: fx.organizationId,
+      location_id: locationId,
+      station_id: null,
+      movement_type: "PURCHASE_RECEIPT",
+      performed_by_app_user_id: fx.changeableEmployeeAppUserId,
+      business_date: new Date().toISOString().slice(0, 10),
+      client_request_id: randomUUID(),
+    })
+    .select("id")
+    .single();
+  if (movementError) throw movementError;
+
+  const { error: lineError } = await fx.supabase.from("inventory_movement_lines").insert({
+    movement_id: movement!.id,
+    inventory_item_id: inventoryItemId,
+    entered_quantity: 10_000_000,
+    entered_unit_id: baseUnitId,
+  });
+  if (lineError) throw lineError;
+}
+
 beforeAll(async () => {
   fx = await setupRpcTestFixtures();
+  const { data: location } = await fx.supabase.from("locations").select("id").eq("organization_id", fx.organizationId).limit(1).single();
+  locationId = location!.id as string;
+
+  await Promise.all([
+    seedAbundantStock(fx.variableWeightItemId, fx.variableWeightLbUnitId),
+    seedAbundantStock(fx.fixedConversionItemId, fx.fixedConversionPieceUnitId),
+    seedAbundantStock(fx.noRuleItemId, fx.noRuleUnitId),
+    seedAbundantStock(fx.volumeItemId, fx.volumeUnitId),
+  ]);
 });
 
 describe("record_inventory_withdrawal", () => {
@@ -43,6 +106,7 @@ describe("record_inventory_withdrawal", () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.variableWeightItemId,
       enteredQuantity: "8",
       enteredUnitId: fx.variableWeightLbUnitId,
@@ -57,6 +121,7 @@ describe("record_inventory_withdrawal", () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.fixedConversionItemId,
       enteredQuantity: "3",
       enteredUnitId: fx.fixedConversionPieceUnitId,
@@ -69,6 +134,7 @@ describe("record_inventory_withdrawal", () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.volumeItemId,
       enteredQuantity: "2.5",
       enteredUnitId: fx.volumeUnitId,
@@ -78,20 +144,25 @@ describe("record_inventory_withdrawal", () => {
   });
 
   it("rejects a withdrawal entered in a non-base packaging unit (BOX), even though it's a configured active inventory_item_units row, with no partial rows", async () => {
-    const before = await movementCountFor(fx.stationId, fx.changeableEmployeeAppUserId);
+    const clientRequestId = randomUUID();
     await expect(
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.changeableEmployeeAppUserId,
         stationId: fx.stationId,
+        sourceLocationId: locationId,
         inventoryItemId: fx.variableWeightItemId,
         enteredQuantity: "2",
         enteredUnitId: fx.variableWeightBoxUnitId,
         measuredBaseQuantity: "8",
-        clientRequestId: randomUUID(),
+        clientRequestId,
       })
     ).rejects.toThrow(/must be inventory_item_id .* base unit/);
-    const after = await movementCountFor(fx.stationId, fx.changeableEmployeeAppUserId);
-    expect(after).toBe(before); // proves the whole call rolled back, not just the failing statement
+    // No row for THIS request id exists at all -- proves the whole call
+    // rolled back, not just the failing statement. Scoped to
+    // clientRequestId (never a broad station/employee count) so this can't
+    // be thrown off by unrelated concurrently-running test files.
+    const count = await movementCountForRequest(clientRequestId);
+    expect(count).toBe(0);
   });
 
   it("rejects a withdrawal entered in a non-base packaging unit (CASE), even though it has a valid fixed conversion_factor", async () => {
@@ -99,6 +170,7 @@ describe("record_inventory_withdrawal", () => {
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.changeableEmployeeAppUserId,
         stationId: fx.stationId,
+        sourceLocationId: locationId,
         inventoryItemId: fx.fixedConversionItemId,
         enteredQuantity: "3",
         enteredUnitId: fx.fixedConversionCaseUnitId,
@@ -134,6 +206,7 @@ describe("record_inventory_withdrawal", () => {
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.changeableEmployeeAppUserId,
         stationId: fx.stationId,
+        sourceLocationId: locationId,
         inventoryItemId: fx.variableWeightItemId,
         enteredQuantity: "1",
         enteredUnitId: fx.wrongUnitId, // GAL was never added to this item's inventory_item_units
@@ -147,6 +220,7 @@ describe("record_inventory_withdrawal", () => {
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.inactiveEmployeeAppUserId,
         stationId: fx.stationId,
+        sourceLocationId: locationId,
         inventoryItemId: fx.noRuleItemId,
         enteredQuantity: "1",
         enteredUnitId: fx.noRuleUnitId,
@@ -160,6 +234,7 @@ describe("record_inventory_withdrawal", () => {
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.lockedEmployeeAppUserId,
         stationId: fx.otherStationId,
+        sourceLocationId: locationId,
         inventoryItemId: fx.noRuleItemId,
         enteredQuantity: "1",
         enteredUnitId: fx.noRuleUnitId,
@@ -172,6 +247,7 @@ describe("record_inventory_withdrawal", () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.otherStationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.noRuleItemId,
       enteredQuantity: "1",
       enteredUnitId: fx.noRuleUnitId,
@@ -184,6 +260,7 @@ describe("record_inventory_withdrawal", () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.variableWeightItemId,
       enteredQuantity: "10", // threshold is exactly 10
       enteredUnitId: fx.variableWeightLbUnitId,
@@ -196,6 +273,7 @@ describe("record_inventory_withdrawal", () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.variableWeightItemId,
       enteredQuantity: "10.01",
       enteredUnitId: fx.variableWeightLbUnitId,
@@ -218,6 +296,7 @@ describe("record_inventory_withdrawal", () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.fixedConversionItemId,
       enteredQuantity: "1",
       enteredUnitId: fx.fixedConversionPieceUnitId,
@@ -243,6 +322,7 @@ describe("record_inventory_withdrawal", () => {
         p_performed_by_app_user_id: fx.changeableEmployeeAppUserId,
         p_station_id: fx.stationId,
         p_inventory_item_id: fx.noRuleItemId,
+        p_source_location_id: locationId,
         p_entered_quantity: "1",
         p_entered_unit_id: fx.noRuleUnitId,
         p_measured_base_quantity: null,
@@ -256,11 +336,11 @@ describe("record_inventory_withdrawal", () => {
 describe("record_inventory_withdrawal idempotency", () => {
   it("replays the original result (no new rows) when the same clientRequestId is retried with an identical payload", async () => {
     const clientRequestId = randomUUID();
-    const before = await movementCountFor(fx.stationId, fx.changeableEmployeeAppUserId);
 
     const input = {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.fixedConversionItemId,
       enteredQuantity: "2",
       enteredUnitId: fx.fixedConversionPieceUnitId,
@@ -277,8 +357,12 @@ describe("record_inventory_withdrawal idempotency", () => {
     expect(second.normalizedBaseQuantity).toBe(first.normalizedBaseQuantity);
     expect(second.exceptionRaised).toBe(first.exceptionRaised);
 
-    const after = await movementCountFor(fx.stationId, fx.changeableEmployeeAppUserId);
-    expect(after).toBe(before + 1); // only ONE movement, despite two calls
+    // Scoped to THIS request id (never a broad station/employee count,
+    // which unrelated concurrently-running test files also write to) -- a
+    // fresh randomUUID() always starts at 0, so exactly 1 here proves only
+    // ONE movement exists despite two calls.
+    const count = await movementCountForRequest(clientRequestId);
+    expect(count).toBe(1);
   });
 
   it("treats a different enteredQuantity as a mismatch, not an equal retry", async () => {
@@ -295,6 +379,7 @@ describe("record_inventory_withdrawal idempotency", () => {
     await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.variableWeightItemId,
       enteredQuantity: "5",
       enteredUnitId: fx.variableWeightLbUnitId,
@@ -307,6 +392,7 @@ describe("record_inventory_withdrawal idempotency", () => {
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.changeableEmployeeAppUserId,
         stationId: fx.stationId,
+        sourceLocationId: locationId,
         inventoryItemId: fx.variableWeightItemId,
         enteredQuantity: "6",
         enteredUnitId: fx.variableWeightLbUnitId,
@@ -321,6 +407,7 @@ describe("record_inventory_withdrawal idempotency", () => {
     const original = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.noRuleItemId,
       enteredQuantity: "1",
       enteredUnitId: fx.noRuleUnitId,
@@ -331,6 +418,7 @@ describe("record_inventory_withdrawal idempotency", () => {
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.changeableEmployeeAppUserId,
         stationId: fx.otherStationId, // different station, same id
+        sourceLocationId: locationId,
         inventoryItemId: fx.noRuleItemId,
         enteredQuantity: "1",
         enteredUnitId: fx.noRuleUnitId,
@@ -354,6 +442,7 @@ describe("record_inventory_withdrawal idempotency", () => {
     await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.noRuleItemId,
       enteredQuantity: "1",
       enteredUnitId: fx.noRuleUnitId,
@@ -364,6 +453,7 @@ describe("record_inventory_withdrawal idempotency", () => {
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.lockedEmployeeAppUserId, // different actor, same id
         stationId: fx.stationId,
+        sourceLocationId: locationId,
         inventoryItemId: fx.noRuleItemId,
         enteredQuantity: "1",
         enteredUnitId: fx.noRuleUnitId,
@@ -374,11 +464,11 @@ describe("record_inventory_withdrawal idempotency", () => {
 
   it("two genuinely concurrent calls with the same clientRequestId and an identical payload both resolve to the one successful result", async () => {
     const clientRequestId = randomUUID();
-    const before = await movementCountFor(fx.stationId, fx.changeableEmployeeAppUserId);
 
     const input = {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.stationId,
+      sourceLocationId: locationId,
       inventoryItemId: fx.noRuleItemId,
       enteredQuantity: "1",
       enteredUnitId: fx.noRuleUnitId,
@@ -397,7 +487,12 @@ describe("record_inventory_withdrawal idempotency", () => {
     // caller's point of view, and only one row exists either way.
     expect([a.replayed, b.replayed].sort()).toEqual([false, true]);
 
-    const after = await movementCountFor(fx.stationId, fx.changeableEmployeeAppUserId);
-    expect(after).toBe(before + 1);
+    // Scoped to THIS request id (never a broad station/employee count --
+    // see movementCountForRequest's doc comment for why that broad form is
+    // contaminated by concurrently-running test files under the parallel
+    // integration suite). Exactly 1 proves the two concurrent calls still
+    // converged to one movement, not two.
+    const count = await movementCountForRequest(clientRequestId);
+    expect(count).toBe(1);
   });
 });

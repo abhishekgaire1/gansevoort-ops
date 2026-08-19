@@ -1,0 +1,19 @@
+- generic [ref=e1]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - heading "Gansevoort Liberty Market" [level=1] [ref=e7]
+      - paragraph [ref=e8]: Enter your PIN to begin
+    - status "1 of 6 digits entered" [ref=e30]
+    - generic [ref=e16]:
+      - button "1" [active] [ref=e17]
+      - button "2" [ref=e18]
+      - button "3" [ref=e19]
+      - button "4" [ref=e20]
+      - button "5" [ref=e21]
+      - button "6" [ref=e22]
+      - button "7" [ref=e23]
+      - button "8" [ref=e24]
+      - button "9" [ref=e25]
+      - button "Delete last digit" [ref=e26]: Del
+      - button "0" [ref=e27]
+  - alert [ref=e29]

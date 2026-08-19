@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { mapInventoryRpcError } from "@/app/lib/inventory/errors";
 
 /**
  * Typed wrapper around the record_inventory_withdrawal RPC. Accepts an
@@ -18,14 +19,24 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * into this function without one. Reusing the same clientRequestId across
  * retries of the same submission attempt makes retries safe -- a retry
  * with an identical payload replays the original result (replayed: true,
- * no new rows); a retry with the same id but a different payload fails
- * closed instead of silently returning an unrelated withdrawal.
+ * no new rows); a retry with the same id but a different payload (now
+ * including sourceLocationId, 2A.5) fails closed instead of silently
+ * returning an unrelated withdrawal.
+ *
+ * sourceLocationId (2A.5, 20260811100073) is the physical STORAGE
+ * location inventory is actually reduced from -- independent of the
+ * station, which is only the cost-center attribution. The RPC validates
+ * it as active + storage-eligible, serializes on (org, item, location)
+ * via a transaction-scoped advisory lock, and rejects
+ * (InsufficientInventoryError) a quantity exceeding the current
+ * authoritative balance there -- no partial movement is ever written.
  */
 
 export interface RecordInventoryWithdrawalInput {
   performedByAppUserId: string;
   stationId: string;
   inventoryItemId: string;
+  sourceLocationId: string;
   enteredQuantity: string;
   enteredUnitId: string;
   measuredBaseQuantity?: string | null;
@@ -61,6 +72,7 @@ export async function recordInventoryWithdrawal(
     p_performed_by_app_user_id: input.performedByAppUserId,
     p_station_id: input.stationId,
     p_inventory_item_id: input.inventoryItemId,
+    p_source_location_id: input.sourceLocationId,
     p_entered_quantity: input.enteredQuantity,
     p_entered_unit_id: input.enteredUnitId,
     p_measured_base_quantity: input.measuredBaseQuantity ?? null,
@@ -69,7 +81,7 @@ export async function recordInventoryWithdrawal(
   });
 
   if (error) {
-    throw new Error(`record_inventory_withdrawal failed: ${error.message}`);
+    throw mapInventoryRpcError(error);
   }
 
   // supabase-js returns a single-row RETURNS TABLE result as a one-element array.

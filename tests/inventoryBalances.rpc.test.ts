@@ -39,6 +39,7 @@ async function withdraw(itemId: string, quantity: number): Promise<void> {
   const { error } = await fx.supabase.rpc("record_inventory_withdrawal", {
     p_performed_by_app_user_id: fx.changeableEmployeeAppUserId,
     p_station_id: fx.otherStationId,
+    p_source_location_id: locationId,
     p_inventory_item_id: itemId,
     p_entered_quantity: String(quantity),
     p_entered_unit_id: pieceUnitId,
@@ -228,7 +229,9 @@ describe("manager full-reference override", () => {
     } else {
       const { data: created, error } = await fx.supabase
         .from("locations")
-        .insert({ organization_id: fx.organizationId, name: "TEST RPC Fixture Location B", timezone: "America/New_York" })
+        // is_storage_eligible explicit, never relying on the (now false) DB
+        // default -- 20260811100073.
+        .insert({ organization_id: fx.organizationId, name: "TEST RPC Fixture Location B", timezone: "America/New_York", is_storage_eligible: true })
         .select("id")
         .single();
       if (error) throw error;

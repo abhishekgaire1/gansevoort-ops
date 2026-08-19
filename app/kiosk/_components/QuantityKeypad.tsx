@@ -13,7 +13,7 @@ const DIGIT_ROWS = [
 ];
 
 const KEY_CLASSES =
-  "aspect-square rounded-2xl bg-kiosk-surface-raised text-2xl font-medium text-kiosk-text transition active:bg-kiosk-border-strong disabled:opacity-30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber";
+  "aspect-square max-h-16 rounded-xl bg-kiosk-surface-raised text-2xl font-medium text-kiosk-text transition active:bg-kiosk-border-strong disabled:opacity-30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber sm:max-h-20 sm:text-3xl";
 
 /**
  * Decimal-capable numeric input, reused for both package-count and
@@ -36,8 +36,12 @@ export function QuantityKeypad({ value, onChange, allowDecimal = true }: Quantit
     onChange(value.slice(0, -1));
   }
 
+  function clearAll() {
+    onChange("");
+  }
+
   return (
-    <div className="mx-auto grid w-full max-w-xs grid-cols-3 gap-3">
+    <div className="mx-auto grid w-full max-w-sm grid-cols-3 gap-2 sm:gap-3">
       {DIGIT_ROWS.flat().map((digit) => (
         <button key={digit} type="button" onClick={() => appendDigit(digit)} className={KEY_CLASSES}>
           {digit}
@@ -59,9 +63,18 @@ export function QuantityKeypad({ value, onChange, allowDecimal = true }: Quantit
         type="button"
         onClick={deleteLast}
         aria-label="Delete last character"
-        className="aspect-square rounded-2xl bg-kiosk-surface text-lg font-medium text-kiosk-text-muted transition active:bg-kiosk-surface-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber"
+        className="aspect-square max-h-16 rounded-xl bg-kiosk-surface text-xl font-medium text-kiosk-text-muted transition active:bg-kiosk-surface-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber sm:max-h-20"
       >
-        Del
+        ←
+      </button>
+      <button
+        type="button"
+        onClick={clearAll}
+        disabled={value === ""}
+        aria-label="Clear quantity"
+        className="col-span-3 rounded-xl bg-kiosk-surface py-1.5 text-sm font-medium text-kiosk-text-muted transition active:bg-kiosk-surface-raised disabled:opacity-30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber"
+      >
+        Clear
       </button>
     </div>
   );

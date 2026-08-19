@@ -2,45 +2,55 @@ import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { listActiveInventoryItemsForOrganization } from "@/app/lib/kiosk/inventoryItems";
 
-// CI-safe: no network, no database -- fakes the two-query Supabase chain
-// (active items, then which of those items have an active self-referencing
-// base-unit inventory_item_units row -- the "is this item withdrawable"
-// catalog-level filter that keeps a misconfigured item off the employee
-// withdrawal screen entirely, instead of surfacing a configuration error
-// after it's been selected).
+// CI-safe: no network, no database -- fakes the two-call chain: (1) the
+// list_kiosk_available_inventory RPC (20260811100077 -- ONLY items with a
+// positive available balance somewhere, per Milestone 2A.5's kiosk-grid
+// correction), then (2) which of those items have an active
+// self-referencing base-unit inventory_item_units row -- the "is this
+// item withdrawable" catalog-level filter that keeps a misconfigured item
+// off the employee withdrawal screen entirely, instead of surfacing a
+// configuration error after it's been selected.
 
 interface FakeSupabaseOptions {
-  itemRows: Record<string, unknown>[] | null;
-  itemsError?: unknown;
+  rpcRows: Record<string, unknown>[] | null;
+  rpcError?: unknown;
   entryUnitRows?: Record<string, unknown>[] | null;
   entryUnitsError?: unknown;
 }
 
-function createFakeSupabase({ itemRows, itemsError = null, entryUnitRows = [], entryUnitsError = null }: FakeSupabaseOptions) {
-  const order = vi.fn().mockResolvedValue({ data: itemRows, error: itemsError });
-  const itemsEqApprovalStatus = vi.fn().mockReturnValue({ order });
-  const itemsEqStatus = vi.fn().mockReturnValue({ eq: itemsEqApprovalStatus });
-  const itemsEqOrg = vi.fn().mockReturnValue({ eq: itemsEqStatus });
-  const itemsSelect = vi.fn().mockReturnValue({ eq: itemsEqOrg });
+function baseRpcRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    out_inventory_item_id: "item-1",
+    out_item_name: "Chicken Thigh",
+    out_category_id: "cat-1",
+    out_category_name: "Meat",
+    out_base_unit_code: "LB",
+    out_total_available_quantity: 42,
+    out_positive_location_count: 1,
+    out_single_location_id: "loc-1",
+    out_single_location_name: "Central Walk-In",
+    out_single_location_full_reference_quantity: 50,
+    out_single_location_reference_source: "RESTOCK",
+    ...overrides,
+  };
+}
+
+function createFakeSupabase({ rpcRows, rpcError = null, entryUnitRows = [], entryUnitsError = null }: FakeSupabaseOptions) {
+  const rpc = vi.fn().mockResolvedValue({ data: rpcRows, error: rpcError });
 
   const entryUnitsEqActive = vi.fn().mockResolvedValue({ data: entryUnitRows, error: entryUnitsError });
   const entryUnitsIn = vi.fn().mockReturnValue({ eq: entryUnitsEqActive });
   const entryUnitsSelect = vi.fn().mockReturnValue({ in: entryUnitsIn });
 
   const from = vi.fn((table: string) => {
-    if (table === "inventory_items") return { select: itemsSelect };
-    if (table === "inventory_item_units") return { select: entryUnitsSelect };
+    if (table === "inventory_items") return { select: entryUnitsSelect };
     throw new Error(`unexpected table: ${table}`);
   });
 
   return {
-    client: { from } as unknown as SupabaseClient,
+    client: { from, rpc } as unknown as SupabaseClient,
     from,
-    itemsSelect,
-    itemsEqOrg,
-    itemsEqStatus,
-    itemsEqApprovalStatus,
-    order,
+    rpc,
     entryUnitsSelect,
     entryUnitsIn,
     entryUnitsEqActive,
@@ -48,119 +58,108 @@ function createFakeSupabase({ itemRows, itemsError = null, entryUnitRows = [], e
 }
 
 describe("listActiveInventoryItemsForOrganization", () => {
-  it("queries inventory_items scoped to organization_id, status='active', and approval_status='CONFIRMED', ordered by name", async () => {
-    const { client, from, itemsSelect, itemsEqOrg, itemsEqStatus, itemsEqApprovalStatus, order } = createFakeSupabase({ itemRows: [] });
+  it("calls list_kiosk_available_inventory scoped to the organization", async () => {
+    const { client, rpc } = createFakeSupabase({ rpcRows: [] });
     await listActiveInventoryItemsForOrganization(client, "org-1");
-
-    expect(from).toHaveBeenCalledWith("inventory_items");
-    expect(itemsSelect).toHaveBeenCalledWith("id, name, category_id, base_unit_id, inventory_categories(name)");
-    expect(itemsEqOrg).toHaveBeenCalledWith("organization_id", "org-1");
-    expect(itemsEqStatus).toHaveBeenCalledWith("status", "active");
-    expect(itemsEqApprovalStatus).toHaveBeenCalledWith("approval_status", "CONFIRMED");
-    expect(order).toHaveBeenCalledWith("name");
+    expect(rpc).toHaveBeenCalledWith("list_kiosk_available_inventory", { p_organization_id: "org-1" });
   });
 
-  it("never queries inventory_item_units when the org has no active items", async () => {
-    const { client, from } = createFakeSupabase({ itemRows: [] });
+  it("never queries inventory_item_units when nothing is currently available", async () => {
+    const { client, from } = createFakeSupabase({ rpcRows: [] });
     const items = await listActiveInventoryItemsForOrganization(client, "org-1");
     expect(items).toEqual([]);
-    expect(from).not.toHaveBeenCalledWith("inventory_item_units");
+    expect(from).not.toHaveBeenCalledWith("inventory_items");
   });
 
-  it("includes an item whose base unit has an active self-referencing inventory_item_units row", async () => {
+  it("includes an item whose base unit has an active self-referencing inventory_item_units row, mapping every availability field", async () => {
     const { client } = createFakeSupabase({
-      itemRows: [{ id: "item-1", name: "Chicken Thigh", category_id: "cat-1", base_unit_id: "unit-lb", inventory_categories: { name: "Meat" } }],
-      entryUnitRows: [{ inventory_item_id: "item-1", unit_id: "unit-lb" }],
+      rpcRows: [baseRpcRow()],
+      entryUnitRows: [{ id: "item-1", base_unit_id: "unit-lb", inventory_item_units: [{ unit_id: "unit-lb" }] }],
     });
     const items = await listActiveInventoryItemsForOrganization(client, "org-1");
-    expect(items).toEqual([{ id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat" }]);
+    expect(items).toEqual([
+      {
+        id: "item-1",
+        name: "Chicken Thigh",
+        categoryId: "cat-1",
+        categoryName: "Meat",
+        baseUnitCode: "LB",
+        totalAvailableQuantity: 42,
+        positiveLocationCount: 1,
+        singleLocation: { locationId: "loc-1", locationName: "Central Walk-In", fullReferenceQuantity: 50, referenceSource: "RESTOCK" },
+      },
+    ]);
   });
 
-  it("excludes an item whose only configured unit is a packaging unit (e.g. BOX), not its own base unit", async () => {
+  it("singleLocation is null when more than one location has positive stock", async () => {
+    const { client } = createFakeSupabase({
+      rpcRows: [
+        baseRpcRow({
+          out_positive_location_count: 2,
+          out_single_location_id: null,
+          out_single_location_name: null,
+          out_single_location_full_reference_quantity: null,
+          out_single_location_reference_source: null,
+        }),
+      ],
+      entryUnitRows: [{ id: "item-1", base_unit_id: "unit-lb", inventory_item_units: [{ unit_id: "unit-lb" }] }],
+    });
+    const items = await listActiveInventoryItemsForOrganization(client, "org-1");
+    expect(items[0].singleLocation).toBeNull();
+    expect(items[0].positiveLocationCount).toBe(2);
+  });
+
+  it("excludes an item whose only configured unit is a packaging unit (e.g. BOX), not its own base unit -- even though it has positive available stock", async () => {
     // This is exactly the bug this filter fixes: an item seeded with only a
     // BOX entry (for a since-removed variable-weight package workflow) has
     // inventory_item_units rows, just never one matching its own
-    // base_unit_id -- it must not appear in the employee withdrawal catalog.
+    // base_unit_id -- it must not appear in the employee withdrawal
+    // catalog even if list_kiosk_available_inventory already found it has
+    // real stock somewhere.
     const { client } = createFakeSupabase({
-      itemRows: [{ id: "item-1", name: "Chicken Thigh", category_id: "cat-1", base_unit_id: "unit-lb", inventory_categories: { name: "Meat" } }],
-      entryUnitRows: [{ inventory_item_id: "item-1", unit_id: "unit-box" }],
+      rpcRows: [baseRpcRow()],
+      entryUnitRows: [{ id: "item-1", base_unit_id: "unit-lb", inventory_item_units: [{ unit_id: "unit-box" }] }],
     });
     const items = await listActiveInventoryItemsForOrganization(client, "org-1");
     expect(items).toEqual([]);
   });
 
   it("excludes an item with zero configured inventory_item_units rows", async () => {
-    const { client } = createFakeSupabase({
-      itemRows: [{ id: "item-1", name: "Chicken Thigh", category_id: "cat-1", base_unit_id: "unit-lb", inventory_categories: { name: "Meat" } }],
-      entryUnitRows: [],
-    });
+    const { client } = createFakeSupabase({ rpcRows: [baseRpcRow()], entryUnitRows: [] });
     const items = await listActiveInventoryItemsForOrganization(client, "org-1");
     expect(items).toEqual([]);
   });
 
   it("filters each item independently in a mixed catalog", async () => {
     const { client } = createFakeSupabase({
-      itemRows: [
-        { id: "item-1", name: "Chicken Thigh", category_id: "cat-1", base_unit_id: "unit-lb", inventory_categories: { name: "Meat" } },
-        { id: "item-2", name: "Eggs", category_id: "cat-2", base_unit_id: "unit-piece", inventory_categories: { name: "Dairy" } },
-      ],
+      rpcRows: [baseRpcRow({ out_inventory_item_id: "item-1" }), baseRpcRow({ out_inventory_item_id: "item-2", out_item_name: "Eggs" })],
       entryUnitRows: [
-        { inventory_item_id: "item-1", unit_id: "unit-box" }, // packaging only -- excluded
-        { inventory_item_id: "item-2", unit_id: "unit-piece" }, // base unit -- included
+        { id: "item-1", base_unit_id: "unit-lb", inventory_item_units: [{ unit_id: "unit-box" }] }, // packaging only -- excluded
+        { id: "item-2", base_unit_id: "unit-lb", inventory_item_units: [{ unit_id: "unit-lb" }] }, // base unit -- included
       ],
     });
     const items = await listActiveInventoryItemsForOrganization(client, "org-1");
     expect(items.map((i) => i.id)).toEqual(["item-2"]);
   });
 
-  it("scopes the inventory_item_units lookup to the fetched items' ids and is_active=true", async () => {
+  it("scopes the inventory_item_units lookup to the RPC-returned items' ids and is_active=true", async () => {
     const { client, entryUnitsSelect, entryUnitsIn, entryUnitsEqActive } = createFakeSupabase({
-      itemRows: [{ id: "item-1", name: "Chicken Thigh", category_id: "cat-1", base_unit_id: "unit-lb", inventory_categories: { name: "Meat" } }],
-      entryUnitRows: [{ inventory_item_id: "item-1", unit_id: "unit-lb" }],
+      rpcRows: [baseRpcRow()],
+      entryUnitRows: [{ id: "item-1", base_unit_id: "unit-lb", inventory_item_units: [{ unit_id: "unit-lb" }] }],
     });
     await listActiveInventoryItemsForOrganization(client, "org-1");
-    expect(entryUnitsSelect).toHaveBeenCalledWith("inventory_item_id, unit_id");
-    expect(entryUnitsIn).toHaveBeenCalledWith("inventory_item_id", ["item-1"]);
-    expect(entryUnitsEqActive).toHaveBeenCalledWith("is_active", true);
+    expect(entryUnitsSelect).toHaveBeenCalledWith("id, base_unit_id, inventory_item_units!inner(unit_id, is_active)");
+    expect(entryUnitsIn).toHaveBeenCalledWith("id", ["item-1"]);
+    expect(entryUnitsEqActive).toHaveBeenCalledWith("inventory_item_units.is_active", true);
   });
 
-  it("maps a nested inventory_categories object to categoryName", async () => {
-    const { client } = createFakeSupabase({
-      itemRows: [{ id: "item-1", name: "Chicken Thigh", category_id: "cat-1", base_unit_id: "unit-lb", inventory_categories: { name: "Meat" } }],
-      entryUnitRows: [{ inventory_item_id: "item-1", unit_id: "unit-lb" }],
-    });
-    const items = await listActiveInventoryItemsForOrganization(client, "org-1");
-    expect(items).toEqual([{ id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat" }]);
-  });
-
-  it("maps a nested inventory_categories array (single-row embed) to categoryName", async () => {
-    const { client } = createFakeSupabase({
-      itemRows: [{ id: "item-1", name: "Eggs", category_id: "cat-2", base_unit_id: "unit-piece", inventory_categories: [{ name: "Dairy" }] }],
-      entryUnitRows: [{ inventory_item_id: "item-1", unit_id: "unit-piece" }],
-    });
-    const items = await listActiveInventoryItemsForOrganization(client, "org-1");
-    expect(items[0].categoryName).toBe("Dairy");
-  });
-
-  it("falls back to an empty categoryName when the category embed is null", async () => {
-    const { client } = createFakeSupabase({
-      itemRows: [{ id: "item-1", name: "Napkins", category_id: "cat-3", base_unit_id: "unit-piece", inventory_categories: null }],
-      entryUnitRows: [{ inventory_item_id: "item-1", unit_id: "unit-piece" }],
-    });
-    const items = await listActiveInventoryItemsForOrganization(client, "org-1");
-    expect(items[0].categoryName).toBe("");
-  });
-
-  it("throws on a Postgres error from the items query", async () => {
-    const { client } = createFakeSupabase({ itemRows: null, itemsError: { message: "boom" } });
+  it("throws on a Postgres error from list_kiosk_available_inventory", async () => {
+    const { client } = createFakeSupabase({ rpcRows: null, rpcError: { message: "boom" } });
     await expect(listActiveInventoryItemsForOrganization(client, "org-1")).rejects.toThrow("boom");
   });
 
   it("throws on a Postgres error from the entry-units query", async () => {
-    const { client } = createFakeSupabase({
-      itemRows: [{ id: "item-1", name: "Chicken Thigh", category_id: "cat-1", base_unit_id: "unit-lb", inventory_categories: { name: "Meat" } }],
-      entryUnitsError: { message: "boom" },
-    });
+    const { client } = createFakeSupabase({ rpcRows: [baseRpcRow()], entryUnitsError: { message: "boom" } });
     await expect(listActiveInventoryItemsForOrganization(client, "org-1")).rejects.toThrow("boom");
   });
 });

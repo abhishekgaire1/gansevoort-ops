@@ -232,6 +232,11 @@ function StockCard({ row, onAdjust }: { row: InventoryBalanceRow; onAdjust: () =
             {row.referenceSource === "MANAGER_OVERRIDE" ? <p className="text-[10px] uppercase tracking-wide text-zinc-600">Reference set by manager</p> : null}
           </>
         )}
+        {row.includesLegacyEstimate ? (
+          <p className="mt-1 text-[10px] text-zinc-600" title="A historical share of this balance was estimated once, at the 2A.5 cutover, from withdrawals recorded before exact source locations existed -- frozen permanently, never recalculated.">
+            Includes estimated allocation from legacy withdrawals
+          </p>
+        ) : null}
         <button type="button" onClick={onAdjust} className="mt-2 text-xs text-zinc-400 underline underline-offset-2 hover:text-zinc-200">
           Adjust Full Level
         </button>

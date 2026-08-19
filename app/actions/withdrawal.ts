@@ -3,10 +3,15 @@
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { verifyKioskToken } from "@/app/lib/auth/kioskToken";
 import { recordInventoryWithdrawal, type RecordInventoryWithdrawalResult } from "@/app/lib/inventory/withdrawal";
+import { InsufficientInventoryError, InvalidStorageLocationError } from "@/app/lib/inventory/errors";
 
 export interface RecordWithdrawalInput {
   stationId: string;
   inventoryItemId: string;
+  /** The physical storage location the item is withdrawn from -- see
+   * app/lib/inventory/withdrawal.ts's doc comment. Required for every
+   * new withdrawal (2A.5). */
+  sourceLocationId: string;
   enteredQuantity: string;
   enteredUnitId: string;
   measuredBaseQuantity?: string | null;
@@ -20,7 +25,7 @@ export interface RecordWithdrawalInput {
 
 export type RecordWithdrawalResult =
   | { ok: true; result: RecordInventoryWithdrawalResult }
-  | { ok: false; reason: "invalid_token" | "rpc_error"; message?: string };
+  | { ok: false; reason: "invalid_token" | "insufficient_inventory" | "invalid_location" | "rpc_error"; message: string; availableQuantity?: number | null };
 
 /**
  * The kioskToken here is the short-lived signed token issued by verifyPin,
@@ -38,7 +43,7 @@ export async function recordWithdrawal(
 
   const verification = verifyKioskToken(kioskToken, kioskTokenSecret);
   if (!verification.ok) {
-    return { ok: false, reason: "invalid_token" };
+    return { ok: false, reason: "invalid_token", message: "Your session has expired. Please sign in again." };
   }
 
   const supabase = getServiceRoleClient();
@@ -48,6 +53,7 @@ export async function recordWithdrawal(
       performedByAppUserId: verification.payload.appUserId,
       stationId: input.stationId,
       inventoryItemId: input.inventoryItemId,
+      sourceLocationId: input.sourceLocationId,
       enteredQuantity: input.enteredQuantity,
       enteredUnitId: input.enteredUnitId,
       measuredBaseQuantity: input.measuredBaseQuantity ?? null,
@@ -56,6 +62,18 @@ export async function recordWithdrawal(
     });
     return { ok: true, result };
   } catch (err) {
+    if (err instanceof InsufficientInventoryError) {
+      const available = err.availableQuantity;
+      return {
+        ok: false,
+        reason: "insufficient_inventory",
+        message: available !== null ? `Only ${available} is currently available at this location.` : "Not enough inventory is currently available at this location.",
+        availableQuantity: available,
+      };
+    }
+    if (err instanceof InvalidStorageLocationError) {
+      return { ok: false, reason: "invalid_location", message: "That location is no longer available. Reload and choose again." };
+    }
     return { ok: false, reason: "rpc_error", message: err instanceof Error ? err.message : String(err) };
   }
 }

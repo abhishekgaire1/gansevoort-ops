@@ -1,13 +1,20 @@
 /**
- * Pure item-selection search/category logic, extracted out of KioskApp so
- * it's independently testable (this codebase has no component-rendering
- * test infrastructure -- see tests/*.unit.test.ts generally -- pure logic
+ * Pure item-selection category logic, extracted out of KioskApp so it's
+ * independently testable (this codebase has no component-rendering test
+ * infrastructure -- see tests/*.unit.test.ts generally -- pure logic
  * modules are how screen behavior gets covered).
  *
- * Deliberately operates on nothing but {id, name, categoryId, categoryName}
- * -- see app/actions/inventoryItems.ts's KioskInventoryItem -- there is no
- * unit/package-related field anywhere on this type for item selection to
- * depend on, before or after the withdrawal-unit simplification.
+ * Depends on nothing but {id, name, categoryId, categoryName} -- generic
+ * over the caller's actual item type (KioskInventoryItem, see
+ * app/actions/inventoryItems.ts, carries additional 2A.5 availability
+ * fields this module never needs) so filtering never drops those extra
+ * fields on the way through.
+ *
+ * Query-text matching is NOT this module's job (Milestone 2A.5 Part D
+ * replaced the naive substring match here with ranked smart/fuzzy search
+ * -- see app/kiosk/_lib/search.ts). Category filtering and search ranking
+ * compose in KioskApp: category filter narrows the candidate set first,
+ * then search.ts ranks within it.
  */
 
 export interface FilterableItem {
@@ -30,11 +37,6 @@ export function deriveItemCategories(items: FilterableItem[]): ItemCategory[] {
   return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
 }
 
-export function filterItems(items: FilterableItem[], query: string, activeCategoryId: string | null): FilterableItem[] {
-  const normalizedQuery = query.trim().toLowerCase();
-  return items.filter((item) => {
-    const matchesQuery = normalizedQuery === "" || item.name.toLowerCase().includes(normalizedQuery);
-    const matchesCategory = activeCategoryId === null || item.categoryId === activeCategoryId;
-    return matchesQuery && matchesCategory;
-  });
+export function filterItemsByCategory<T extends FilterableItem>(items: T[], activeCategoryId: string | null): T[] {
+  return activeCategoryId === null ? items : items.filter((item) => item.categoryId === activeCategoryId);
 }

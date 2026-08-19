@@ -1,0 +1,20 @@
+- generic [ref=f2e1]:
+  - generic [ref=f2e5]:
+    - generic [ref=f2e6]:
+      - heading "Gansevoort Liberty Market" [level=1] [ref=f2e7]
+      - paragraph [ref=f2e8]: Enter your PIN to begin
+    - status "2 of 6 digits entered" [ref=f2e40]
+    - generic [ref=f2e16]:
+      - button "1" [active] [ref=f2e17]
+      - button "2" [ref=f2e18]
+      - button "3" [ref=f2e19]
+      - button "4" [ref=f2e20]
+      - button "5" [ref=f2e21]
+      - button "6" [ref=f2e22]
+      - button "7" [ref=f2e23]
+      - button "8" [ref=f2e24]
+      - button "9" [ref=f2e25]
+      - button "Delete last digit" [ref=f2e26]: Del
+      - button "0" [ref=f2e27]
+  - button "Open Next.js Dev Tools" [ref=f2e34] [cursor=pointer]
+  - alert [ref=f2e38]

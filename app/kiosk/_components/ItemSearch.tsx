@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 interface ItemSearchCategory {
   id: string;
   name: string;
@@ -11,6 +13,11 @@ interface ItemSearchProps {
   categories: ItemSearchCategory[];
   activeCategoryId: string | null;
   onCategoryChange: (categoryId: string | null) => void;
+  /** Rendered between the search box and the category chips (2A.5 §13's
+   * required order: search -> Recently Used -> categories -> grid) --
+   * e.g. RecentItemsStrip. Omitted entirely while there's nothing to
+   * show (no recent items, or the employee is actively typing a query). */
+  recentSlot?: ReactNode;
 }
 
 /**
@@ -20,7 +27,7 @@ interface ItemSearchProps {
  * border, and an explicit amber focus treatment -- obviously interactive
  * even before it's tapped.
  */
-export function ItemSearch({ query, onQueryChange, categories, activeCategoryId, onCategoryChange }: ItemSearchProps) {
+export function ItemSearch({ query, onQueryChange, categories, activeCategoryId, onCategoryChange, recentSlot }: ItemSearchProps) {
   return (
     <div className="mb-3 flex flex-col gap-3">
       <div className="relative">
@@ -53,6 +60,7 @@ export function ItemSearch({ query, onQueryChange, categories, activeCategoryId,
           </button>
         ) : null}
       </div>
+      {recentSlot}
       <div className="flex gap-3 overflow-x-auto pb-1">
         <button
           type="button"

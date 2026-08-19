@@ -1,26 +1,32 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * Framework-agnostic core for the kiosk's item-selection screen. Fetches
- * the full active catalog in one call; search/category filtering happens
- * entirely client-side afterward (see app/kiosk/_lib/itemFilter.ts) --
- * hundreds of {id, name, categoryId, categoryName} rows is trivial to
- * hold in memory and keeps every keystroke instant with zero further
- * network round trips.
+ * Framework-agnostic core for the kiosk's item-selection screen.
  *
- * Filters only on the item's own status='active', matching the RPC's own
- * authorization surface (record_inventory_withdrawal does not check
- * inventory_categories.is_active at all) -- an item under a now-inactive
- * category is still listed here, intentionally consistent with what the
- * RPC would actually accept.
+ * Milestone 2A.5 correction: the kiosk is a WITHDRAWAL interface, so its
+ * normal grid must show ONLY items with a POSITIVE total available
+ * balance in at least one active, storage-eligible location -- never the
+ * full Item Master catalog. An item being confirmed in Item Master does
+ * not mean it is physically available; showing every confirmed item
+ * regardless of stock (the pre-2A.5 behavior) produced dead-end cards
+ * like "Burrata Mozzarella Cheese" that always landed on "No inventory is
+ * currently available" once tapped.
  *
- * Also excludes any item that isn't actually withdrawable yet: the
+ * Sourced from list_kiosk_available_inventory (20260811100077) -- ONE
+ * efficient server-side query, never one balance request per card. That
+ * query already reuses the same authoritative exact+frozen-legacy
+ * balance formula the manager page and per-item kiosk lookup use, so the
+ * grid, the stock card, and the source-location picker can never
+ * disagree about what "available" means. The result is small (dozens of
+ * rows at most for a real org), so search/category filtering stays
+ * entirely client-side afterward, same as before (app/kiosk/_lib/
+ * itemFilter.ts).
+ *
+ * Also still excludes any item that isn't actually withdrawable: the
  * withdrawal-unit simplification requires an ACTIVE, self-referencing
  * inventory_item_units row for the item's own base_unit_id (see
  * app/lib/kiosk/withdrawalUnit.ts) -- an item missing that row would only
- * fail once selected. Filtering it out of the catalog here means an
- * employee never sees a selectable item that can't actually be withdrawn,
- * rather than surfacing a manager-facing configuration error mid-flow.
+ * fail once selected. This safety net is unchanged from before 2A.5.
  */
 
 export interface KioskInventoryItem {
@@ -28,71 +34,88 @@ export interface KioskInventoryItem {
   name: string;
   categoryId: string;
   categoryName: string;
+  baseUnitCode: string;
+  /** Total available quantity summed across every currently-positive
+   * storage location -- shown directly on the grid card. */
+  totalAvailableQuantity: number;
+  positiveLocationCount: number;
+  /** Populated ONLY when positiveLocationCount === 1 -- lets the card
+   * (and the immediately-following quantity screen) show a real gauge
+   * without a second round trip. Null when more than one location has
+   * stock; the employee resolves which one via the "Take From" step. */
+  singleLocation: {
+    locationId: string;
+    locationName: string;
+    fullReferenceQuantity: number | null;
+    referenceSource: "RESTOCK" | "MANAGER_OVERRIDE" | null;
+  } | null;
 }
 
-interface InventoryItemRow {
-  id: string;
-  name: string;
-  category_id: string;
-  base_unit_id: string;
-  inventory_categories: { name: string } | { name: string }[] | null;
+interface KioskAvailableInventoryRow {
+  out_inventory_item_id: string;
+  out_item_name: string;
+  out_category_id: string;
+  out_category_name: string;
+  out_base_unit_code: string;
+  out_total_available_quantity: number | string;
+  out_positive_location_count: number;
+  out_single_location_id: string | null;
+  out_single_location_name: string | null;
+  out_single_location_full_reference_quantity: number | string | null;
+  out_single_location_reference_source: "RESTOCK" | "MANAGER_OVERRIDE" | null;
 }
 
 export async function listActiveInventoryItemsForOrganization(
   supabase: SupabaseClient,
   organizationId: string
 ): Promise<KioskInventoryItem[]> {
-  const { data, error } = await supabase
-    .from("inventory_items")
-    .select("id, name, category_id, base_unit_id, inventory_categories(name)")
-    .eq("organization_id", organizationId)
-    .eq("status", "active")
-    // A PENDING_REVIEW item (an AI proposal awaiting manager approval) is
-    // never withdrawable -- this filter is a UX nicety only, since a
-    // PENDING_REVIEW item structurally has no inventory_item_units rows
-    // yet (created at confirmation time, not proposal time) and the
-    // withdrawable-entry-unit filter below would already exclude it.
-    .eq("approval_status", "CONFIRMED")
-    .order("name");
-
+  const { data, error } = await supabase.rpc("list_kiosk_available_inventory", { p_organization_id: organizationId });
   if (error) {
-    throw new Error(`listActiveInventoryItemsForOrganization failed: ${error.message}`);
+    throw new Error(`list_kiosk_available_inventory failed: ${error.message}`);
   }
 
-  const rows = (data ?? []) as InventoryItemRow[];
+  const rows = (data ?? []) as KioskAvailableInventoryRow[];
   if (rows.length === 0) {
     return [];
   }
 
   const { data: entryUnits, error: entryUnitsError } = await supabase
-    .from("inventory_item_units")
-    .select("inventory_item_id, unit_id")
+    .from("inventory_items")
+    .select("id, base_unit_id, inventory_item_units!inner(unit_id, is_active)")
     .in(
-      "inventory_item_id",
-      rows.map((row) => row.id)
+      "id",
+      rows.map((row) => row.out_inventory_item_id)
     )
-    .eq("is_active", true);
+    .eq("inventory_item_units.is_active", true);
 
   if (entryUnitsError) {
     throw new Error(`listActiveInventoryItemsForOrganization entry-unit lookup failed: ${entryUnitsError.message}`);
   }
 
-  const baseUnitIdByItemId = new Map(rows.map((row) => [row.id, row.base_unit_id]));
   const withdrawableItemIds = new Set(
-    (entryUnits ?? [])
-      .filter((row) => baseUnitIdByItemId.get(row.inventory_item_id as string) === row.unit_id)
-      .map((row) => row.inventory_item_id as string)
+    ((entryUnits ?? []) as { id: string; base_unit_id: string; inventory_item_units: { unit_id: string }[] }[])
+      .filter((row) => row.inventory_item_units.some((u) => u.unit_id === row.base_unit_id))
+      .map((row) => row.id)
   );
 
   return rows
-    .filter((row) => withdrawableItemIds.has(row.id))
-    .map((row) => {
-      const category = Array.isArray(row.inventory_categories) ? row.inventory_categories[0] : row.inventory_categories;
-      return {
-        id: row.id,
-        name: row.name,
-        categoryId: row.category_id,
-        categoryName: category?.name ?? "",
-      };
-    });
+    .filter((row) => withdrawableItemIds.has(row.out_inventory_item_id))
+    .map((row) => ({
+      id: row.out_inventory_item_id,
+      name: row.out_item_name,
+      categoryId: row.out_category_id,
+      categoryName: row.out_category_name,
+      baseUnitCode: row.out_base_unit_code,
+      totalAvailableQuantity: Number(row.out_total_available_quantity),
+      positiveLocationCount: row.out_positive_location_count,
+      singleLocation:
+        row.out_single_location_id !== null
+          ? {
+              locationId: row.out_single_location_id,
+              locationName: row.out_single_location_name!,
+              fullReferenceQuantity: row.out_single_location_full_reference_quantity === null ? null : Number(row.out_single_location_full_reference_quantity),
+              referenceSource: row.out_single_location_reference_source,
+            }
+          : null,
+    }));
 }

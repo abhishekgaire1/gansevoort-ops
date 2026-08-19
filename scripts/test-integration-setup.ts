@@ -63,10 +63,16 @@ async function main(): Promise<void> {
 
   if (existingLocation) {
     console.log(`Reusing existing location: ${existingLocation.id}`);
+    // is_storage_eligible defaults to false as of 20260811100073 -- ensure
+    // the canonical fixture location stays explicitly eligible even if it
+    // predates that migration's usage-based backfill somehow missed it.
+    const { error: eligibilityError } = await supabase.from("locations").update({ is_storage_eligible: true }).eq("id", existingLocation.id).eq("is_storage_eligible", false);
+    if (eligibilityError) throw eligibilityError;
   } else {
     const { data: inserted, error: locationInsertError } = await supabase
       .from("locations")
-      .insert({ organization_id: organizationId, name: `${TEST_ORG_NAME} Location`, timezone: "America/New_York" })
+      // is_storage_eligible explicit, never relying on the DB default.
+      .insert({ organization_id: organizationId, name: `${TEST_ORG_NAME} Location`, timezone: "America/New_York", is_storage_eligible: true })
       .select("id")
       .single();
     if (locationInsertError) throw locationInsertError;
