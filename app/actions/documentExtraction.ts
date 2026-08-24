@@ -4,7 +4,7 @@ import { after } from "next/server";
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { runDocumentExtractionAttempt } from "@/app/lib/documents/runDocumentExtractionAttempt";
-import { resolveGeminiModel } from "@/app/lib/ai/config";
+import { resolveAIConfig } from "@/app/lib/ai/router/resolveAIConfig";
 import { isAttemptStale } from "@/app/lib/documents/staleExtraction";
 
 export type RetryExtractionResult =
@@ -77,14 +77,21 @@ export async function retryDocumentExtraction(documentId: string): Promise<Retry
 
   const nextAttemptNumber = (latestAttempt?.attempt_number ?? 0) + 1;
 
+  // AI Configuration milestone: resolved fresh for this retry (task
+  // override -> org default -> app default) -- if an Admin changed the
+  // configured model since the original attempt, a manual retry
+  // deliberately picks up the new one; the original attempt's own row is
+  // never rewritten (Part 49).
+  const aiConfig = await resolveAIConfig(serviceClient, auth.manager.organizationId, "INVOICE_EXTRACTION");
+
   const { data: newAttempt, error: insertError } = await serviceClient
     .from("document_extractions")
     .insert({
       organization_id: auth.manager.organizationId,
       document_id: documentId,
       attempt_number: nextAttemptNumber,
-      provider: "gemini",
-      model: resolveGeminiModel(),
+      provider: aiConfig.provider,
+      model: aiConfig.model,
       status: "PENDING",
     })
     .select("id")

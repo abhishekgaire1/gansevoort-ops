@@ -2,10 +2,20 @@
 
 import type { WizardStepId, WizardStepState } from "@/app/lib/purchaseDocuments/deriveWizardProgress";
 
+// Receiving UX pass, Part 10: Step 3 is renamed from "Receive Delivery" to
+// "Confirm Receiving" -- the physical delivery was already checked BEFORE
+// invoice entry (by a separate physical verifier who never signs into this
+// app); what actually happens in this step is recording/confirming the
+// received quantities/locations/condition per line (see ReceivingPanel.tsx,
+// whose own primary button already says "Confirm Receiving"). "Receive
+// Delivery" risked implying the manager now goes and physically receives
+// the delivery at this point in the digital workflow, which is not what
+// happens. No business logic changed -- this is a label-only fix, matching
+// the wording ReceivingPanel already uses for its own primary action.
 const STEP_LABELS: Record<WizardStepId, string> = {
   1: "Review Invoice",
   2: "Confirm Items",
-  3: "Receive Delivery",
+  3: "Confirm Receiving",
   4: "Review & Send",
 };
 

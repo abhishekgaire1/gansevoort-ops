@@ -8,7 +8,7 @@ vi.mock("@/app/lib/auth/managerAuth", () => ({ requireManagerOrAdmin: requireMan
 const { getServiceRoleClientMock } = vi.hoisted(() => ({ getServiceRoleClientMock: vi.fn() }));
 vi.mock("@/app/lib/supabase/serviceClient", () => ({ getServiceRoleClient: getServiceRoleClientMock }));
 
-import { createVendor, listVendors, searchVendors, setVendorActive } from "@/app/actions/vendors";
+import { createVendorFromReceiving, listVendors, searchVendors } from "@/app/actions/vendors";
 
 const MANAGER = {
   ok: true as const,
@@ -59,74 +59,6 @@ describe("listVendors / searchVendors", () => {
   });
 });
 
-describe("createVendor", () => {
-  it("rejects a blank name without touching the database", async () => {
-    const from = vi.fn();
-    getServiceRoleClientMock.mockReturnValue({ from });
-
-    const result = await createVendor("   ");
-    expect(result).toEqual({ ok: false, reason: "invalid_name", message: "Vendor name is required." });
-    expect(from).not.toHaveBeenCalled();
-  });
-
-  it("inserts with a computed normalized_name and returns the created vendor", async () => {
-    let insertPayload: unknown;
-    const from = vi.fn(() =>
-      createChainable({ data: { id: "v-1", name: "Baldor Foods", is_active: true }, error: null }, (method, args) => {
-        if (method === "insert") insertPayload = args[0];
-      })
-    );
-    getServiceRoleClientMock.mockReturnValue({ from });
-
-    const result = await createVendor("  Baldor   Foods  ");
-
-    expect(insertPayload).toMatchObject({
-      organization_id: "org-1",
-      name: "Baldor   Foods", // outer whitespace trimmed, internal whitespace preserved on the display name
-      normalized_name: "BALDOR FOODS", // normalized: trimmed + internal whitespace collapsed + uppercased
-    });
-    expect(result).toEqual({ ok: true, vendor: { id: "v-1", name: "Baldor Foods", isActive: true } });
-  });
-
-  it("maps a unique-violation (23505) to a friendly duplicate error, not a raw DB error", async () => {
-    const from = vi.fn(() => createChainable({ data: null, error: { code: "23505", message: "duplicate key value" } }));
-    getServiceRoleClientMock.mockReturnValue({ from });
-
-    const result = await createVendor("Baldor Foods");
-    expect(result).toEqual({ ok: false, reason: "duplicate", message: 'A vendor named "Baldor Foods" already exists.' });
-  });
-});
-
-describe("setVendorActive", () => {
-  it("rejects unauthenticated callers", async () => {
-    requireManagerOrAdminMock.mockResolvedValue({ ok: false, reason: "not_authenticated" });
-    const result = await setVendorActive("v-1", false);
-    expect(result).toEqual({ ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." });
-  });
-
-  it("updates is_active scoped to the organization -- the organization_id predicate is part of the mutation, not just the payload", async () => {
-    let updatePayload: unknown;
-    const eqCalls: unknown[][] = [];
-    const from = vi.fn(() =>
-      createChainable({ data: null, error: null }, (method, args) => {
-        if (method === "update") updatePayload = args[0];
-        if (method === "eq") eqCalls.push(args);
-      })
-    );
-    getServiceRoleClientMock.mockReturnValue({ from });
-
-    const result = await setVendorActive("v-1", false);
-    expect(updatePayload).toEqual({ is_active: false });
-    // The update payload itself must never carry organization_id (that would
-    // let a mismatched org silently overwrite the filter instead of scoping
-    // it) -- the predicate must appear as its own .eq("organization_id", ...)
-    // call in the query chain.
-    expect(eqCalls).toContainEqual(["id", "v-1"]);
-    expect(eqCalls).toContainEqual(["organization_id", "org-1"]);
-    expect(result).toEqual({ ok: true });
-  });
-});
-
 describe("searchVendors", () => {
   it("returns active vendors matching the query", async () => {
     const from = vi.fn(() => createChainable({ data: [{ id: "v-1", name: "Baldor", is_active: true }], error: null }));
@@ -134,5 +66,84 @@ describe("searchVendors", () => {
 
     const result = await searchVendors("bal");
     expect(result.ok).toBe(true);
+  });
+});
+
+/**
+ * Admin Master Data milestone: general Vendor administration
+ * (createVendor/setVendorActive) moved to app/actions/adminVendors.ts,
+ * Admin-only -- see adminVendorsAuthorization.unit.test.ts. What remains
+ * Manager-callable here is ONLY this narrowly-scoped exception (Part
+ * 15-17/42): a Manager reviewing a real invoice may create a vendor by
+ * name when no existing match is found, so Receiving never stalls
+ * waiting on an Admin.
+ */
+describe("createVendorFromReceiving", () => {
+  it("rejects unauthenticated callers without calling the RPC", async () => {
+    requireManagerOrAdminMock.mockResolvedValue({ ok: false, reason: "not_authenticated" });
+    const rpc = vi.fn();
+    getServiceRoleClientMock.mockReturnValue({ rpc });
+
+    const result = await createVendorFromReceiving("Baldor Foods");
+    expect(result).toEqual({ ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("rejects a blank name without calling the RPC", async () => {
+    const rpc = vi.fn();
+    getServiceRoleClientMock.mockReturnValue({ rpc });
+
+    const result = await createVendorFromReceiving("   ");
+    expect(result).toEqual({ ok: false, reason: "invalid_name", message: "Vendor name is required." });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("calls create_vendor_from_receiving with the authenticated manager's own org/actor, never a client-supplied one", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [{ out_vendor_id: "v-new", out_name: "Baldor Foods" }], error: null });
+    getServiceRoleClientMock.mockReturnValue({ rpc });
+
+    const result = await createVendorFromReceiving("  Baldor Foods  ", "pd-1");
+
+    expect(rpc).toHaveBeenCalledWith("create_vendor_from_receiving", {
+      p_organization_id: "org-1",
+      p_actor_app_user_id: "user-1",
+      p_vendor_name: "Baldor Foods",
+      p_purchase_document_id: "pd-1",
+    });
+    expect(result).toEqual({ ok: true, vendor: { id: "v-new", name: "Baldor Foods", isActive: true } });
+  });
+
+  it("defaults p_purchase_document_id to null when the caller doesn't supply one (the pre-upload quick-create context, before any document exists)", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [{ out_vendor_id: "v-new", out_name: "Baldor Foods" }], error: null });
+    getServiceRoleClientMock.mockReturnValue({ rpc });
+
+    await createVendorFromReceiving("Baldor Foods");
+
+    expect(rpc).toHaveBeenCalledWith("create_vendor_from_receiving", expect.objectContaining({ p_purchase_document_id: null }));
+  });
+
+  it("maps a GA052 duplicate error to a friendly, typed result carrying the existing vendor's id/name -- never a raw Postgres error", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "GA052", message: 'a vendor named "Baldor Foods" already exists', details: JSON.stringify({ existingVendorId: "v-1", existingVendorName: "Baldor Foods" }) },
+    });
+    getServiceRoleClientMock.mockReturnValue({ rpc });
+
+    const result = await createVendorFromReceiving("Baldor Foods");
+    expect(result).toEqual({
+      ok: false,
+      reason: "duplicate",
+      message: 'a vendor named "Baldor Foods" already exists',
+      existingVendorId: "v-1",
+      existingVendorName: "Baldor Foods",
+    });
+  });
+
+  it("maps any other RPC error to a generic, safe message -- never a raw Postgres error", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: { code: "XX000", message: "internal server crash detail" } });
+    getServiceRoleClientMock.mockReturnValue({ rpc });
+
+    const result = await createVendorFromReceiving("Baldor Foods");
+    expect(result).toEqual({ ok: false, reason: "misconfigured", message: "Could not create the vendor. Try again." });
   });
 });

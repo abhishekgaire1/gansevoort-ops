@@ -29,6 +29,7 @@ const LINE_CODE_PHRASE: Record<string, string> = {
   LINE_NEGATIVE_UNIT_PRICE: "unit price looks invalid (negative).",
   LINE_NEGATIVE_TOTAL: "line total looks invalid (negative).",
   LINE_TOTAL_MISMATCH: "line total doesn't match quantity × price.",
+  LINE_RECOGNIZED_AS_CREDIT: "recognized as a credit/return.",
 };
 
 const LINE_FIELD_PATTERN = /^lines\[(\d+)\]/;

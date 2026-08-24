@@ -11,6 +11,8 @@ import { ReceivingPanel } from "./ReceivingPanel";
 import { Step4ReviewSend } from "./Step4ReviewSend";
 import { deriveWizardProgress, type WizardStepId } from "@/app/lib/purchaseDocuments/deriveWizardProgress";
 import { lineLevelBlockers } from "@/app/lib/purchaseDocuments/preparationBlockers";
+import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
+import { blockingIssueSummaryLabel, scrollToFirstIssue } from "@/app/components/receiving/blockingIssues";
 import { WIZARD_STEP_SLUGS, wizardStepFromSlug } from "@/app/lib/purchaseDocuments/wizardStepSlug";
 import { continueFromStep1 } from "@/app/lib/purchaseDocuments/continueFromStep1";
 import type { PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
@@ -55,6 +57,7 @@ export function PreparationWizard({
   aiSuggestedVendorName,
   declaredDocumentType,
   aiSuggestedDocumentType,
+  aiAmountDue,
   aiWarnings,
   aiModel,
   vendors,
@@ -82,6 +85,7 @@ export function PreparationWizard({
   aiSuggestedVendorName: string | null;
   declaredDocumentType: PurchaseDocumentType | null;
   aiSuggestedDocumentType: string | null;
+  aiAmountDue: number | null;
   aiWarnings: string[];
   aiModel: string | null;
   vendors: VendorSummary[];
@@ -289,6 +293,7 @@ export function PreparationWizard({
           aiSuggestedVendorName={aiSuggestedVendorName}
           declaredDocumentType={declaredDocumentType}
           aiSuggestedDocumentType={aiSuggestedDocumentType}
+          aiAmountDue={aiAmountDue}
           vendors={vendors}
           reviewFlags={draftFlags}
           aiWarnings={aiWarnings}
@@ -316,32 +321,29 @@ export function PreparationWizard({
       {activeStep === 3 ? (
         <div className="mt-4 flex flex-col gap-4">
           <ReceivingPanel purchaseDocumentId={purchaseDocumentId} readOnly={!editable} collapseWhenReceived onChange={refetchPreparationStatus} />
-          {editable && receivingComplete === false && receivingBlockers.length > 0 ? (
-            // Never just a disabled button -- the exact line-level reasons,
-            // from the SAME source of truth as the gate itself.
-            <div className="rounded-2xl border border-amber-800 bg-amber-950/20 p-4">
-              <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">Cannot continue yet</p>
-              <ul className="mt-2 flex flex-col gap-1 text-sm text-amber-200">
-                {receivingBlockers.map((blocker, index) => (
-                  <li key={index}>
-                    • {blocker.description ?? "A line"} — {blocker.reason}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
           {editable ? (
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setRequestedStep(4)}
-                disabled={!receivingComplete}
-                title={!receivingComplete ? "Finish receiving every inventory line before continuing." : undefined}
-                className="self-start rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
-              >
-                Continue to Review & Send
-              </button>
-            </div>
+            // Never a detached list of every blocked line (ReceivingPanel's
+            // own rows already show "⚠ Needs input" + the exact reason
+            // inline, right where the problem is) -- the footer only
+            // summarizes a count, and clicking it scrolls to/focuses the
+            // first unresolved line rather than doing nothing.
+            <WorkflowFooter
+              contextLabel={receivingComplete === false ? blockingIssueSummaryLabel(receivingBlockers.length, "line") : undefined}
+              contextTone="warning"
+              onContextClick={
+                receivingBlockers.length > 0
+                  ? () =>
+                      scrollToFirstIssue(
+                        receivingBlockers.map((b) => ({ id: `receiving-line-${b.lineKey}`, description: b.description, reason: b.reason }))
+                      )
+                  : undefined
+              }
+              primaryLabel="Continue to Review & Send"
+              onPrimary={() => setRequestedStep(4)}
+              primaryDisabled={!receivingComplete}
+              primaryTitle={!receivingComplete ? "Finish receiving every inventory line before continuing." : undefined}
+              sticky={false}
+            />
           ) : null}
         </div>
       ) : null}

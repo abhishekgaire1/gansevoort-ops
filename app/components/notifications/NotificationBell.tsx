@@ -15,6 +15,12 @@ function entityHref(notification: UserNotification): string {
   if (notification.entityType === "purchase_document") {
     return `/manager/purchases/${notification.entityId}`;
   }
+  if (notification.entityType === "inventory_cycle_count") {
+    return `/manager/inventory/cycle-count/${notification.entityId}`;
+  }
+  if (notification.entityType === "inventory_waste_event") {
+    return `/manager/inventory/waste/${notification.entityId}`;
+  }
   return "#";
 }
 

@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createBrowserClient } from "@supabase/ssr";
 
 /**
@@ -63,6 +64,9 @@ export function LoginForm({ supabaseUrl, supabasePublishableKey }: { supabaseUrl
           className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-50"
         />
       </label>
+      <Link href="/manager/forgot-password" className="-mt-2 self-end text-xs text-zinc-500 hover:text-zinc-300">
+        Forgot password?
+      </Link>
       {error ? <p className="text-sm text-red-400">{error}</p> : null}
       <button
         type="submit"

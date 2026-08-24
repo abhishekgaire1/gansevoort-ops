@@ -9,6 +9,7 @@ import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine } from "@/app/li
 import { buildFinalReviewRows, type FinalReviewRow } from "@/app/lib/purchaseDocuments/finalReviewTable";
 import { deriveSendActionState } from "@/app/lib/purchaseDocuments/sendActionState";
 import { formatMoney } from "@/app/lib/formatMoney";
+import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
 
 /**
  * Step 4 -- Manager 1's final check before submission. Three layers, each
@@ -282,7 +283,9 @@ export function Step4ReviewSend({
           </ul>
 
           {missingDeliveryVerifier && editable ? (
-            <div className="mt-3 flex flex-wrap items-end gap-2 rounded-lg border border-amber-700 bg-zinc-950/40 p-3">
+            <div className="mt-3 flex flex-col gap-2 rounded-lg border border-amber-700 bg-zinc-950/40 p-3">
+              <p className="text-xs text-amber-200/80">Who physically checked this delivery before the invoice was entered?</p>
+              <div className="flex flex-wrap items-end gap-2">
               <label className="flex flex-col gap-1 text-xs text-amber-200">
                 Delivery verified by
                 <select
@@ -306,6 +309,7 @@ export function Step4ReviewSend({
               >
                 {verifierPending ? "Saving…" : "Set"}
               </button>
+              </div>
               {verifierError ? <p className="w-full text-xs text-red-400">{verifierError}</p> : null}
             </div>
           ) : null}
@@ -328,41 +332,50 @@ export function Step4ReviewSend({
                 ? "Go to Review Invoice"
                 : blockers.some((b) => /classification|matching|approval|re-review/i.test(b.reason))
                   ? "Go to Confirm Items"
-                  : "Go to Receiving"}
+                  : "Go to Confirm Receiving"}
             </button>
           ) : null}
         </div>
       ) : null}
 
-      {sendError ? <p className="text-sm text-red-400">{sendError}</p> : null}
-
       {/* ============ ACTIONS ============ */}
-      <div className="flex flex-wrap items-center gap-4">
-        {sendAction.kind === "send" ? (
-          <button
-            type="button"
-            onClick={onSend}
-            disabled={sendPending || !sendAction.enabled}
-            title={!sendAction.enabled ? "Resolve the items above before sending for final review." : undefined}
-            className="rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
-          >
-            {sendPending ? "Sending for final review…" : "Send for Final Review"}
+      {sendAction.kind === "send" ? (
+        <>
+          {sendError ? <p className="text-sm text-red-400">{sendError}</p> : null}
+          <WorkflowFooter
+            onBack={() => onNavigateToStep(3)}
+            backLabel="Back to Confirm Receiving"
+            contextLabel={!sendAction.enabled ? "Resolve the items above before sending" : undefined}
+            contextTone="warning"
+            primaryLabel="Send for Final Review"
+            onPrimary={onSend}
+            primaryDisabled={!sendAction.enabled}
+            primaryPending={sendPending}
+            primaryPendingLabel="Sending for Final Review…"
+            primaryTitle={!sendAction.enabled ? "Resolve the items above before sending for final review." : undefined}
+            sticky={false}
+          />
+        </>
+      ) : sendAction.kind === "sent" ? (
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-zinc-800 bg-zinc-950/95 px-4 py-3">
+          <button type="button" onClick={() => onNavigateToStep(3)} className="text-xs text-zinc-400 underline">
+            ← Back to Confirm Receiving
           </button>
-        ) : sendAction.kind === "sent" ? (
-          <div className="flex flex-col gap-0.5">
-            <span className="inline-flex cursor-default items-center gap-2 self-start rounded-full border border-emerald-800 bg-emerald-950/30 px-6 py-2 text-sm font-semibold text-emerald-300">
-              ✓ Sent for Final Review
+          <div className="flex flex-col items-end gap-0.5">
+            {/* Status Language -- Verification, Part "SUCCESS MESSAGE": this
+                inert state IS the submitting manager's success confirmation
+                in this app's design (no separate toast/modal exists) --
+                "Sent," never "Ready," since they just sent it. */}
+            <span className="inline-flex cursor-default items-center gap-2 self-end rounded-full border border-emerald-800 bg-emerald-950/30 px-6 py-2 text-sm font-semibold text-emerald-300">
+              ✓ Sent for Verification
             </span>
             <span className="text-xs text-zinc-500">
-              Awaiting final review by another manager.
+              Your review is complete. Another manager can now verify this document.
               {editable === false ? " Use Withdraw Submission above to make changes." : ""}
             </span>
           </div>
-        ) : null}
-        <button type="button" onClick={() => onNavigateToStep(3)} className="text-xs text-zinc-400 underline">
-          ← Back to Receiving
-        </button>
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }

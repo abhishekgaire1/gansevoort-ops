@@ -34,6 +34,7 @@ function baseExtraction(overrides: Partial<NormalizedInvoiceExtraction> = {}): N
     tax: null,
     fees: null,
     total: null,
+    amountDue: null,
     currency: "USD",
     lines: [],
     warnings: [],
@@ -117,6 +118,48 @@ describe("validateInvoiceExtraction -- line-total math", () => {
   });
 });
 
+describe("validateInvoiceExtraction -- reconciliation regression matrix", () => {
+  it("NORMAL INVOICE: 100 subtotal + 8 tax = 108 total reconciles normally, no signal of any kind", () => {
+    const { issues } = validateInvoiceExtraction(baseExtraction({ total: 108, tax: 8, fees: 0, lines: [baseLine({ lineTotal: 100 })] }));
+    expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH")).toBe(false);
+    expect(issues.some((i) => i.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE" || i.code === "TOTAL_INCLUDES_ACCOUNT_BALANCE")).toBe(false);
+  });
+
+  it("CREDIT LINE: a 100 purchase and a -20 credit reconcile to an 80 total, cleanly, with the credit recognized (not flagged as an error)", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({
+        total: 80,
+        tax: 0,
+        fees: 0,
+        lines: [baseLine({ packageQuantity: 1, unitPrice: 100, lineTotal: 100 }), baseLine({ packageQuantity: -1, unitPrice: 20, lineTotal: -20 })],
+      })
+    );
+    expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH")).toBe(false);
+    expect(issues.some((i) => i.code === "LINE_NEGATIVE_PACKAGE_QUANTITY" || i.code === "LINE_NEGATIVE_TOTAL")).toBe(false);
+    expect(issues.some((i) => i.code === "LINE_RECOGNIZED_AS_CREDIT")).toBe(true);
+  });
+
+  it("PRIOR BALANCE: 100 current invoice + 500 previous balance = 600 amount due -- current document reconciles at 100, amount due recorded separately (not folded into the current-document mismatch check)", () => {
+    const { issues } = validateInvoiceExtraction(baseExtraction({ total: 600, tax: 0, fees: 0, lines: [baseLine({ lineTotal: 100 })] }));
+    expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH")).toBe(false);
+    const signal = issues.find((i) => i.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE");
+    expect(signal).toBeDefined();
+    expect(signal!.message).toContain("$100.00");
+    expect(signal!.message).toContain("$600.00");
+  });
+
+  it("FREE ITEM: qty 1, amount 0, description FREE -- not automatically invalid", () => {
+    const { issues } = validateInvoiceExtraction(baseExtraction({ lines: [baseLine({ description: "Sample Item FREE", packageQuantity: 1, unitPrice: 0, lineTotal: 0 })] }));
+    expect(issues.some((i) => i.code.startsWith("LINE_NEGATIVE"))).toBe(false);
+  });
+
+  it("INVALID SIGN: ordinary product, qty -5, amount +100 -- needs review, never silently accepted as a credit", () => {
+    const { issues } = validateInvoiceExtraction(baseExtraction({ lines: [baseLine({ description: "Ordinary Widget", packageQuantity: -5, unitPrice: 20, lineTotal: 100 })] }));
+    expect(issues.some((i) => i.code === "LINE_NEGATIVE_PACKAGE_QUANTITY")).toBe(true);
+    expect(issues.some((i) => i.code === "LINE_RECOGNIZED_AS_CREDIT")).toBe(false);
+  });
+});
+
 describe("validateInvoiceExtraction -- invoice total check", () => {
   it("does not flag when line totals + tax + fees reconcile with the extracted total", () => {
     const { issues } = validateInvoiceExtraction(
@@ -130,11 +173,47 @@ describe("validateInvoiceExtraction -- invoice total check", () => {
     expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH")).toBe(false);
   });
 
-  it("flags when line totals + tax + fees do not reconcile with the extracted total", () => {
+  it("flags a genuine mismatch (stated total SMALLER than the lines) as INVOICE_TOTAL_MISMATCH, never as an account-balance signal", () => {
     const { issues } = validateInvoiceExtraction(
-      baseExtraction({ total: 999, tax: 0, fees: 0, lines: [baseLine({ lineTotal: 60 })] })
+      baseExtraction({ total: 40, tax: 0, fees: 0, lines: [baseLine({ lineTotal: 60 })] })
     );
     expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH")).toBe(true);
+    expect(issues.some((i) => i.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE" || i.code === "TOTAL_INCLUDES_ACCOUNT_BALANCE")).toBe(false);
+  });
+
+  it("recognizes a LARGER stated total as a possible account balance (info if amountDue confirms it, warning otherwise) instead of a plain mismatch -- Capital Paper #178606 regression", () => {
+    // Real captured facts from Capital Paper Inc invoice #178606: 62 real
+    // lines (including two legitimate credits) sum to exactly $3,336.00 --
+    // the document's own economic total -- but the invoice prints a
+    // TOTAL of $15,565.50, which is that $3,336.00 plus three PRIOR,
+    // separately-invoiced deliveries (177888/178135/178361) listed above
+    // it. The AI never extracted those three rows as line items.
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({ total: 15565.5, tax: null, fees: null, lines: [baseLine({ lineTotal: 3336 })] })
+    );
+    expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH")).toBe(false);
+    const signal = issues.find((i) => i.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE");
+    expect(signal).toBeDefined();
+    expect(signal!.severity).toBe("warning");
+    expect(signal!.message).toContain("$3,336.00");
+    expect(signal!.message).toContain("$15,565.50");
+  });
+
+  it("recognizes the account balance at INFO severity when the AI's own amountDue confirms the same figure", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({ total: 15565.5, amountDue: 15565.5, tax: null, fees: null, lines: [baseLine({ lineTotal: 3336 })] })
+    );
+    const signal = issues.find((i) => i.code === "TOTAL_INCLUDES_ACCOUNT_BALANCE");
+    expect(signal).toBeDefined();
+    expect(signal!.severity).toBe("info");
+  });
+
+  it("does NOT treat a larger total as an account balance when amountDue disagrees with it -- falls back to the ordinary mismatch check", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({ total: 15565.5, amountDue: 999999, tax: null, fees: null, lines: [baseLine({ lineTotal: 3336 })] })
+    );
+    expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH")).toBe(true);
+    expect(issues.some((i) => i.code === "TOTAL_INCLUDES_ACCOUNT_BALANCE" || i.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE")).toBe(false);
   });
 
   it("skips the total check (does not overwrite or fabricate) when any line total is unknown", () => {
@@ -194,5 +273,73 @@ describe("validateInvoiceExtraction -- purity", () => {
     const input = baseExtraction({ total: 100 });
     const { data } = validateInvoiceExtraction(input);
     expect(data).toBe(input);
+  });
+});
+
+describe("validateInvoiceExtraction -- credit/return lines (negative quantity+total is not automatically an error)", () => {
+  it("recognizes a legitimate credit line (negative qty, negative total, consistent arithmetic) as info, never as an error -- Capital Paper #178606's -$64 credit", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({
+        lines: [baseLine({ description: "CREDIT ------ 32OZ ROUND CONTAI", packageQuantity: -2, unitPrice: 32, lineTotal: -64 })],
+      })
+    );
+    const codes = issues.map((i) => i.code);
+    expect(codes).not.toContain("LINE_NEGATIVE_PACKAGE_QUANTITY");
+    expect(codes).not.toContain("LINE_NEGATIVE_TOTAL");
+    expect(codes).toContain("LINE_RECOGNIZED_AS_CREDIT");
+    expect(issues.find((i) => i.code === "LINE_RECOGNIZED_AS_CREDIT")!.severity).toBe("info");
+  });
+
+  it("recognizes a second legitimate credit line -- Capital Paper #178606's -$36 credit", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({
+        lines: [baseLine({ description: "CREDIT ------ BLACK DOME LID HO", packageQuantity: -1, unitPrice: 36, lineTotal: -36 })],
+      })
+    );
+    const codes = issues.map((i) => i.code);
+    expect(codes).not.toContain("LINE_NEGATIVE_PACKAGE_QUANTITY");
+    expect(codes).not.toContain("LINE_NEGATIVE_TOTAL");
+    expect(codes).toContain("LINE_RECOGNIZED_AS_CREDIT");
+  });
+
+  it("does NOT recognize a credit when the signs disagree (negative qty, POSITIVE total) -- still flagged, genuinely needs review", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({ lines: [baseLine({ description: "Ordinary Product", packageQuantity: -2, unitPrice: 32, lineTotal: 64 })] })
+    );
+    const codes = issues.map((i) => i.code);
+    expect(codes).toContain("LINE_NEGATIVE_PACKAGE_QUANTITY");
+    expect(codes).not.toContain("LINE_RECOGNIZED_AS_CREDIT");
+  });
+
+  it("does NOT recognize a credit when quantity/total are negative but the arithmetic doesn't reconcile", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({ lines: [baseLine({ packageQuantity: -2, unitPrice: 10, lineTotal: -999 })] })
+    );
+    const codes = issues.map((i) => i.code);
+    expect(codes).toContain("LINE_NEGATIVE_PACKAGE_QUANTITY");
+    expect(codes).toContain("LINE_NEGATIVE_TOTAL");
+    expect(codes).not.toContain("LINE_RECOGNIZED_AS_CREDIT");
+  });
+
+  it("does not recognize an ordinary positive purchase line as a credit", () => {
+    const { issues } = validateInvoiceExtraction(baseExtraction({ lines: [baseLine({ packageQuantity: 4, unitPrice: 17.5, lineTotal: 70 })] }));
+    expect(issues.some((i) => i.code === "LINE_RECOGNIZED_AS_CREDIT")).toBe(false);
+  });
+});
+
+describe("validateInvoiceExtraction -- zero-value/free lines are not automatically invalid", () => {
+  it("does not flag a positive-quantity, zero-total line described as FREE", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({ lines: [baseLine({ description: "#24 MOP HEAD (1/1) FREE", packageQuantity: 1, unitPrice: 0, lineTotal: 0 })] })
+    );
+    const codes = issues.map((i) => i.code);
+    expect(codes).not.toContain("LINE_NEGATIVE_TOTAL");
+    expect(codes).not.toContain("LINE_NEGATIVE_PACKAGE_QUANTITY");
+    expect(codes).not.toContain("LINE_NEGATIVE_UNIT_PRICE");
+  });
+
+  it("does not flag a zero-total line with no explicit FREE wording either -- Capital Paper's BROOM (1/1) line", () => {
+    const { issues } = validateInvoiceExtraction(baseExtraction({ lines: [baseLine({ description: "BROOM (1/1)", packageQuantity: 1, unitPrice: 0, lineTotal: 0 })] }));
+    expect(issues.some((i) => i.code.startsWith("LINE_NEGATIVE"))).toBe(false);
   });
 });

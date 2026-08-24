@@ -44,6 +44,9 @@ export const GeminiInvoiceExtractionSchema = z.object({
   tax: z.number().nullable(),
   fees: z.number().nullable(),
   total: z.number().nullable(),
+  /** Distinct from `total` -- a vendor-printed account balance / amount
+   * due that includes prior invoices, when recognized. See types.ts. */
+  amountDue: z.number().nullable(),
   currency: z.string().nullable(),
   lines: z.array(GeminiInvoiceLineSchema),
   warnings: z.array(z.string()),

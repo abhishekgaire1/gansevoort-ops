@@ -15,6 +15,7 @@ import type { ReceivingLineEdit } from "@/app/lib/receiving/effectiveReceivingEd
 import { computeReceivingPrefill, recomputeFixedConversionVerifiedQuantity } from "@/app/lib/receiving/computeReceivingPrefill";
 import { mergeReceivingLineState, type ReceivingLineDraft } from "@/app/lib/receiving/mergeReceivingLineState";
 import type { ReceivingLineInfo } from "@/app/lib/receiving/getReceivingLines";
+import { InlineValidationMessage } from "@/app/components/receiving/InlineValidationMessage";
 
 /**
  * Step 3 -- "the invoice is what we expected, the manager only changes
@@ -386,7 +387,8 @@ export function ReceivingPanel({
   return (
     <div className="mt-4 flex flex-col gap-4">
       <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Receive Delivery</h2>
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Confirm Receiving</h2>
+        <p className="mt-1 text-xs text-zinc-600">Record what was actually received per line. The physical delivery itself was already checked before this invoice was entered.</p>
 
         {receipts === null ? (
           <p className="mt-3 text-sm text-zinc-500">Loading…</p>
@@ -586,11 +588,22 @@ export function ReceivingPanel({
           {lineState.map((l) => {
             const ready = lineIsReady(l);
             return (
-              <div key={l.lineKey} className={`flex flex-col gap-2 p-4 ${ready ? "" : "bg-amber-950/10"}`}>
+              <div id={`receiving-line-${l.lineKey}`} key={l.lineKey} className={`flex flex-col gap-2 p-4 ${ready ? "" : "bg-amber-950/10"}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-100">{l.info.description ?? "—"}</span>
                   <span className={`shrink-0 text-xs font-semibold ${ready ? "text-emerald-400" : "text-amber-400"}`}>{ready ? "✓ Ready" : "⚠ Needs input"}</span>
                 </div>
+                {!ready ? (
+                  <InlineValidationMessage>
+                    {l.receivedQuantity.trim() === ""
+                      ? "Enter the received quantity."
+                      : l.info.requiresVerifiedMeasurement && l.verifiedQuantity.trim() === ""
+                        ? `Enter the verified ${l.info.baseUnitCode ?? "measurement"}.`
+                        : l.locationId.trim() === ""
+                          ? "Choose a storage location."
+                          : "Needs attention."}
+                  </InlineValidationMessage>
+                ) : null}
                 {needsInvoiceUnitResolution(l) ? (
                   <div className="flex flex-col gap-2 rounded-lg border border-amber-800 bg-amber-950/20 p-3">
                     {l.invoiceUnitConflict ? (

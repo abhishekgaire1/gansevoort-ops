@@ -75,11 +75,17 @@ function buildFakeServiceClient(opts: { claimResult: FakeResult; documentResult?
 
   const download = vi.fn().mockResolvedValue(opts.downloadResult ?? { data: null, error: { message: "not found" } });
   const storageFrom = vi.fn(() => ({ download }));
+  // AI Configuration + Usage/Cost Tracking milestone: executeAITask's
+  // best-effort usage write calls this -- stubbed so it succeeds quietly
+  // rather than exercising (harmless but noisy) its own internal
+  // catch-and-log path in every test here.
+  const rpc = vi.fn().mockResolvedValue({ data: [{ out_event_id: "usage-event-1" }], error: null });
 
   return {
-    client: { from, storage: { from: storageFrom } } as unknown as SupabaseClient,
+    client: { from, storage: { from: storageFrom }, rpc } as unknown as SupabaseClient,
     from,
     download,
+    rpc,
     updates,
   };
 }
@@ -128,7 +134,7 @@ describe("runDocumentExtractionAttempt -- successful run", () => {
   it("downloads the document, runs extraction with the attempt's own model, and marks the attempt SUCCEEDED with sanitized provider metadata", async () => {
     const fake = buildFakeServiceClient({
       claimResult: {
-        data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", model: "gemini-3.6-flash" },
+        data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", provider: "gemini", model: "gemini-3.6-flash" },
         error: null,
       },
       documentResult: { data: { storage_path: "org/org-1/documents/doc-1/original.pdf" }, error: null },
@@ -182,7 +188,7 @@ describe("runDocumentExtractionAttempt -- failed run", () => {
   it("marks the attempt FAILED with the provider's error code when extraction throws an AIProviderError", async () => {
     const fake = buildFakeServiceClient({
       claimResult: {
-        data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", model: "gemini-3.6-flash" },
+        data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", provider: "gemini", model: "gemini-3.6-flash" },
         error: null,
       },
       documentResult: { data: { storage_path: "org/org-1/documents/doc-1/original.pdf" }, error: null },
@@ -207,7 +213,7 @@ describe("runDocumentExtractionAttempt -- failed run", () => {
   it("marks the attempt FAILED with an UNKNOWN code for a non-AIProviderError failure (e.g. document/download errors)", async () => {
     const fake = buildFakeServiceClient({
       claimResult: {
-        data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", model: "gemini-3.6-flash" },
+        data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", provider: "gemini", model: "gemini-3.6-flash" },
         error: null,
       },
       documentResult: { data: null, error: { message: "not found" } },

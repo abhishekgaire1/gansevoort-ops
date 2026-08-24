@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { listInventoryBalancesForOrganization, adjustInventoryFullReference } from "@/app/actions/inventory";
 import type { InventoryBalanceRow } from "@/app/lib/inventory/listInventoryBalances";
 import { computeStockGauge, stockLevelFillClass, stockLevelTextClass, STOCK_LEVEL_LABEL, type StockLevel } from "@/app/lib/inventory/stockLevel";
@@ -200,20 +201,36 @@ function formatQuantity(value: number): string {
   return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
 }
 
+/**
+ * Clickable card -> item detail (Inventory Item Detail + Activity
+ * History milestone, Part 7) -- a "stretched link" covering the whole
+ * card, with Adjust Full Level as an independently-clickable sibling
+ * layered above it (never a <button> nested inside the <Link>, which
+ * would be invalid, inaccessible HTML). The Link's own visible content is
+ * empty (just an accessible name); the actual card content sits in a
+ * pointer-events-none layer on top so clicks fall through to the Link
+ * everywhere except the button, which re-enables its own pointer events.
+ */
 function StockCard({ row, onAdjust }: { row: InventoryBalanceRow; onAdjust: () => void }) {
   const gauge = computeStockGauge(row.balance, row.fullReferenceQuantity);
+  const detailHref = `/manager/inventory/items/${row.inventoryItemId}?location=${row.locationId}`;
 
   return (
-    <div className="flex gap-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+    <div className="group relative flex gap-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-4 transition-colors hover:border-zinc-600">
+      <Link
+        href={detailHref}
+        className="absolute inset-0 z-0 rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+        aria-label={`View details for ${row.itemName} at ${row.locationName}`}
+      />
       {/* Tank gauge -- fills from the BOTTOM upward. */}
-      <div className="relative h-28 w-16 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950">
+      <div className="pointer-events-none relative z-10 h-28 w-16 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950">
         <div
           className={`absolute inset-x-0 bottom-0 transition-all ${stockLevelFillClass(gauge.level)}`}
           style={{ height: `${gauge.fillPercent}%` }}
         />
       </div>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-semibold text-zinc-100">{row.itemName}</p>
+      <div className="pointer-events-none relative z-10 min-w-0 flex-1">
+        <p className="truncate text-sm font-semibold text-zinc-100 group-hover:text-amber-300">{row.itemName}</p>
         <p className="truncate text-xs text-zinc-500">{row.locationName}</p>
         {row.fullReferenceQuantity === null ? (
           <p className="mt-2 text-sm text-zinc-400">
@@ -237,7 +254,11 @@ function StockCard({ row, onAdjust }: { row: InventoryBalanceRow; onAdjust: () =
             Includes estimated allocation from legacy withdrawals
           </p>
         ) : null}
-        <button type="button" onClick={onAdjust} className="mt-2 text-xs text-zinc-400 underline underline-offset-2 hover:text-zinc-200">
+        <button
+          type="button"
+          onClick={onAdjust}
+          className="pointer-events-auto relative z-20 mt-2 text-xs text-zinc-400 underline underline-offset-2 hover:text-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+        >
           Adjust Full Level
         </button>
       </div>

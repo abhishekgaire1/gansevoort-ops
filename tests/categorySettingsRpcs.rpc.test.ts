@@ -15,10 +15,13 @@ import { setupRpcTestFixtures, type RpcTestFixtures } from "./testFixtures";
  * MANUAL / ON-DEMAND ONLY -- see purchaseDocuments.rpc.test.ts's header
  * comment.
  *
- * Proves the /manager/settings/categories admin RPCs (20260811100048)
- * against real Postgres: create/rename/activate/deactivate for both
- * inventory and spend categories, duplicate-name rejection on rename, and
- * that every write is audited.
+ * Proves the Admin -> Categories RPCs (20260811100048, flattened by the
+ * Flat Category Architecture milestone's 20260811100102) against real
+ * Postgres: create/rename/activate/deactivate for both inventory and
+ * expense (spend_categories) categories, duplicate-name rejection, and
+ * that every write is audited. Categories are ONE LEVEL ONLY (Part 1-3)
+ * -- create_spend_category no longer accepts a parent, and duplicate
+ * checking is flat/global per organization+type, not per-level.
  */
 
 let fx: RpcTestFixtures;
@@ -82,34 +85,43 @@ describe("category settings RPCs", () => {
     expect(audits!.map((a) => a.action).sort()).toEqual(["INVENTORY_CATEGORY_ACTIVATED", "INVENTORY_CATEGORY_DEACTIVATED"]);
   });
 
-  it("renames a spend category, respecting per-level (not global) duplicate checking", async () => {
-    const rootName = `TEST Settings Spend Root ${randomUUID().slice(0, 8)}`;
-    const { categoryId: rootId } = await createSpendCategoryRpc(fx.supabase, { organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId, name: rootName, parentId: null });
+  it("creates a flat expense category (no parent) and renames it, preserving its id", async () => {
+    const original = `TEST Settings Spend Flat ${randomUUID().slice(0, 8)}`;
+    const renamed = `${original} Renamed`;
+    const { categoryId } = await createSpendCategoryRpc(fx.supabase, { organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId, name: original });
 
-    const childName = `TEST Settings Spend Child ${randomUUID().slice(0, 8)}`;
-    const { categoryId: childId } = await createSpendCategoryRpc(fx.supabase, {
-      organizationId: fx.organizationId,
-      appUserId: fx.changeableEmployeeAppUserId,
-      name: childName,
-      parentId: rootId,
-    });
+    const { data: created } = await fx.supabase.from("spend_categories").select("id, parent_id").eq("id", categoryId).single();
+    expect(created!.parent_id).toBeNull();
 
-    // Renaming the child to the SAME name as the root is fine -- different levels.
-    await renameSpendCategoryRpc(fx.supabase, { organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId, categoryId: childId, newName: rootName });
-    const { data: row } = await fx.supabase.from("spend_categories").select("name").eq("id", childId).single();
-    expect(row!.name).toBe(rootName);
+    await renameSpendCategoryRpc(fx.supabase, { organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId, categoryId, newName: renamed });
+    const { data: row } = await fx.supabase.from("spend_categories").select("id, name").eq("id", categoryId).single();
+    expect(row!.id).toBe(categoryId);
+    expect(row!.name).toBe(renamed);
   });
 
-  it("deactivates a spend category", async () => {
+  it("rejects an exact-duplicate expense category name within the same org -- flat/global, not per-level", async () => {
+    const name = `TEST Settings Spend Dup ${randomUUID().slice(0, 8)}`;
+    await createSpendCategoryRpc(fx.supabase, { organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId, name });
+
+    await expect(createSpendCategoryRpc(fx.supabase, { organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId, name: `  ${name.toUpperCase()}  ` })).rejects.toBeInstanceOf(
+      CategoryAlreadyExistsError
+    );
+  });
+
+  it("deactivates and reactivates an expense category, auditing both, same id preserved", async () => {
     const { categoryId } = await createSpendCategoryRpc(fx.supabase, {
       organizationId: fx.organizationId,
       appUserId: fx.changeableEmployeeAppUserId,
       name: `TEST Settings Spend Toggle ${randomUUID().slice(0, 8)}`,
-      parentId: null,
     });
 
     await setSpendCategoryActiveRpc(fx.supabase, { organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId, categoryId, isActive: false });
-    const { data: row } = await fx.supabase.from("spend_categories").select("is_active").eq("id", categoryId).single();
+    let { data: row } = await fx.supabase.from("spend_categories").select("id, is_active").eq("id", categoryId).single();
     expect(row!.is_active).toBe(false);
+
+    await setSpendCategoryActiveRpc(fx.supabase, { organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId, categoryId, isActive: true });
+    ({ data: row } = await fx.supabase.from("spend_categories").select("id, is_active").eq("id", categoryId).single());
+    expect(row!.id).toBe(categoryId);
+    expect(row!.is_active).toBe(true);
   });
 });

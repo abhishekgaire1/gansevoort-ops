@@ -73,11 +73,12 @@ export async function verifyPinCore(
   const { data: appUser, error: lookupError } = await supabase
     .from("app_users")
     .select(
-      "id, pin_hash, employee_id, employees(first_name, last_name, default_station_id, auto_resolve_station, can_change_station)"
+      "id, pin_hash, employee_id, employees!inner(first_name, last_name, default_station_id, auto_resolve_station, can_change_station)"
     )
     .eq("organization_id", organizationId)
     .eq("pin_lookup_hash", pinLookupHash)
     .eq("is_active", true)
+    .eq("employees.status", "active")
     .maybeSingle();
 
   if (lookupError) {
@@ -85,12 +86,15 @@ export async function verifyPinCore(
   }
 
   if (!appUser) {
-    // No matching employee, or a matching PIN belonging to an inactive
-    // app_user -- both are intentionally indistinguishable from the
-    // outside. The rate limit check above is the only thing throttling
-    // this case. Still runs a real Argon2id verification (against a
-    // precomputed dummy hash) so this path isn't distinguishable from a
-    // real wrong-PIN attempt by timing.
+    // No matching employee, a matching PIN belonging to an inactive
+    // app_user, or (Admin Foundation milestone fix -- see that
+    // milestone's final report) a matching PIN whose linked employee has
+    // been deactivated via Admin even though app_users.is_active was
+    // somehow left true -- all three are intentionally indistinguishable
+    // from the outside. The rate limit check above is the only thing
+    // throttling this case. Still runs a real Argon2id verification
+    // (against a precomputed dummy hash) so this path isn't
+    // distinguishable from a real wrong-PIN attempt by timing.
     await runDummyPinVerification();
     return { ok: false, reason: "invalid_pin" };
   }

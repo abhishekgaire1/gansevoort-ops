@@ -29,6 +29,7 @@ const VALID_EXTRACTION = {
   tax: 0,
   fees: 0,
   total: 134.7,
+  amountDue: null,
   currency: "USD",
   lines: [VALID_LINE],
   warnings: [],
@@ -54,6 +55,7 @@ describe("GeminiInvoiceExtractionSchema", () => {
       tax: null,
       fees: null,
       total: null,
+      amountDue: null,
       currency: null,
       lines: [],
       warnings: [],
@@ -106,6 +108,18 @@ describe("GeminiInvoiceExtractionSchema", () => {
     const withoutVendorName: Record<string, unknown> = { ...VALID_EXTRACTION };
     delete withoutVendorName.vendorName;
     const result = GeminiInvoiceExtractionSchema.safeParse(withoutVendorName);
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts amountDue as a number, distinct from total -- the account-balance/amount-due concept", () => {
+    const result = GeminiInvoiceExtractionSchema.safeParse({ ...VALID_EXTRACTION, total: 3336, amountDue: 15565.5 });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects omitting amountDue entirely (must be null, not absent, like every other nullable field)", () => {
+    const withoutAmountDue: Record<string, unknown> = { ...VALID_EXTRACTION };
+    delete withoutAmountDue.amountDue;
+    const result = GeminiInvoiceExtractionSchema.safeParse(withoutAmountDue);
     expect(result.success).toBe(false);
   });
 });

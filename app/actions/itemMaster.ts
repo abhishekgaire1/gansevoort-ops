@@ -1,6 +1,6 @@
 "use server";
 
-import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
+import { requireManagerOrAdmin, requireAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { rejectItemProposalRpc } from "@/app/lib/itemMaster/rejectItemProposalRpc";
 import {
@@ -11,7 +11,7 @@ import {
   renameSpendCategoryRpc,
   setSpendCategoryActiveRpc,
 } from "@/app/lib/itemMaster/createCategoryRpc";
-import { ItemProposalReferencedError, ItemNotPendingReviewError, CategoryAlreadyExistsError } from "@/app/lib/itemMaster/errors";
+import { ItemProposalReferencedError, ItemNotPendingReviewError, CategoryAlreadyExistsError, CategoryDeactivationBlockedError } from "@/app/lib/itemMaster/errors";
 
 export interface InventoryItemSummary {
   id: string;
@@ -25,6 +25,13 @@ export interface InventoryItemSummary {
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+/** Category creation/rename/activation is Admin-only (Admin Master Data
+ * milestone, Part 23/41) -- taxonomy control is a configuration
+ * responsibility, not something any Manager can casually do from a
+ * Receiving review screen. The read paths above (listInventoryCategories/
+ * listSpendCategories) stay Manager-readable -- Managers SELECT approved
+ * categories, they just no longer CREATE them. */
+const ADMIN_NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as an Admin." };
 
 export type ListInventoryItemsResult = { ok: true; items: InventoryItemSummary[] } | AuthFailure;
 
@@ -167,12 +174,14 @@ export type CreateCategoryResult =
   | AuthFailure
   | { ok: false; reason: "duplicate" | "invalid_name" | "misconfigured"; message: string };
 
-/** Managers may create a missing canonical inventory category on the spot
- * -- the seeded taxonomy (scripts/seed-canonical-categories.ts) is a
- * starting point, not permanently closed. AI never calls this itself. */
+/** Admin-only (Part 23) -- the seeded taxonomy
+ * (scripts/seed-canonical-categories.ts) is a starting point, not
+ * permanently closed, but new categories are now deliberately created
+ * from Admin > Categories, never on the spot inside a Receiving review.
+ * AI never calls this itself. */
 export async function createInventoryCategory(name: string): Promise<CreateCategoryResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireAdmin();
+  if (!auth.ok) return ADMIN_NOT_AUTHORIZED;
 
   if (!name.trim()) {
     return { ok: false, reason: "invalid_name", message: "A category name is required." };
@@ -193,9 +202,12 @@ export async function createInventoryCategory(name: string): Promise<CreateCateg
   }
 }
 
-export async function createSpendCategory(name: string, parentId: string | null): Promise<CreateCategoryResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+/** Flat Category Architecture milestone: one level only -- no parent
+ * parameter (Part 10). Expense Categories in the UI, spend_categories in
+ * the database (Part 3) -- the table/RPC names stay unchanged. */
+export async function createSpendCategory(name: string): Promise<CreateCategoryResult> {
+  const auth = await requireAdmin();
+  if (!auth.ok) return ADMIN_NOT_AUTHORIZED;
 
   if (!name.trim()) {
     return { ok: false, reason: "invalid_name", message: "A category name is required." };
@@ -206,22 +218,21 @@ export async function createSpendCategory(name: string, parentId: string | null)
       organizationId: auth.manager.organizationId,
       appUserId: auth.manager.appUserId,
       name: name.trim(),
-      parentId,
     });
     return { ok: true, categoryId: result.categoryId };
   } catch (err) {
     if (err instanceof CategoryAlreadyExistsError) {
-      return { ok: false, reason: "duplicate", message: "A spend category with that name already exists at that level." };
+      return { ok: false, reason: "duplicate", message: "An expense category with that name already exists." };
     }
     return { ok: false, reason: "misconfigured", message: "Could not create the spend category. Try again." };
   }
 }
 
-export type CategoryActionResult = { ok: true } | AuthFailure | { ok: false; reason: "duplicate" | "invalid_name" | "misconfigured"; message: string };
+export type CategoryActionResult = { ok: true } | AuthFailure | { ok: false; reason: "duplicate" | "invalid_name" | "blocked" | "misconfigured"; message: string };
 
 export async function renameInventoryCategory(categoryId: string, newName: string): Promise<CategoryActionResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireAdmin();
+  if (!auth.ok) return ADMIN_NOT_AUTHORIZED;
   if (!newName.trim()) return { ok: false, reason: "invalid_name", message: "A category name is required." };
 
   try {
@@ -233,21 +244,26 @@ export async function renameInventoryCategory(categoryId: string, newName: strin
   }
 }
 
+/** Deactivation is blocked server-side while active inventory items still
+ * reference this category (Part 29) -- CategoryDeactivationBlockedError
+ * carries the exact "N active inventory items use it, reassign those
+ * items first" message the RPC raises. */
 export async function setInventoryCategoryActive(categoryId: string, isActive: boolean): Promise<CategoryActionResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireAdmin();
+  if (!auth.ok) return ADMIN_NOT_AUTHORIZED;
 
   try {
     await setInventoryCategoryActiveRpc(getServiceRoleClient(), { organizationId: auth.manager.organizationId, appUserId: auth.manager.appUserId, categoryId, isActive });
     return { ok: true };
-  } catch {
+  } catch (err) {
+    if (err instanceof CategoryDeactivationBlockedError) return { ok: false, reason: "blocked", message: err.message };
     return { ok: false, reason: "misconfigured", message: "Could not update the category. Try again." };
   }
 }
 
 export async function renameSpendCategory(categoryId: string, newName: string): Promise<CategoryActionResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireAdmin();
+  if (!auth.ok) return ADMIN_NOT_AUTHORIZED;
   if (!newName.trim()) return { ok: false, reason: "invalid_name", message: "A category name is required." };
 
   try {
@@ -259,14 +275,18 @@ export async function renameSpendCategory(categoryId: string, newName: string): 
   }
 }
 
+/** Deactivation is blocked server-side while active child categories
+ * still exist under this one (Part 29) -- historical usage alone (past
+ * classified expense lines) never blocks. */
 export async function setSpendCategoryActive(categoryId: string, isActive: boolean): Promise<CategoryActionResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireAdmin();
+  if (!auth.ok) return ADMIN_NOT_AUTHORIZED;
 
   try {
     await setSpendCategoryActiveRpc(getServiceRoleClient(), { organizationId: auth.manager.organizationId, appUserId: auth.manager.appUserId, categoryId, isActive });
     return { ok: true };
-  } catch {
+  } catch (err) {
+    if (err instanceof CategoryDeactivationBlockedError) return { ok: false, reason: "blocked", message: err.message };
     return { ok: false, reason: "misconfigured", message: "Could not update the spend category. Try again." };
   }
 }

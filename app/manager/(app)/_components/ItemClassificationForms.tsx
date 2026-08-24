@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { approveNewItemClassification } from "@/app/actions/itemClassification";
-import { createInventoryCategory, createSpendCategory } from "@/app/actions/itemMaster";
 import type { InventoryItemSummary, CategorySummary } from "@/app/actions/itemMaster";
 import type { UnitSummary } from "@/app/actions/itemMaster";
 import { computeNewItemVerificationStatus } from "@/app/lib/itemMaster/newItemVerification";
@@ -79,76 +78,22 @@ export interface NewItemApprovalDefaults {
   fixedConversionFactor: number | null;
 }
 
-function CreateCategoryInline({
-  kind,
-  parentOptions,
-  onCreated,
-}: {
-  kind: "inventory" | "spend";
-  parentOptions?: SpendCategoryPath[];
-  onCreated: (id: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [parentId, setParentId] = useState("");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  if (!open) {
-    return (
-      <button type="button" onClick={() => setOpen(true)} className="mt-1 self-start text-xs text-amber-300 hover:text-amber-200">
-        + Create {kind === "inventory" ? "Inventory" : "Spend"} Category
-      </button>
-    );
-  }
-
-  async function handleCreate() {
-    if (!name.trim()) {
-      setError("A name is required.");
-      return;
-    }
-    setPending(true);
-    setError(null);
-    const result = kind === "inventory" ? await createInventoryCategory(name.trim()) : await createSpendCategory(name.trim(), parentId || null);
-    setPending(false);
-    if (!result.ok) {
-      setError(result.message);
-      return;
-    }
-    onCreated(result.categoryId);
-    setOpen(false);
-    setName("");
-    setParentId("");
-  }
-
+/** Admin Master Data milestone (Part 23): category creation is Admin-only
+ * -- there is deliberately no "+ Create Category" here anymore. If the
+ * right category doesn't exist yet, the manager leaves this item's
+ * category unresolved (VERIFY ITEM stays disabled, same as any other
+ * missing required field) and asks an Admin to add it from Admin >
+ * Categories; "Refresh" re-fetches the list without closing this review,
+ * so the new category is selectable the moment it exists. */
+function CategoryNotListedHint({ onRefresh }: { onRefresh: () => void }) {
   return (
-    <div className="mt-1 flex flex-col gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-2">
-      <input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="Name"
-        className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100"
-      />
-      {kind === "spend" && parentOptions ? (
-        <select value={parentId} onChange={(e) => setParentId(e.target.value)} className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100">
-          <option value="">No parent (root category)</option>
-          {parentOptions.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.path}
-            </option>
-          ))}
-        </select>
-      ) : null}
-      {error ? <p className="text-xs text-red-400">{error}</p> : null}
-      <div className="flex items-center gap-2">
-        <button type="button" onClick={handleCreate} disabled={pending} className="rounded-full bg-amber-400 px-2.5 py-1 text-xs font-semibold text-zinc-950 disabled:opacity-40">
-          {pending ? "Creating…" : "Create & Select"}
-        </button>
-        <button type="button" onClick={() => setOpen(false)} className="text-xs text-zinc-500 hover:text-zinc-300">
-          Cancel
-        </button>
-      </div>
-    </div>
+    <p className="mt-1 text-[11px] text-zinc-500">
+      Not listed? Ask an Admin to add it in Admin &gt; Categories, then{" "}
+      <button type="button" onClick={onRefresh} className="text-amber-300 hover:text-amber-200">
+        Refresh
+      </button>
+      .
+    </p>
   );
 }
 
@@ -316,13 +261,7 @@ export function NewItemApprovalForm({
                 ))}
               </select>
               {categoryStatus === "changed" ? <ChangedNote /> : null}
-              <CreateCategoryInline
-                kind="inventory"
-                onCreated={(id) => {
-                  setCategoryId(id);
-                  onCategoryCreated();
-                }}
-              />
+              <CategoryNotListedHint onRefresh={onCategoryCreated} />
             </label>
             <label className="flex flex-col gap-1 text-xs text-zinc-400">
               <span className="flex items-center gap-2">
@@ -363,14 +302,7 @@ export function NewItemApprovalForm({
             ))}
           </select>
           {spendCategoryStatus === "changed" ? <ChangedNote /> : null}
-          <CreateCategoryInline
-            kind="spend"
-            parentOptions={spendPaths}
-            onCreated={(id) => {
-              setSpendCategoryId(id);
-              onSpendCategoryCreated();
-            }}
-          />
+          <CategoryNotListedHint onRefresh={onSpendCategoryCreated} />
         </label>
       </div>
 

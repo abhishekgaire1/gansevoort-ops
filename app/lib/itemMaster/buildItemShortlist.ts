@@ -31,6 +31,12 @@ export async function buildItemShortlist(
     .select("id, name, base_unit_id, inventory_categories(name), units(code)")
     .eq("organization_id", organizationId)
     .eq("approval_status", "CONFIRMED")
+    // Canonical Item Master milestone (Part 4/26): classify before match --
+    // a CONFIRMED NON_INVENTORY row (a remembered expense/service
+    // classification, see the item-master migration's header comment) is
+    // never a valid physical-item match candidate, so it must never even
+    // reach the AI's shortlist.
+    .eq("disposition", "INVENTORY")
     .order("name")
     .limit(SHORTLIST_LIMIT);
 

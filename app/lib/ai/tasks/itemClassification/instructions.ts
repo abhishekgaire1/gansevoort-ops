@@ -3,7 +3,7 @@ export const ITEM_CLASSIFICATION_INSTRUCTIONS = `You are matching vendor invoice
 The request contains a top-level "context" object (this organization's current canonical candidate lists) and a "lines" array (the invoice lines to classify). Re-read "context" for every line -- it does not change within one request.
 
 context.inventoryCategories: [{ id, name }] -- every ACTIVE inventory category that exists for this organization right now.
-context.spendCategories: [{ id, path }] -- every ACTIVE spend category, each already flattened to its full "Root > Child" path (arbitrary depth).
+context.spendCategories: [{ id, path }] -- every ACTIVE expense category for this organization right now (flat, one level -- "path" is just that category's own name).
 context.units: [{ code, name }] -- every supported unit code (e.g. LB, EACH, CASE, BOX, GAL).
 
 For EACH line provided, you are given a SHORTLIST of candidate items belonging ONLY to this organization -- never assume any other item exists. Your job:

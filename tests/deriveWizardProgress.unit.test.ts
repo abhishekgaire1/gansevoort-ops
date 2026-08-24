@@ -30,12 +30,28 @@ describe("deriveWizardProgress -- completion never navigates", () => {
     });
     expect(furthestReachableStep).toBe(2); // Continue to Items is now allowed
     expect(activeStep).toBe(1); // but the view does not move
-    expect(steps.find((s) => s.id === 1)?.state).toBe("complete");
+    // Receiving UX pass: the step the manager is CURRENTLY viewing never
+    // shows a completion checkmark, even once its own requirements are
+    // already satisfied -- "current" and "complete" are different facts,
+    // and showing both at once is exactly the confusing state this pass
+    // removes. The checkmark appears once the manager has moved on.
+    expect(steps.find((s) => s.id === 1)?.state).toBe("current");
   });
 
   it("clicking Continue to Items (an explicit requestedStep) is what navigates to step 2", () => {
     const { activeStep } = deriveWizardProgress({ step1Complete: true, step2Complete: null, step3Complete: null, requestedStep: 2 });
     expect(activeStep).toBe(2);
+  });
+
+  it("once the manager has moved on, the now-past step DOES show its completion checkmark", () => {
+    const { steps } = deriveWizardProgress({ step1Complete: true, step2Complete: null, step3Complete: null, requestedStep: 2 });
+    expect(steps.find((s) => s.id === 1)?.state).toBe("complete");
+    expect(steps.find((s) => s.id === 2)?.state).toBe("current");
+  });
+
+  it("a currently-viewed step whose OWN requirements are already met still reads as current, never complete -- true for step 2 as well as step 1", () => {
+    const { steps } = deriveWizardProgress({ step1Complete: true, step2Complete: true, step3Complete: null, requestedStep: 2 });
+    expect(steps.find((s) => s.id === 2)?.state).toBe("current");
   });
 
   it("step 2's AI matching / last new-item verification finishing asynchronously enables Continue but the manager REMAINS on step 2", () => {

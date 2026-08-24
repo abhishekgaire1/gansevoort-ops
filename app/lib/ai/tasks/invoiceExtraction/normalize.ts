@@ -49,6 +49,7 @@ export function normalizeInvoiceExtraction(raw: GeminiInvoiceExtraction): Normal
     tax: normalizeNullableNumber(raw.tax),
     fees: normalizeNullableNumber(raw.fees),
     total: normalizeNullableNumber(raw.total),
+    amountDue: normalizeNullableNumber(raw.amountDue),
     currency: normalizeNullableString(raw.currency),
     lines: raw.lines.map(normalizeLine),
     warnings: raw.warnings.map((w) => w.trim()).filter((w) => w !== ""),

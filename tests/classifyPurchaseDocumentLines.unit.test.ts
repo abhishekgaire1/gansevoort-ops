@@ -27,9 +27,22 @@ vi.mock("@/app/lib/itemMaster/buildItemShortlist", () => ({ buildItemShortlist: 
 const { runItemClassificationMock } = vi.hoisted(() => ({ runItemClassificationMock: vi.fn() }));
 vi.mock("@/app/lib/ai/tasks/itemClassification/runItemClassification", () => ({ runItemClassification: runItemClassificationMock }));
 
-vi.mock("@/app/lib/ai/providers/gemini", () => ({
-  GeminiProvider: class {},
+// AI Configuration + Usage/Cost Tracking milestone: classifyRemainingWithAI
+// now resolves config and executes through the central router -- neither
+// concern belongs to this orchestrator-focused test file (see
+// resolveAIConfig.unit.test.ts / executeAITask.unit.test.ts for those), so
+// both are replaced with a direct passthrough that never touches a real
+// provider or the database.
+vi.mock("@/app/lib/ai/router/resolveAIConfig", () => ({
+  resolveAIConfig: vi.fn(async () => ({ provider: "gemini", model: "gemini-3.6-flash", source: "application_default" })),
 }));
+const { executeAITaskMock } = vi.hoisted(() => ({
+  executeAITaskMock: vi.fn(async (params: { provider: string; model: string; run: (provider: unknown, model: string) => Promise<{ data: unknown }> }) => {
+    const result = await params.run({ name: params.provider }, params.model);
+    return result.data;
+  }),
+}));
+vi.mock("@/app/lib/ai/router/executeAITask", () => ({ executeAITask: executeAITaskMock, AIProviderUnavailableError: class extends Error {} }));
 
 const { resolveDeterministicRpcMock, recordAiSuggestedCandidateRpcMock, recordAiItemProposalRpcMock } = vi.hoisted(() => ({
   resolveDeterministicRpcMock: vi.fn(),
@@ -160,7 +173,8 @@ describe("classifyPurchaseDocumentLines", () => {
       expect.anything(),
       { inventoryCategories: [{ id: "cat-1", name: "Produce" }], spendCategories: [{ id: "spend-1", path: "Food & Beverage" }], units: [{ code: "LB", name: "Pound" }, { code: "EA", name: "Each" }, { code: "CS", name: "Case" }] },
       [expect.objectContaining({ lineKey: "line-b" })],
-      expect.any(Set)
+      expect.any(Set),
+      "gemini-3.6-flash"
     );
 
     expect(recordAiItemProposalRpcMock).toHaveBeenCalledWith(expect.anything(), {
@@ -257,6 +271,160 @@ describe("classifyPurchaseDocumentLines", () => {
 
     await expect(classifyPurchaseDocumentLines("pd-1", "org-1")).rejects.toThrow("provider unavailable");
     expect(finishClaimMock).toHaveBeenCalledWith(expect.anything(), { claimId: "claim-1", organizationId: "org-1", outcome: "FAILED" });
+  });
+
+  it("deterministic matching for one line already persisted before an AI provider outage affecting a different, deterministically-unresolved line -- that work is never rolled back or discarded by the later failure", async () => {
+    getLinesNeedingClassificationMock.mockResolvedValue([LINE_A, LINE_B]);
+    tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
+    resolveDeterministicMock.mockImplementation(async (_supabase, input: { vendorSku: string | null }) =>
+      input.vendorSku === "SKU-A" ? { inventoryItemId: "item-1", resolutionSource: "VENDOR_SKU_MAPPING" } : null
+    );
+    runItemClassificationMock.mockRejectedValue(new Error("provider unavailable"));
+
+    await expect(classifyPurchaseDocumentLines("pd-1", "org-1")).rejects.toThrow("provider unavailable");
+
+    // LINE_A's deterministic write already happened (its own independent
+    // RPC call, already committed) before the shared AI call for LINE_B
+    // ever ran -- a later provider outage for the AI-only subset can never
+    // undo it.
+    expect(resolveDeterministicRpcMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lineKey: "line-a" }));
+    expect(finishClaimMock).toHaveBeenCalledWith(expect.anything(), { claimId: "claim-1", organizationId: "org-1", outcome: "FAILED" });
+  });
+
+  // ============================================================
+  // Item Matching Robustness fix -- per-line isolation.
+  //
+  // Reproduced against a real invoice (Capital Paper Inc #178606): the
+  // per-result-line write loop had no per-iteration isolation, so a single
+  // line's RPC write failing (confirmed root cause: two DIFFERENT lines --
+  // a normal purchase and a separate credit/return of the same physical
+  // product -- both AI-proposed as the identical brand-new item name,
+  // "Black Dome Lid for Hot Cup"; the second write hit
+  // inventory_items_org_lower_name_key) aborted the entire batch, discarding
+  // every other line's already-successful result and marking the whole run
+  // FAILED even though the AI call itself succeeded. These tests prove the
+  // orchestrator no longer does that, as defense-in-depth alongside the
+  // dedicated SQL-level fix (20260811100079_ai_item_proposal_cross_line_
+  // name_collision.sql) that makes record_ai_item_proposal itself reuse
+  // the sibling's item instead of raising.
+  // ============================================================
+
+  it("Capital Paper regression: a normal purchase line and a credit line for the same product both propose the same new-item name -- one line's write failing does not abort the other's, and the run still finishes SUCCEEDED", async () => {
+    const purchaseLine = { lineKey: "line-13", vendorSku: "DDLBSW", description: "SW---- BLACK DOME LID HOT CU", packageUnit: "CS", measuredUnit: "EA" };
+    const creditLine = { lineKey: "line-62", vendorSku: "DDLBCR", description: "CREDIT ------ BLACK DOME LID HO", packageUnit: "CS", measuredUnit: "EA" };
+    getLinesNeedingClassificationMock.mockResolvedValue([purchaseLine, creditLine]);
+    tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
+    resolveDeterministicMock.mockResolvedValue(null);
+    runItemClassificationMock.mockResolvedValue({
+      lines: [
+        { lineKey: "line-13", candidateItemId: null, proposedName: "Black Dome Lid for Hot Cup", proposedDisposition: "INVENTORY", proposedCategoryId: null, proposedSpendCategoryId: null, proposedBaseUnitCode: "EA", confidence: 0.9, reasoning: null },
+        { lineKey: "line-62", candidateItemId: null, proposedName: "Black Dome Lid for Hot Cup", proposedDisposition: "INVENTORY", proposedCategoryId: null, proposedSpendCategoryId: null, proposedBaseUnitCode: "EA", confidence: 0.9, reasoning: null },
+      ],
+      issues: [],
+      raw: {},
+      model: "gemini-3.6-flash",
+      provider: "gemini",
+    });
+    // line-13 (processed first in the AI's own response order) succeeds and
+    // creates the new PENDING_REVIEW item; line-62's identical proposal
+    // hits the exact raw Postgres error captured from the real 4th
+    // diagnostic run against the actual document.
+    recordAiItemProposalRpcMock
+      .mockResolvedValueOnce({ inventoryItemId: "new-item-black-dome-lid" })
+      .mockRejectedValueOnce(new Error('duplicate key value violates unique constraint "inventory_items_org_lower_name_key"'));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await classifyPurchaseDocumentLines("pd-1", "org-1");
+
+    expect(recordAiItemProposalRpcMock).toHaveBeenCalledTimes(2);
+    expect(recordAiItemProposalRpcMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ lineKey: "line-13", proposedName: "Black Dome Lid for Hot Cup" }));
+    expect(recordAiItemProposalRpcMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ lineKey: "line-62", proposedName: "Black Dome Lid for Hot Cup" }));
+    // The whole run still finishes SUCCEEDED -- never FAILED just because
+    // one of the two lines hit a write error.
+    expect(finishClaimMock).toHaveBeenCalledWith(expect.anything(), { claimId: "claim-1", organizationId: "org-1", outcome: "SUCCEEDED" });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "[item-classification] failed to record AI result for one line",
+      expect.objectContaining({ lineKey: "line-62" })
+    );
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("one line's deterministic-tier write failing does not prevent a later line's deterministic write, and the run still finishes SUCCEEDED", async () => {
+    const lineC = { lineKey: "line-c", vendorSku: "SKU-C", description: "Paper Towels", packageUnit: "CS", measuredUnit: "EA" };
+    getLinesNeedingClassificationMock.mockResolvedValue([LINE_A, lineC]);
+    tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
+    resolveDeterministicMock.mockResolvedValue({ inventoryItemId: "item-1", resolutionSource: "VENDOR_SKU_MAPPING" });
+    resolveDeterministicRpcMock.mockRejectedValueOnce(new Error("transient RPC error")).mockResolvedValueOnce(undefined);
+    // LINE_A's write throws, so it falls through to the AI tier as a
+    // fallback (this test's own point is that lineC's write still
+    // succeeds regardless -- what the AI does with LINE_A afterward is
+    // covered by the other AI-tier tests).
+    runItemClassificationMock.mockResolvedValue({
+      lines: [{ lineKey: "line-a", candidateItemId: null, proposedName: null, proposedDisposition: null, proposedCategoryId: null, proposedSpendCategoryId: null, proposedBaseUnitCode: null, confidence: null, reasoning: null }],
+      issues: [],
+      raw: {},
+      model: "gemini-3.6-flash",
+      provider: "gemini",
+    });
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await classifyPurchaseDocumentLines("pd-1", "org-1");
+
+    expect(resolveDeterministicRpcMock).toHaveBeenCalledTimes(2);
+    expect(finishClaimMock).toHaveBeenCalledWith(expect.anything(), { claimId: "claim-1", organizationId: "org-1", outcome: "SUCCEEDED" });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "[item-classification] deterministic resolution failed for one line",
+      expect.objectContaining({ lineKey: "line-a" })
+    );
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("a VerifiedLockedError (document moved out of DRAFT/READY_FOR_VERIFICATION mid-run) is a genuine whole-run failure -- it is NOT isolated, stops the loop, and finishes FAILED", async () => {
+    const { VerifiedLockedError } = await import("@/app/lib/purchaseDocuments/errors");
+    const lineC = { lineKey: "line-c", vendorSku: "SKU-C", description: "Paper Towels", packageUnit: "CS", measuredUnit: "EA" };
+    getLinesNeedingClassificationMock.mockResolvedValue([LINE_A, lineC]);
+    tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
+    resolveDeterministicMock.mockResolvedValue({ inventoryItemId: "item-1", resolutionSource: "VENDOR_SKU_MAPPING" });
+    resolveDeterministicRpcMock.mockRejectedValueOnce(new VerifiedLockedError("purchase_document is VERIFIED"));
+
+    await expect(classifyPurchaseDocumentLines("pd-1", "org-1")).rejects.toThrow("purchase_document is VERIFIED");
+
+    // The second line is never reached -- every remaining write would fail
+    // identically once the document itself is no longer writable.
+    expect(resolveDeterministicRpcMock).toHaveBeenCalledTimes(1);
+    expect(finishClaimMock).toHaveBeenCalledWith(expect.anything(), { claimId: "claim-1", organizationId: "org-1", outcome: "FAILED" });
+  });
+
+  it("one line's shortlist lookup failing does not block the shared AI call -- that line is sent through with an empty shortlist", async () => {
+    const lineC = { lineKey: "line-c", vendorSku: "SKU-C", description: "Paper Towels", packageUnit: "CS", measuredUnit: "EA" };
+    getLinesNeedingClassificationMock.mockResolvedValue([LINE_B, lineC]);
+    tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
+    resolveDeterministicMock.mockResolvedValue(null);
+    buildShortlistMock.mockRejectedValueOnce(new Error("shortlist lookup timed out")).mockResolvedValueOnce([{ id: "cand-1", name: "Paper Towels" }]);
+    runItemClassificationMock.mockResolvedValue({
+      lines: [
+        { lineKey: "line-b", candidateItemId: null, proposedName: null, proposedDisposition: null, proposedCategoryId: null, proposedSpendCategoryId: null, proposedBaseUnitCode: null, confidence: null, reasoning: null },
+        { lineKey: "line-c", candidateItemId: "cand-1", proposedName: null, proposedDisposition: null, proposedCategoryId: null, proposedSpendCategoryId: null, proposedBaseUnitCode: null, confidence: 0.7, reasoning: null },
+      ],
+      issues: [],
+      raw: {},
+      model: "gemini-3.6-flash",
+      provider: "gemini",
+    });
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await classifyPurchaseDocumentLines("pd-1", "org-1");
+
+    expect(runItemClassificationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      [expect.objectContaining({ lineKey: "line-b", shortlist: [] }), expect.objectContaining({ lineKey: "line-c" })],
+      expect.any(Set),
+      "gemini-3.6-flash"
+    );
+    expect(recordAiSuggestedCandidateRpcMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lineKey: "line-c" }));
+    expect(finishClaimMock).toHaveBeenCalledWith(expect.anything(), { claimId: "claim-1", organizationId: "org-1", outcome: "SUCCEEDED" });
+    consoleErrorSpy.mockRestore();
   });
 
   it("leaves a line with neither a candidate nor a usable proposal unwritten so the next run picks it back up", async () => {

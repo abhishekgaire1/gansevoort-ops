@@ -368,6 +368,7 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
       declaredDocumentType={document?.declared_document_type ?? null}
       aiSuggestedVendorName={normalized?.vendorName ?? null}
       aiSuggestedDocumentType={normalized?.documentType ?? null}
+      aiAmountDue={normalized?.amountDue ?? null}
       aiWarnings={normalized?.warnings ?? []}
       aiReviewFlags={(extractionAttempt?.review_flags ?? []) as ReviewFlag[]}
       aiModel={extractionAttempt?.model ?? null}

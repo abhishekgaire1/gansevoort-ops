@@ -19,13 +19,12 @@ export async function createInventoryCategoryRpc(
 
 export async function createSpendCategoryRpc(
   supabase: SupabaseClient,
-  input: { organizationId: string; appUserId: string; name: string; parentId: string | null }
+  input: { organizationId: string; appUserId: string; name: string }
 ): Promise<{ categoryId: string }> {
   const { data, error } = await supabase.rpc("create_spend_category", {
     p_organization_id: input.organizationId,
     p_app_user_id: input.appUserId,
     p_name: input.name,
-    p_parent_id: input.parentId,
   });
   if (error) throw mapItemMasterRpcError(error);
   const row = (Array.isArray(data) ? data[0] : data) as { out_category_id: string } | undefined;

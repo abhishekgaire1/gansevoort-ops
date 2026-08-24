@@ -16,8 +16,17 @@ function fakeClient(opts: {
   queueRows: Record<string, unknown>[];
   vendors?: Record<string, unknown>[];
   appUsers?: Record<string, unknown>[];
+  postingStatusRows?: Record<string, unknown>[];
 }) {
-  const rpc = vi.fn().mockResolvedValue({ data: opts.queueRows, error: null });
+  // The second param widens vi.fn's inferred call signature so
+  // rpc.mock.calls[i][1] (the RPC params object) type-checks at the
+  // assertion sites below, even though this fake dispatches by name alone.
+  const rpc = vi.fn((fnName: string, params?: Record<string, unknown>) => {
+    void params;
+    if (fnName === "search_receiving_queue") return Promise.resolve({ data: opts.queueRows, error: null });
+    if (fnName === "get_purchase_documents_inventory_posting_status") return Promise.resolve({ data: opts.postingStatusRows ?? [], error: null });
+    throw new Error(`unexpected rpc ${fnName}`);
+  });
   const from = vi.fn((table: string) => {
     if (table === "vendors") {
       return { select: () => ({ in: () => Promise.resolve({ data: opts.vendors ?? [] }) }) };
@@ -121,6 +130,7 @@ describe("getReceivingQueue -- mapping RPC rows to ReceivingQueueItem", () => {
           out_verified_by_app_user_id: null,
           out_revision_number: null,
           out_current_verified_revision_number: null,
+          out_created_by_app_user_id: "user-1",
         },
       ],
       vendors: [
@@ -153,6 +163,9 @@ describe("getReceivingQueue -- mapping RPC rows to ReceivingQueueItem", () => {
         revisionNumber: null,
         currentVerifiedRevisionNumber: null,
         isAmendmentInProgress: false,
+        createdByAppUserId: "user-1",
+        createdByName: "Ana Manager",
+        postingStatus: null,
       },
     ]);
   });
@@ -253,5 +266,85 @@ describe("getReceivingQueue -- revision/amendment fields", () => {
     const result = await getReceivingQueue("org-1");
 
     expect(result[0].isAmendmentInProgress).toBe(false);
+  });
+});
+
+// V1 Ready-to-Post queue fix (Section 12) -- the queue must be able to
+// show Ready-to-Post/Partially Posted/Posted for VERIFIED rows via ONE
+// batched RPC call, never one call per row.
+describe("getReceivingQueue -- batched inventory posting status", () => {
+  function verifiedRow(id: string, purchaseDocumentId: string) {
+    return {
+      out_document_id: id,
+      out_original_filename: "invoice.pdf",
+      out_content_type: "application/pdf",
+      out_created_at: "2026-08-12T00:00:00Z",
+      out_uploaded_by_app_user_id: "user-1",
+      out_purchase_document_id: purchaseDocumentId,
+      out_effective_vendor_id: "vendor-1",
+      out_effective_document_type: "INVOICE",
+      out_declared_vendor_id: "vendor-1",
+      out_declared_document_type: "INVOICE",
+      out_document_number: `INV-${id}`,
+      out_document_date: "2026-08-10",
+      out_status: "VERIFIED",
+      out_verified_by_app_user_id: "user-2",
+      out_revision_number: 1,
+      out_current_verified_revision_number: 1,
+      out_created_by_app_user_id: "user-1",
+    };
+  }
+
+  it("never calls the posting-status RPC at all when the queue has zero VERIFIED rows", async () => {
+    const { rpc, from } = fakeClient({
+      queueRows: [
+        { out_document_id: "d1", out_original_filename: "f", out_content_type: "application/pdf", out_created_at: "2026-08-12T00:00:00Z", out_uploaded_by_app_user_id: "user-1", out_purchase_document_id: "pd-1", out_effective_vendor_id: null, out_effective_document_type: null, out_declared_vendor_id: null, out_declared_document_type: null, out_document_number: null, out_document_date: null, out_status: "DRAFT", out_verified_by_app_user_id: null, out_revision_number: null, out_current_verified_revision_number: null, out_created_by_app_user_id: "user-1" },
+      ],
+      appUsers: [{ id: "user-1", employees: { first_name: "Ana", last_name: "Manager" } }],
+    });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+
+    const result = await getReceivingQueue("org-1");
+
+    expect(rpc).toHaveBeenCalledTimes(1); // search_receiving_queue only
+    expect(result[0].postingStatus).toBeNull();
+  });
+
+  it("fetches posting status for every VERIFIED row in exactly ONE batched RPC call, regardless of how many rows", async () => {
+    const { rpc, from } = fakeClient({
+      queueRows: [verifiedRow("d1", "pd-1"), verifiedRow("d2", "pd-2"), verifiedRow("d3", "pd-3")],
+      appUsers: [{ id: "user-1", employees: { first_name: "Ana", last_name: "Manager" } }, { id: "user-2", employees: { first_name: "Bo", last_name: "Verifier" } }],
+      vendors: [{ id: "vendor-1", name: "Baldor" }],
+      postingStatusRows: [
+        { out_purchase_document_id: "pd-1", out_status: "NOT_POSTED", out_required_line_count: 5, out_posted_line_count: 0 },
+        { out_purchase_document_id: "pd-2", out_status: "PARTIALLY_POSTED", out_required_line_count: 5, out_posted_line_count: 2 },
+        { out_purchase_document_id: "pd-3", out_status: "POSTED", out_required_line_count: 5, out_posted_line_count: 5 },
+      ],
+    });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+
+    const result = await getReceivingQueue("org-1");
+
+    const postingCalls = rpc.mock.calls.filter((c) => c[0] === "get_purchase_documents_inventory_posting_status");
+    expect(postingCalls).toHaveLength(1);
+    expect(postingCalls[0][1]).toEqual({ p_organization_id: "org-1", p_purchase_document_ids: ["pd-1", "pd-2", "pd-3"] });
+
+    expect(result.find((r) => r.purchaseDocumentId === "pd-1")?.postingStatus).toEqual({ status: "NOT_POSTED", requiredLineCount: 5 });
+    expect(result.find((r) => r.purchaseDocumentId === "pd-2")?.postingStatus).toEqual({ status: "PARTIALLY_POSTED", requiredLineCount: 5 });
+    expect(result.find((r) => r.purchaseDocumentId === "pd-3")?.postingStatus).toEqual({ status: "POSTED", requiredLineCount: 5 });
+  });
+
+  it("a VERIFIED row the batched RPC returns nothing for gets postingStatus null rather than crashing the queue", async () => {
+    const { rpc, from } = fakeClient({
+      queueRows: [verifiedRow("d1", "pd-1")],
+      appUsers: [{ id: "user-1", employees: { first_name: "Ana", last_name: "Manager" } }, { id: "user-2", employees: { first_name: "Bo", last_name: "Verifier" } }],
+      vendors: [{ id: "vendor-1", name: "Baldor" }],
+      postingStatusRows: [],
+    });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+
+    const result = await getReceivingQueue("org-1");
+
+    expect(result[0].postingStatus).toBeNull();
   });
 });

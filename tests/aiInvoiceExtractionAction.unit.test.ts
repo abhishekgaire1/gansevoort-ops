@@ -47,6 +47,7 @@ const FAKE_RESULT: InvoiceExtractionResult = {
     tax: null,
     fees: null,
     total: null,
+    amountDue: null,
     currency: null,
     lines: [],
     warnings: [],

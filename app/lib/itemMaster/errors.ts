@@ -1,4 +1,4 @@
-import { PURCHASE_DOCUMENT_SQLSTATE, NotPreparerError } from "@/app/lib/purchaseDocuments/errors";
+import { PURCHASE_DOCUMENT_SQLSTATE, NotPreparerError, VerifiedLockedError } from "@/app/lib/purchaseDocuments/errors";
 
 /**
  * App-defined SQLSTATEs for Milestone 2A.3's item-master/receiving RPCs,
@@ -27,6 +27,11 @@ export const ITEM_MASTER_SQLSTATE = {
   CATEGORY_ALREADY_EXISTS: "GA014",
   FIXED_CONVERSION_QUANTITY_MISMATCH: "GA015",
   DUPLICATE_ITEM_NAME: "GA016",
+  /** Admin Master Data milestone (20260811100100) -- category
+   * deactivation blocked by active dependents (inventory items for an
+   * Inventory Category, child categories for a Spend Category). */
+  INVENTORY_CATEGORY_HAS_ACTIVE_ITEMS: "GA055",
+  SPEND_CATEGORY_HAS_ACTIVE_CHILDREN: "GA056",
 } as const;
 
 export class SpendCategoryCycleError extends Error {
@@ -75,6 +80,17 @@ export class CategoryAlreadyExistsError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "CategoryAlreadyExistsError";
+  }
+}
+
+/** A category deactivation was blocked because active dependents still
+ * reference it (Admin Master Data milestone, Part 29) -- an active
+ * inventory item for an Inventory Category, or an active child category
+ * for a Spend Category. */
+export class CategoryDeactivationBlockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CategoryDeactivationBlockedError";
   }
 }
 
@@ -133,12 +149,23 @@ export function mapItemMasterRpcError(error: { code?: string; message: string; d
       return new ReceiptNotFoundOrInvalidError(error.message);
     case ITEM_MASTER_SQLSTATE.CATEGORY_ALREADY_EXISTS:
       return new CategoryAlreadyExistsError(error.message);
+    case ITEM_MASTER_SQLSTATE.INVENTORY_CATEGORY_HAS_ACTIVE_ITEMS:
+    case ITEM_MASTER_SQLSTATE.SPEND_CATEGORY_HAS_ACTIVE_CHILDREN:
+      return new CategoryDeactivationBlockedError(error.message);
     case ITEM_MASTER_SQLSTATE.FIXED_CONVERSION_QUANTITY_MISMATCH:
       return new FixedConversionQuantityMismatchError(error.message);
     case ITEM_MASTER_SQLSTATE.DUPLICATE_ITEM_NAME:
       return new DuplicateItemNameError(error.message, error.details ?? undefined);
     case PURCHASE_DOCUMENT_SQLSTATE.NOT_PREPARER:
       return new NotPreparerError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.VERIFIED_LOCKED:
+      // The parent purchase_document moved out of DRAFT/READY_FOR_VERIFICATION
+      // mid-run (GA003) -- a genuinely document-wide condition: every other
+      // line's classification write will fail identically, unlike a
+      // per-line data issue. classifyPurchaseDocumentLines.ts checks for
+      // this specific type to decide "stop the whole run" vs "isolate this
+      // one line and keep going."
+      return new VerifiedLockedError(error.message);
     default:
       return new Error(error.message);
   }

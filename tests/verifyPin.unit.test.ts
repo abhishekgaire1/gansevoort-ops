@@ -60,8 +60,9 @@ interface FakeSupabaseOptions {
 
 function createFakeSupabase({ lookupData, lookupError = null, stationData = null, stationError = null }: FakeSupabaseOptions) {
   const appUsersMaybeSingle = vi.fn().mockResolvedValue({ data: lookupData, error: lookupError });
-  // Chain is .select(...).eq("organization_id", ...).eq("pin_lookup_hash", ...).eq("is_active", true).maybeSingle()
-  const appUsersEq3 = vi.fn().mockReturnValue({ maybeSingle: appUsersMaybeSingle });
+  // Chain is .select(...).eq("organization_id", ...).eq("pin_lookup_hash", ...).eq("is_active", true).eq("employees.status", "active").maybeSingle()
+  const appUsersEq4 = vi.fn().mockReturnValue({ maybeSingle: appUsersMaybeSingle });
+  const appUsersEq3 = vi.fn().mockReturnValue({ eq: appUsersEq4 });
   const appUsersEq2 = vi.fn().mockReturnValue({ eq: appUsersEq3 });
   const appUsersEq1 = vi.fn().mockReturnValue({ eq: appUsersEq2 });
   const appUsersSelect = vi.fn().mockReturnValue({ eq: appUsersEq1 });
@@ -77,7 +78,7 @@ function createFakeSupabase({ lookupData, lookupError = null, stationData = null
     throw new Error(`unexpected table: ${table}`);
   });
 
-  return { client: { from } as unknown as SupabaseClient, from, appUsersEq3, stationsSelect, stationsEq };
+  return { client: { from } as unknown as SupabaseClient, from, appUsersEq3, appUsersEq4, stationsSelect, stationsEq };
 }
 
 beforeEach(() => {
@@ -86,7 +87,7 @@ beforeEach(() => {
 
 describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
   it("no matching PIN (unknown, or belonging to an inactive app_user): calls runDummyPinVerification once, never verifyPinHash", async () => {
-    const { client, appUsersEq3 } = createFakeSupabase({ lookupData: null });
+    const { client, appUsersEq3, appUsersEq4 } = createFakeSupabase({ lookupData: null });
 
     const result = await verifyPinCore(client, {
       pin: "123456",
@@ -99,8 +100,33 @@ describe("verifyPinCore Argon2 call-count parity across terminal paths", () => {
     expect(result).toEqual({ ok: false, reason: "invalid_pin" });
     expect(runDummyPinVerification).toHaveBeenCalledTimes(1);
     expect(verifyPinHash).toHaveBeenCalledTimes(0);
-    // The lookup filters out inactive app_users at the query level, not as a separate branch.
+    // The lookup filters out inactive app_users, and (Admin Foundation
+    // milestone) inactive/terminated employees, at the query level, not
+    // as a separate branch.
     expect(appUsersEq3).toHaveBeenCalledWith("is_active", true);
+    expect(appUsersEq4).toHaveBeenCalledWith("employees.status", "active");
+  });
+
+  it("Admin Foundation milestone fix: a deactivated employee cannot verify their PIN even if app_users.is_active was left true", async () => {
+    // Before this fix, verifyPinCore only ever checked app_users.is_active
+    // -- an employee deactivated via Admin (employees.status = 'inactive')
+    // whose app_users row was somehow left is_active=true could still pass
+    // PIN verification. The employees!inner + .eq("employees.status",
+    // "active") filter means Postgrest itself excludes such a row, so the
+    // real query returns no match -- exactly the same "no row" shape the
+    // lookupData: null fixture above already represents.
+    const { client, appUsersEq4 } = createFakeSupabase({ lookupData: null });
+
+    const result = await verifyPinCore(client, {
+      pin: "123456",
+      organizationId: ORG_ID,
+      sourceIdentifier: "src-1",
+      pinPepper: PIN_PEPPER,
+      kioskTokenSecret: KIOSK_TOKEN_SECRET,
+    });
+
+    expect(result).toEqual({ ok: false, reason: "invalid_pin" });
+    expect(appUsersEq4).toHaveBeenCalledWith("employees.status", "active");
   });
 
   it("credential-integrity mismatch (pin_lookup_hash matched but Argon2 fails): calls verifyPinHash once, never runDummyPinVerification, and fails closed", async () => {

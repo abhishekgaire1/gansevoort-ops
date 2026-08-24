@@ -1,9 +1,10 @@
 import "server-only";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { RECEIVING_DOCUMENTS_BUCKET } from "@/app/lib/documents/storagePath";
-import { GeminiProvider, sanitizeGeminiRawResponse } from "@/app/lib/ai/providers/gemini";
+import { sanitizeGeminiRawResponse } from "@/app/lib/ai/providers/gemini";
 import { AIProviderError } from "@/app/lib/ai/provider";
 import { runInvoiceExtraction } from "@/app/lib/ai/tasks/invoiceExtraction/runInvoiceExtraction";
+import { executeAITask, AIProviderUnavailableError } from "@/app/lib/ai/router/executeAITask";
 import { sniffMimeType } from "@/app/lib/files/sniffMimeType";
 
 const UNKNOWN_ERROR_CODE = "UNKNOWN";
@@ -24,7 +25,7 @@ export async function runDocumentExtractionAttempt(attemptId: string): Promise<v
     .update({ status: "RUNNING", started_at: new Date().toISOString() })
     .eq("id", attemptId)
     .eq("status", "PENDING")
-    .select("id, organization_id, document_id, model")
+    .select("id, organization_id, document_id, provider, model")
     .maybeSingle();
 
   if (claimError || !claimed) {
@@ -59,13 +60,26 @@ export async function runDocumentExtractionAttempt(attemptId: string): Promise<v
       throw new Error(`document ${claimed.document_id} no longer matches an accepted file signature`);
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not set");
-    }
-
-    const provider = new GeminiProvider(apiKey);
-    const result = await runInvoiceExtraction(provider, { fileBytesBase64: buffer.toString("base64"), mimeType }, claimed.model);
+    // AI Configuration + Usage/Cost Tracking milestone: provider/model
+    // were already resolved and frozen onto this row at attempt-creation
+    // time (documentUpload.ts/documentExtraction.ts) -- never re-resolved
+    // here, so this call always uses exactly what the attempt started
+    // with (Part 49-50). executeAITask is the one place that instantiates
+    // the provider adapter, times the call, and records the durable usage
+    // event -- this function no longer touches GEMINI_API_KEY directly.
+    const result = await executeAITask({
+      organizationId: claimed.organization_id,
+      task: "INVOICE_EXTRACTION",
+      provider: claimed.provider,
+      model: claimed.model,
+      requestKey: attemptId,
+      sourceType: "document_extraction",
+      sourceId: attemptId,
+      run: async (provider, model) => {
+        const extraction = await runInvoiceExtraction(provider, { fileBytesBase64: buffer.toString("base64"), mimeType }, model);
+        return { data: extraction, raw: extraction.raw, model: extraction.model, provider: extraction.provider };
+      },
+    });
 
     await serviceClient
       .from("document_extractions")
@@ -94,6 +108,9 @@ export async function runDocumentExtractionAttempt(attemptId: string): Promise<v
 function mapExtractionError(err: unknown): { code: string; message: string } {
   if (err instanceof AIProviderError) {
     return { code: err.code, message: err.message };
+  }
+  if (err instanceof AIProviderUnavailableError) {
+    return { code: "PROVIDER_UNAVAILABLE", message: err.message };
   }
   return { code: UNKNOWN_ERROR_CODE, message: err instanceof Error ? err.message : "Unknown error" };
 }

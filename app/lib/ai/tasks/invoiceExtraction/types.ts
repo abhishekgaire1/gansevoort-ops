@@ -38,7 +38,27 @@ export interface NormalizedInvoiceExtraction {
   subtotal: number | null;
   tax: number | null;
   fees: number | null;
+  /** This DOCUMENT's own total -- the amount attributable to just this
+   * invoice/receipt/credit memo's own lines, tax, and fees. NEVER a
+   * broader account balance/amount-due figure that includes prior
+   * invoices -- see amountDue below for that distinct concept. Existing
+   * downstream consumers (purchase_documents.total, reconciliation,
+   * Verified/Step 4 display) all assume this meaning; that assumption is
+   * preserved, not redefined. */
   total: number | null;
+  /** Some vendor invoices print a bottom-line figure that is NOT this
+   * document's own total -- it's a running account balance that also
+   * includes prior, separately-invoiced deliveries (e.g. a paper-goods
+   * distributor listing "177888 (07/30/26) $3,460.00" etc. above its
+   * final TOTAL). When the model recognizes this pattern, it reports
+   * that larger figure here (never in `total`) so validation can
+   * distinguish "this invoice cost $X" from "the vendor says $Y is
+   * currently owed, including older invoices." Null on the ordinary
+   * invoice where the printed total already is just this document's own
+   * total -- which is most invoices. Purely a suggestion signal, same as
+   * `warnings` -- the deterministic validator (validate.ts) still infers
+   * this from line reconciliation even when the model leaves it null. */
+  amountDue: number | null;
   currency: string | null;
   lines: NormalizedInvoiceLine[];
   /** Gemini's own reported uncertainty -- distinct from our deterministic

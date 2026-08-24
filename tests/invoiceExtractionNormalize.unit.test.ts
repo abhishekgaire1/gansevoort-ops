@@ -18,6 +18,7 @@ function rawExtraction(overrides: Partial<GeminiInvoiceExtraction> = {}): Gemini
     tax: 0,
     fees: 0,
     total: 134.7,
+    amountDue: null,
     currency: "USD",
     lines: [],
     warnings: [],

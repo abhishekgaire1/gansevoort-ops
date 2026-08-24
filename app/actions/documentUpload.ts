@@ -10,7 +10,7 @@ import {
   DocumentIdentityConflictError,
   type FinalizeDocumentUploadRpcResult,
 } from "@/app/lib/documents/finalizeDocumentUploadRpc";
-import { resolveGeminiModel } from "@/app/lib/ai/config";
+import { resolveAIConfig } from "@/app/lib/ai/router/resolveAIConfig";
 import { ACCEPTED_MIME_TYPES, extensionForMimeType, sniffMimeType } from "@/app/lib/files/sniffMimeType";
 import { VendorNotActiveError } from "@/app/lib/purchaseDocuments/errors";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -288,6 +288,14 @@ export async function finalizeDocumentUpload(input: FinalizeDocumentUploadInput)
 
     const fileSha256 = await sha256Hex(buffer);
 
+    // AI Configuration milestone: provider/model for this attempt is
+    // resolved ONCE here (task override -> org default -> app default)
+    // and frozen onto the document_extractions row the RPC below inserts
+    // -- never re-resolved later, so an in-flight attempt always keeps
+    // the model it started with even if an Admin changes configuration
+    // mid-flight (Part 49-50).
+    const aiConfig = await resolveAIConfig(serviceClient, auth.manager.organizationId, "INVOICE_EXTRACTION");
+
     currentStage = "finalize_rpc";
     logUploadDiagnostic(currentStage, { documentId: input.documentId, rpcReached: true });
 
@@ -300,8 +308,8 @@ export async function finalizeDocumentUpload(input: FinalizeDocumentUploadInput)
       contentType: sniffedMimeType,
       byteSize: buffer.byteLength,
       fileSha256,
-      provider: "gemini",
-      model: resolveGeminiModel(),
+      provider: aiConfig.provider,
+      model: aiConfig.model,
       vendorId: input.vendorId,
       declaredDocumentType: input.declaredDocumentType,
     });

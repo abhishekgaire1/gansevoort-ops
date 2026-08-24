@@ -131,6 +131,13 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
 
   const receivedByLineKey = new Map((summary?.receiving ?? []).map((r) => [r.lineKey, r]));
 
+  // Receiving UX Interaction System pass, Part 32: READY TO POST is not
+  // operationally finished -- while this is true, Post to Inventory is the
+  // one sticky top-level workflow action, never buried in the Inventory
+  // Posting card further down the page. Non-inventory-only documents never
+  // reach this (requiredLineCount === 0), matching Part 35.
+  const readyToPost = Boolean(props.isCurrentVerified && posting && posting.status !== "POSTED" && posting.requiredLineCount > 0);
+
   async function handleDownload() {
     setDownloadPending(true);
     setDownloadError(null);
@@ -232,6 +239,49 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
             ) : null}
           </div>
         </div>
+
+        {/* ============ READY TO POST ============ */}
+        {/* Receiving UX Interaction System pass, Part 32-33: the ONE
+            top-level workflow action while inventory is verified but
+            unposted -- never buried in the "Inventory Posting" card
+            further down the page. Disappears entirely once posted (Part
+            34) or if this document has no inventory lines at all (Part
+            35) -- the card below still shows the read-only posting
+            record either way. */}
+        {readyToPost ? (
+          <div className="mt-4 rounded-xl border border-emerald-800 bg-emerald-950/20 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400">Ready to Post</p>
+            <p className="mt-1 text-sm text-zinc-300">
+              {posting!.requiredLineCount} inventory line{posting!.requiredLineCount === 1 ? "" : "s"} ready to be added to stock
+              {nonInventoryCount && nonInventoryCount > 0 ? ` · ${nonInventoryCount} expense line${nonInventoryCount === 1 ? "" : "s"} will not post` : ""}
+              .
+            </p>
+            {postError ? (
+              <div className="mt-3 rounded-lg border border-red-900 bg-red-950/20 p-3 text-sm text-red-300">
+                <p>{postError}</p>
+                {postBlockers.length > 0 ? (
+                  <ul className="mt-2 flex flex-col gap-1 text-xs">
+                    {postBlockers.map((blocker, index) => (
+                      <li key={index}>
+                        • {blocker.description ?? "Line"} — {blocker.reason}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={handlePostToInventory}
+                disabled={postPending}
+                className="rounded-full bg-emerald-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
+              >
+                {postPending ? "Posting Inventory…" : "Post to Inventory →"}
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {/* ============ 1. INVOICE ============ */}
         <Section title="Invoice">
@@ -456,35 +506,14 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
                     </>
                   )}
 
-                  {props.isCurrentVerified && posting.status !== "POSTED" && posting.requiredLineCount > 0 ? (
-                    <div className="mt-3">
-                      <button
-                        type="button"
-                        onClick={handlePostToInventory}
-                        disabled={postPending}
-                        className="rounded-full bg-emerald-400 px-5 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
-                      >
-                        {postPending ? "Posting inventory…" : "Post to Inventory"}
-                      </button>
-                    </div>
-                  ) : null}
                   {posting.status === "NOT_POSTED" && posting.requiredLineCount === 0 ? (
                     <p className="mt-1 text-xs text-zinc-500">No inventory lines to post on this document.</p>
                   ) : null}
-                  {postError ? (
-                    <div className="mt-3 rounded-lg border border-red-900 bg-red-950/20 p-3 text-sm text-red-300">
-                      <p>{postError}</p>
-                      {postBlockers.length > 0 ? (
-                        <ul className="mt-2 flex flex-col gap-1 text-xs">
-                          {postBlockers.map((blocker, index) => (
-                            <li key={index}>
-                              • {blocker.description ?? "Line"} — {blocker.reason}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                    </div>
-                  ) : null}
+                  {/* Receiving UX Interaction System pass, Part 32: Post to
+                      Inventory itself is no longer a button buried in this
+                      mid-page card -- it's the sticky top-level workflow
+                      action below (see readyToPost). This section stays the
+                      read record of what's posted/pending, not the action. */}
                 </>
               )}
             </Section>

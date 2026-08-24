@@ -90,10 +90,21 @@ export function deriveWizardProgress(input: DeriveWizardProgressInput): WizardPr
   // back in here as requestedStep.)
   const activeStep: WizardStepId = Math.min(input.requestedStep ?? 1, furthestReachable) as WizardStepId;
 
+  // Receiving UX pass: the currently-VIEWED step must never render with a
+  // completion checkmark, even once its own requirements are already
+  // satisfied (e.g. the manager is looking at an already-resolved Step 2
+  // right before clicking Continue) -- "current" and "complete" are
+  // different facts about a step, and conflating them is exactly the
+  // "current step looks completed" bug this pass is fixing. Reachability/
+  // clickability (furthestReachableStep) are untouched -- only the visual
+  // state label for the active step changes.
   function stateFor(id: WizardStepId, complete: boolean): WizardStepState {
+    if (id === activeStep) {
+      if (id === 2 && input.step2NeedsAttention) return "needs_attention";
+      return "current";
+    }
     if (complete) return "complete";
     if (id === 2 && input.step2NeedsAttention) return "needs_attention";
-    if (id === activeStep) return "current";
     return id < furthestReachable ? "complete" : "not_started";
   }
 

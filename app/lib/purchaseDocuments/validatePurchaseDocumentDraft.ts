@@ -1,4 +1,4 @@
-import { validateLineItem } from "@/app/lib/ai/tasks/invoiceExtraction/validate";
+import { validateLineItem, detectAccountBalanceSignal } from "@/app/lib/ai/tasks/invoiceExtraction/validate";
 import type { ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
 import type { PurchaseDocumentDraft, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 import { formatMoney } from "@/app/lib/formatMoney";
@@ -94,15 +94,31 @@ export function validatePurchaseDocumentDraft(draft: PurchaseDocumentDraft): Rev
   if (draft.total !== null && draft.lines.length > 0) {
     const allLineTotalsKnown = draft.lines.every((line) => line.lineTotal !== null);
     if (allLineTotalsKnown) {
-      const sumOfLines = draft.lines.reduce((sum, line) => sum + (line.lineTotal ?? 0), 0);
-      const computedTotal = sumOfLines + (draft.tax ?? 0) + (draft.fees ?? 0);
-      if (!approximatelyEqual(computedTotal, draft.total)) {
+      // Shared with the AI-extraction-time validator (validate.ts) so a
+      // draft never re-litigates account-balance-vs-current-document-total
+      // reconciliation with different rules. The draft has no access to
+      // the original extraction's own amountDue signal, so this always
+      // resolves at the lower-confidence "may include" tier when it fires
+      // -- still correct, just less certain than the AI-confirmed case.
+      const signal = detectAccountBalanceSignal({ lines: draft.lines, tax: draft.tax, fees: draft.fees, total: draft.total });
+      if (signal) {
         issues.push({
           severity: "warning",
-          code: "TOTAL_MISMATCH",
+          code: "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE",
           field: "total",
-          message: `Line totals + tax + fees (${formatMoney(computedTotal, draft.currency)}) do not match the entered total (${formatMoney(draft.total, draft.currency)}).`,
+          message: `This document's own lines, tax, and fees total ${formatMoney(signal.currentDocumentTotal, draft.currency)}, but the entered total is ${formatMoney(signal.statedTotal, draft.currency)} -- it may include a prior account balance rather than being purely this document's own total. Confirm or correct the Total field if this document's own total should be ${formatMoney(signal.currentDocumentTotal, draft.currency)}.`,
         });
+      } else {
+        const sumOfLines = draft.lines.reduce((sum, line) => sum + (line.lineTotal ?? 0), 0);
+        const computedTotal = sumOfLines + (draft.tax ?? 0) + (draft.fees ?? 0);
+        if (!approximatelyEqual(computedTotal, draft.total)) {
+          issues.push({
+            severity: "warning",
+            code: "TOTAL_MISMATCH",
+            field: "total",
+            message: `Line totals + tax + fees (${formatMoney(computedTotal, draft.currency)}) do not match the entered total (${formatMoney(draft.total, draft.currency)}).`,
+          });
+        }
       }
     }
   }

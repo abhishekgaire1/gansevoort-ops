@@ -15,14 +15,24 @@ import type { VendorSummary } from "@/app/actions/vendors";
 
 type ReviewableStatus = "DRAFT" | "READY_FOR_VERIFICATION";
 
-const STATUS_LABEL: Record<ReviewableStatus, string> = {
-  DRAFT: "Draft",
-  READY_FOR_VERIFICATION: "Ready for Verification",
-};
+/** Status Language -- Verification: the SAME canonical READY_FOR_
+ * VERIFICATION status reads differently depending on whether the current
+ * viewer is the document's own preparer (their work is done, waiting on
+ * someone else) or the eligible reviewer (real, actionable work for
+ * them) -- never a third database status, purely a presentation split
+ * over the one existing enum value, mirroring receivingPresentation.ts's
+ * own viewer-relative logic for the Receiving Queue. */
+function statusLabelForViewer(status: ReviewableStatus, isPreparer: boolean): string {
+  if (status === "DRAFT") return "Draft";
+  return isPreparer ? "Sent for Verification" : "Needs Verification";
+}
 
+// Used only for a DIFFERENT document referenced in the "possible
+// duplicate" list -- the current viewer's relationship to THAT other
+// document isn't known here, so this stays deliberately neutral/generic.
 const DUPLICATE_STATUS_LABEL: Record<PurchaseDocumentStatus, string> = {
   DRAFT: "Draft",
-  READY_FOR_VERIFICATION: "Ready for Verification",
+  READY_FOR_VERIFICATION: "Awaiting Verification",
   VERIFIED: "Verified",
   DISCARDED: "Discarded",
 };
@@ -52,6 +62,11 @@ interface Props {
   declaredDocumentType: PurchaseDocumentType | null;
   aiSuggestedVendorName: string | null;
   aiSuggestedDocumentType: string | null;
+  /** Distinct from header.total -- a vendor-printed account balance/amount
+   * due that appears to include prior invoices, when the extraction
+   * recognized that pattern. Null on the ordinary invoice where the
+   * printed total already is just this document's own total. */
+  aiAmountDue: number | null;
   aiWarnings: string[];
   aiReviewFlags: ReviewFlag[];
   aiModel: string | null;
@@ -150,9 +165,9 @@ export function PurchaseDocumentReviewView(props: Props) {
       setDiscardError("A reason is required to discard an amendment.");
       return;
     }
-    if (!window.confirm(props.revisionNumber > 1 ? "Discard this amendment? This cannot be undone." : "Discard this draft? This cannot be undone.")) {
-      return;
-    }
+    // Receiving UX pass, Part 38: the styled confirmation card below IS the
+    // confirmation now -- a second native window.confirm() on top of it was
+    // redundant double-confirmation, not a safety improvement.
     setDiscardPending(true);
     setDiscardError(null);
     const result = await discardPurchaseDocumentDraft(props.purchaseDocumentId, props.version, discardReason.trim() || undefined);
@@ -166,9 +181,8 @@ export function PurchaseDocumentReviewView(props: Props) {
   }
 
   async function handleWithdraw() {
-    if (!window.confirm("Withdraw this submission back to Draft?")) {
-      return;
-    }
+    // The inline reason form below (revealed by "Withdraw Submission") is
+    // itself the confirmation step -- no separate native confirm() needed.
     setWithdrawPending(true);
     setWithdrawError(null);
     const result = await withdrawPurchaseDocumentSubmission(props.purchaseDocumentId, props.version, withdrawReason.trim() || undefined);
@@ -188,8 +202,34 @@ export function PurchaseDocumentReviewView(props: Props) {
 
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold">{props.originalFilename}</h1>
-          <p className="mt-1 text-sm text-zinc-500">{STATUS_LABEL[props.status]}</p>
+          {/* Receiving UX pass, Part 9: once real invoice metadata exists,
+              the manager orients around vendor/document number/status --
+              the filename is still shown, but as secondary source evidence,
+              never the primary heading (a filename like
+              "Invoices_0-16675_20260816.pdf" tells a manager nothing about
+              what they're actually reviewing). Never invents metadata: a
+              document with no vendor/number yet (extraction still pending,
+              or genuinely blank) falls back to the filename as the title,
+              exactly as before. */}
+          {props.vendorName || props.header.documentNumber ? (
+            <>
+              <h1 className="text-xl font-semibold">{props.vendorName ?? "Unknown Vendor"}</h1>
+              <p className="mt-0.5 text-sm text-zinc-300">
+                {DOCUMENT_NUMBER_LABEL[props.header.documentType ?? "INVOICE"]}
+                {props.header.documentNumber ?? "—"}
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">
+                {statusLabelForViewer(props.status, props.isPreparer)}
+                {props.header.documentDate ? ` · ${new Date(props.header.documentDate).toLocaleDateString()}` : ""}
+              </p>
+              <p className="mt-2 text-xs text-zinc-600">Source file: {props.originalFilename}</p>
+            </>
+          ) : (
+            <>
+              <h1 className="text-xl font-semibold">{props.originalFilename}</h1>
+              <p className="mt-1 text-sm text-zinc-500">{statusLabelForViewer(props.status, props.isPreparer)}</p>
+            </>
+          )}
         </div>
       </div>
 
@@ -200,10 +240,7 @@ export function PurchaseDocumentReviewView(props: Props) {
       ) : null}
       {props.isPreparer && props.status === "READY_FOR_VERIFICATION" ? (
         <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-400">
-          <p>
-            Submitted for verification. Another manager must review or verify this document -- you cannot review your
-            own submission.
-          </p>
+          <p>Your review is complete. This document is waiting for verification by another manager -- you cannot verify your own submission.</p>
           {!showWithdrawForm ? (
             <button type="button" onClick={() => setShowWithdrawForm(true)} className="mt-2 text-xs text-amber-400 underline">
               Withdraw Submission
@@ -317,6 +354,7 @@ export function PurchaseDocumentReviewView(props: Props) {
           aiSuggestedVendorName={props.aiSuggestedVendorName}
           declaredDocumentType={props.declaredDocumentType}
           aiSuggestedDocumentType={props.aiSuggestedDocumentType}
+          aiAmountDue={props.aiAmountDue}
           aiWarnings={props.aiWarnings}
           aiModel={props.aiModel}
           vendors={props.vendors}
@@ -329,35 +367,57 @@ export function PurchaseDocumentReviewView(props: Props) {
 
       {editableAsPreparer ? (
         <div className="mt-6 flex flex-col gap-3">
-          {!showDiscardForm ? (
-            <button type="button" onClick={() => setShowDiscardForm(true)} className="self-start text-xs text-red-400 underline">
-              {props.revisionNumber > 1 ? "Discard Amendment" : "Discard Draft"}
-            </button>
-          ) : (
-            <div className="flex flex-col gap-2 rounded-lg border border-red-900 bg-red-950/20 p-3">
+          {/* Receiving UX pass, Part 38: visually secondary (small, muted,
+              never competing with Continue), but a real, styled
+              confirmation dialog opens on click -- not a loose destructive
+              link with no confirmation UI. */}
+          <button type="button" onClick={() => setShowDiscardForm(true)} className="self-start text-xs text-zinc-500 underline underline-offset-2 hover:text-red-400">
+            {props.revisionNumber > 1 ? "Discard Amendment" : "Discard Draft"}
+          </button>
+        </div>
+      ) : null}
+
+      {showDiscardForm ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="discard-draft-title" className="w-full max-w-md rounded-2xl border border-red-900 bg-zinc-900 p-5">
+            <h2 id="discard-draft-title" className="text-sm font-semibold text-zinc-100">
+              {props.revisionNumber > 1 ? "Discard this amendment?" : "Discard this draft?"}
+            </h2>
+            <p className="mt-2 text-sm text-zinc-400">
+              The current invoice review and any unresolved changes will be removed. This cannot be undone.
+            </p>
+            <label className="mt-3 flex flex-col gap-1 text-xs text-zinc-400">
+              {props.revisionNumber > 1 ? "Reason (required)" : "Reason (optional)"}
               <input
                 type="text"
                 value={discardReason}
                 onChange={(event) => setDiscardReason(event.target.value)}
-                placeholder={props.revisionNumber > 1 ? "Reason (required)" : "Reason (optional)"}
                 className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
               />
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleDiscard}
-                  disabled={discardPending}
-                  className="rounded-full border border-red-700 px-4 py-1.5 text-xs font-semibold text-red-300 disabled:opacity-40"
-                >
-                  {discardPending ? "Discarding…" : props.revisionNumber > 1 ? "Confirm Discard Amendment" : "Confirm Discard Draft"}
-                </button>
-                <button type="button" onClick={() => setShowDiscardForm(false)} className="text-xs text-zinc-400 underline">
-                  Cancel
-                </button>
-              </div>
-              {discardError ? <p className="text-xs text-red-400">{discardError}</p> : null}
+            </label>
+            {discardError ? <p className="mt-2 text-sm text-red-400">{discardError}</p> : null}
+            <div className="mt-4 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={discardPending}
+                onClick={() => {
+                  setShowDiscardForm(false);
+                  setDiscardError(null);
+                }}
+                className="rounded-full border border-zinc-700 px-4 py-1.5 text-xs font-semibold text-zinc-300 disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDiscard}
+                disabled={discardPending}
+                className="rounded-full bg-red-600 px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
+              >
+                {discardPending ? "Discarding…" : props.revisionNumber > 1 ? "Discard Amendment" : "Discard Draft"}
+              </button>
             </div>
-          )}
+          </div>
         </div>
       ) : null}
     </div>

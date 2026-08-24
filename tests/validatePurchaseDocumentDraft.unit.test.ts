@@ -94,9 +94,15 @@ describe("validatePurchaseDocumentDraft -- calculations (reused from 2A.0's line
     expect(flags).toContainEqual(expect.objectContaining({ code: "LINE_TOTAL_MISMATCH" }));
   });
 
-  it("flags an invoice-total reconciliation mismatch", () => {
-    const flags = validatePurchaseDocumentDraft(draft({ total: 999 }));
+  it("flags a genuine invoice-total reconciliation mismatch (stated total SMALLER than the lines) as TOTAL_MISMATCH", () => {
+    const flags = validatePurchaseDocumentDraft(draft({ total: 10 }));
     expect(flags).toContainEqual(expect.objectContaining({ code: "TOTAL_MISMATCH" }));
+  });
+
+  it("recognizes a LARGER stated total as a possible account balance instead of a plain mismatch -- shares logic with the AI-extraction-time validator", () => {
+    const flags = validatePurchaseDocumentDraft(draft({ total: 999 }));
+    expect(flags.some((f) => f.code === "TOTAL_MISMATCH")).toBe(false);
+    expect(flags).toContainEqual(expect.objectContaining({ code: "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE" }));
   });
 
   it("does not flag a negative line amount as a hard error at the header level (credit memos may be negative) -- severity stays advisory from the reused line validator", () => {

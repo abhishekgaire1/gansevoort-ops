@@ -2,13 +2,18 @@
 
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
-import { normalizeVendorName } from "@/app/lib/vendors/normalizeVendorName";
 
 /**
- * Plain single-table CRUD -- no RPC needed (unlike documents/purchase
- * documents, nothing here writes across more than one table atomically).
- * AI/extraction code never calls anything in this file: vendor creation is
- * exclusively a manager-triggered action.
+ * Admin Master Data milestone: general Vendor administration (create with
+ * full details, rename, edit contact info, deactivate/reactivate, manage
+ * aliases) moved to app/actions/adminVendors.ts, gated by requireAdmin() --
+ * this file previously exposed createVendor/setVendorActive to ANY
+ * manager with no admin/manager split at all, which was the exact gap
+ * this milestone closes. What remains here is read access every manager
+ * still needs (listVendors/searchVendors, unchanged) plus ONE new,
+ * narrowly-scoped exception: createVendorFromReceiving, callable by any
+ * Manager but only able to create a vendor by name -- nothing else (Part
+ * 15-17/42). AI never calls anything in this file.
  */
 
 export interface VendorSummary {
@@ -68,11 +73,22 @@ export async function searchVendors(query: string): Promise<SearchVendorsResult>
   return { ok: true, vendors: (data ?? []).map((v) => ({ id: v.id, name: v.name, isActive: v.is_active })) };
 }
 
-export type CreateVendorResult =
+export type CreateVendorFromReceivingResult =
   | { ok: true; vendor: VendorSummary }
-  | { ok: false; reason: "not_authorized" | "invalid_name" | "duplicate" | "misconfigured"; message: string };
+  | { ok: false; reason: "not_authorized" | "invalid_name" | "duplicate" | "misconfigured"; message: string; existingVendorId?: string; existingVendorName?: string };
 
-export async function createVendor(name: string): Promise<CreateVendorResult> {
+/** The controlled Manager exception (Part 15-17/42): a Manager reviewing a
+ * real invoice may create a NEW Vendor when no existing match is found,
+ * so Receiving never stalls waiting on an Admin. Deliberately minimal --
+ * name only, nothing else settable here. purchaseDocumentId is optional:
+ * the current upload flow (UploadDocumentForm) selects a vendor BEFORE a
+ * purchase_document exists, while the Step1ReviewInvoice vendor-
+ * correction step has one already -- when present it's recorded on the
+ * audit event only, for traceability of which invoice prompted the
+ * creation, never as a second attachment mechanism (the caller sets the
+ * returned vendor id through the exact same field -- vendorId state
+ * before upload, or the header vendorId correction -- it already uses). */
+export async function createVendorFromReceiving(name: string, purchaseDocumentId?: string | null): Promise<CreateVendorFromReceivingResult> {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) {
     return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -83,45 +99,33 @@ export async function createVendor(name: string): Promise<CreateVendorResult> {
     return { ok: false, reason: "invalid_name", message: "Vendor name is required." };
   }
 
-  const serviceClient = getServiceRoleClient();
-  const { data, error } = await serviceClient
-    .from("vendors")
-    .insert({
-      organization_id: auth.manager.organizationId,
-      name: trimmedName,
-      normalized_name: normalizeVendorName(trimmedName),
-    })
-    .select("id, name, is_active")
-    .single();
+  const { data, error } = await getServiceRoleClient().rpc("create_vendor_from_receiving", {
+    p_organization_id: auth.manager.organizationId,
+    p_actor_app_user_id: auth.manager.appUserId,
+    p_vendor_name: trimmedName,
+    p_purchase_document_id: purchaseDocumentId ?? null,
+  });
 
   if (error) {
-    if (error.code === "23505") {
-      return { ok: false, reason: "duplicate", message: `A vendor named "${trimmedName}" already exists.` };
+    if (error.code === "GA052") {
+      let existingVendorId: string | undefined;
+      let existingVendorName: string | undefined;
+      try {
+        const parsed = JSON.parse(error.details ?? "{}") as { existingVendorId?: string; existingVendorName?: string };
+        existingVendorId = parsed.existingVendorId;
+        existingVendorName = parsed.existingVendorName;
+      } catch {
+        // Detail wasn't parseable JSON -- fall back to the message alone.
+      }
+      return { ok: false, reason: "duplicate", message: error.message, existingVendorId, existingVendorName };
     }
     return { ok: false, reason: "misconfigured", message: "Could not create the vendor. Try again." };
   }
 
-  return { ok: true, vendor: { id: data.id, name: data.name, isActive: data.is_active } };
-}
-
-export type SetVendorActiveResult = { ok: true } | { ok: false; reason: "not_authorized" | "misconfigured"; message: string };
-
-export async function setVendorActive(vendorId: string, isActive: boolean): Promise<SetVendorActiveResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) {
-    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  const row = (Array.isArray(data) ? data[0] : data) as { out_vendor_id: string; out_name: string } | undefined;
+  if (!row) {
+    return { ok: false, reason: "misconfigured", message: "Could not create the vendor. Try again." };
   }
 
-  const serviceClient = getServiceRoleClient();
-  const { error } = await serviceClient
-    .from("vendors")
-    .update({ is_active: isActive })
-    .eq("id", vendorId)
-    .eq("organization_id", auth.manager.organizationId);
-
-  if (error) {
-    return { ok: false, reason: "misconfigured", message: "Could not update the vendor. Try again." };
-  }
-
-  return { ok: true };
+  return { ok: true, vendor: { id: row.out_vendor_id, name: row.out_name, isActive: true } };
 }

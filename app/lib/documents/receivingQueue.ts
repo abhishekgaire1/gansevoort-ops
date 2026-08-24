@@ -56,6 +56,22 @@ export interface ReceivingQueueItem {
    * badge. A first-time draft/ready document (no prior verified revision)
    * is never an amendment. */
   isAmendmentInProgress: boolean;
+  /** The CURRENT (effective) revision's preparer -- purchase_documents.
+   * created_by_app_user_id, the same identity the app already uses
+   * everywhere else to decide self-verification eligibility. Null when
+   * no purchase_document exists yet (still PROCESSING/NEEDS_REVIEW/etc.
+   * with no draft started). Deliberately NOT uploadedByAppUserId: on an
+   * amendment, the person who initiated the amendment can differ from
+   * the document's original uploader, and it's the PREPARER identity
+   * that actually governs who may/may not verify it. */
+  createdByAppUserId: string | null;
+  createdByName: string | null;
+  /** V1 Ready-to-Post queue fix -- null for every non-VERIFIED row (and
+   * for a VERIFIED row where the batched RPC found nothing, which
+   * shouldn't happen but is handled the same as "no posting data yet"
+   * rather than crashing the queue). See receivingStatusPresentation for
+   * how this becomes "Ready to Post"/"Partially Posted"/"Posted". */
+  postingStatus: { status: "NOT_POSTED" | "PARTIALLY_POSTED" | "POSTED"; requiredLineCount: number } | null;
 }
 
 interface EmployeeNameRow {
@@ -88,6 +104,7 @@ interface SearchReceivingQueueRow {
   out_verified_by_app_user_id: string | null;
   out_revision_number: number | null;
   out_current_verified_revision_number: number | null;
+  out_created_by_app_user_id: string | null;
 }
 
 /**
@@ -141,6 +158,7 @@ export async function getReceivingQueue(organizationId: string, filters: Receivi
     if (row.out_declared_vendor_id) vendorIds.add(row.out_declared_vendor_id);
     appUserIds.add(row.out_uploaded_by_app_user_id);
     if (row.out_verified_by_app_user_id) appUserIds.add(row.out_verified_by_app_user_id);
+    if (row.out_created_by_app_user_id) appUserIds.add(row.out_created_by_app_user_id);
   }
 
   const { data: vendors } =
@@ -154,6 +172,24 @@ export async function getReceivingQueue(organizationId: string, filters: Receivi
   const nameByAppUserId = new Map<string, string>();
   for (const row of (appUserRows ?? []) as EmployeeNameRow[]) {
     nameByAppUserId.set(row.id, displayName(row));
+  }
+
+  // V1 Ready-to-Post queue fix -- ONE batched RPC call for every VERIFIED
+  // row's posting status, never one call per row (the N+1 the prior gap
+  // audit flagged). Only VERIFIED documents can ever have posting
+  // records, so every other status is skipped entirely.
+  const verifiedPurchaseDocumentIds = Array.from(
+    new Set(results.filter((r) => r.out_status === "VERIFIED" && r.out_purchase_document_id).map((r) => r.out_purchase_document_id as string))
+  );
+  const postingStatusByPurchaseDocumentId = new Map<string, { status: "NOT_POSTED" | "PARTIALLY_POSTED" | "POSTED"; requiredLineCount: number }>();
+  if (verifiedPurchaseDocumentIds.length > 0) {
+    const { data: postingRows } = await serviceClient.rpc("get_purchase_documents_inventory_posting_status", {
+      p_organization_id: organizationId,
+      p_purchase_document_ids: verifiedPurchaseDocumentIds,
+    });
+    for (const row of (postingRows ?? []) as { out_purchase_document_id: string; out_status: "NOT_POSTED" | "PARTIALLY_POSTED" | "POSTED"; out_required_line_count: number }[]) {
+      postingStatusByPurchaseDocumentId.set(row.out_purchase_document_id, { status: row.out_status, requiredLineCount: row.out_required_line_count });
+    }
   }
 
   return results.map((row) => {
@@ -187,6 +223,9 @@ export async function getReceivingQueue(organizationId: string, filters: Receivi
         row.out_revision_number !== null &&
         row.out_revision_number > 1 &&
         row.out_current_verified_revision_number !== null,
+      createdByAppUserId: row.out_created_by_app_user_id,
+      createdByName: row.out_created_by_app_user_id ? (nameByAppUserId.get(row.out_created_by_app_user_id) ?? null) : null,
+      postingStatus: row.out_purchase_document_id ? (postingStatusByPurchaseDocumentId.get(row.out_purchase_document_id) ?? null) : null,
     };
   });
 }

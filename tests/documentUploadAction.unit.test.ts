@@ -23,6 +23,15 @@ vi.mock("@/app/lib/documents/finalizeDocumentUploadRpc", () => ({
 const { runDocumentExtractionAttemptMock } = vi.hoisted(() => ({ runDocumentExtractionAttemptMock: vi.fn() }));
 vi.mock("@/app/lib/documents/runDocumentExtractionAttempt", () => ({ runDocumentExtractionAttempt: runDocumentExtractionAttemptMock }));
 
+// AI Configuration + Usage/Cost Tracking milestone: finalizeDocumentUpload
+// now resolves provider/model via the central router before calling the
+// finalize RPC -- irrelevant to this file's own exception-safety/
+// idempotency focus, so it's replaced with a fixed resolution rather than
+// giving the storage-focused fake service client real table-query support.
+vi.mock("@/app/lib/ai/router/resolveAIConfig", () => ({
+  resolveAIConfig: vi.fn(async () => ({ provider: "gemini", model: "gemini-3.6-flash", source: "application_default" })),
+}));
+
 const { afterMock } = vi.hoisted(() => ({ afterMock: vi.fn() }));
 vi.mock("next/server", () => ({ after: afterMock }));
 

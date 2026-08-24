@@ -4,9 +4,13 @@ import { useMemo, useState } from "react";
 import { DocumentViewer } from "@/app/components/documents/DocumentViewer";
 import { DateField, MismatchNote, NumberField, SelectField, TextField } from "./DocumentFields";
 import { translateReviewFlags } from "@/app/lib/purchaseDocuments/reviewFlagText";
+import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
+import { blockingIssueSummaryLabel } from "@/app/components/receiving/blockingIssues";
+import { isRecognizedCreditLine } from "@/app/lib/ai/tasks/invoiceExtraction/validate";
+import { formatMoney } from "@/app/lib/formatMoney";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 import type { ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
-import type { VendorSummary } from "@/app/actions/vendors";
+import { createVendorFromReceiving, type VendorSummary } from "@/app/actions/vendors";
 
 const DOCUMENT_TYPE_OPTIONS: { value: PurchaseDocumentType; label: string }[] = [
   { value: "INVOICE", label: "Invoice" },
@@ -65,6 +69,7 @@ export function Step1ReviewInvoice({
   aiSuggestedVendorName,
   declaredDocumentType,
   aiSuggestedDocumentType,
+  aiAmountDue,
   vendors,
   reviewFlags,
   aiWarnings,
@@ -88,6 +93,12 @@ export function Step1ReviewInvoice({
   onRemoveLine: (index: number) => void;
   declaredVendorName: string | null;
   aiSuggestedVendorName: string | null;
+  /** A vendor-printed account balance/amount due that appears to include
+   * prior invoices -- distinct from header.total, which stays this
+   * document's own total. Null on the ordinary invoice (most invoices),
+   * where this block is not shown at all (Part 22/24: never shown unless
+   * genuine ambiguity exists). */
+  aiAmountDue: number | null;
   declaredDocumentType: PurchaseDocumentType | null;
   aiSuggestedDocumentType: string | null;
   vendors: VendorSummary[];
@@ -106,10 +117,39 @@ export function Step1ReviewInvoice({
 }) {
   const [narrowPane, setNarrowPane] = useState<"document" | "form">("document");
   const [highlightedLine, setHighlightedLine] = useState<number | null>(null);
+  const [vendorList, setVendorList] = useState(vendors);
+  const [creatingVendor, setCreatingVendor] = useState(false);
+  const [newVendorName, setNewVendorName] = useState("");
+  const [vendorCreatePending, setVendorCreatePending] = useState(false);
+  const [vendorCreateError, setVendorCreateError] = useState<string | null>(null);
+
+  async function handleCreateVendor() {
+    if (!newVendorName.trim()) return;
+    setVendorCreatePending(true);
+    setVendorCreateError(null);
+    const result = await createVendorFromReceiving(newVendorName.trim());
+    setVendorCreatePending(false);
+    if (!result.ok) {
+      setVendorCreateError(result.message);
+      return;
+    }
+    setVendorList((list) => [...list, result.vendor].sort((a, b) => a.name.localeCompare(b.name)));
+    onHeaderChange("vendorId", result.vendor.id);
+    setCreatingVendor(false);
+    setNewVendorName("");
+  }
 
   const translatedFlags = useMemo(() => translateReviewFlags(reviewFlags, lines), [reviewFlags, lines]);
   const blockingFlags = translatedFlags.filter((f) => f.severity === "error");
   const errorCount = blockingFlags.length;
+  // "Needs attention" is for things that genuinely need it -- error/warning
+  // only. A recognized credit line or a confidently-identified account
+  // balance is an INFO-severity fact, not a problem, and is already shown
+  // at its own line (the Credit badge) or in the Vendor Account block
+  // above -- repeating it in this alarming banner would be exactly the
+  // "giant NEEDS ATTENTION for clearly valid credit lines" bad UX this
+  // fix removes.
+  const attentionFlags = translatedFlags.filter((f) => f.severity !== "info");
 
   function focusLine(lineIndex: number) {
     setNarrowPane("form");
@@ -121,14 +161,14 @@ export function Step1ReviewInvoice({
 
   return (
     <div className="mt-4 flex flex-col gap-4">
-      {translatedFlags.length > 0 ? (
+      {attentionFlags.length > 0 ? (
         <div className="rounded-2xl border border-amber-800 bg-amber-950/20 p-4">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-amber-400">
             Needs attention{errorCount > 0 ? ` (${errorCount})` : ""}
           </h3>
           <ul className="mt-2 flex flex-col gap-1 text-sm">
-            {translatedFlags.map((flag, index) => (
-              <li key={index} className={flag.severity === "error" ? "text-red-300" : flag.severity === "warning" ? "text-amber-200" : "text-zinc-400"}>
+            {attentionFlags.map((flag, index) => (
+              <li key={index} className={flag.severity === "error" ? "text-red-300" : "text-amber-200"}>
                 {flag.lineIndex !== null ? (
                   <button type="button" onClick={() => focusLine(flag.lineIndex!)} className="text-left underline decoration-dotted underline-offset-2 hover:text-amber-50">
                     • {flag.text}
@@ -186,7 +226,7 @@ export function Step1ReviewInvoice({
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
             <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Header</h2>
 
-            <MismatchNote label="Vendor" declared={declaredVendorName} aiSuggested={aiSuggestedVendorName} current={vendors.find((v) => v.id === header.vendorId)?.name ?? null} />
+            <MismatchNote label="Vendor" declared={declaredVendorName} aiSuggested={aiSuggestedVendorName} current={vendorList.find((v) => v.id === header.vendorId)?.name ?? null} />
             <MismatchNote label="Document type" declared={declaredDocumentType} aiSuggested={aiSuggestedDocumentType} current={header.documentType} />
 
             <div className="mt-3 grid grid-cols-2 gap-3">
@@ -195,7 +235,7 @@ export function Step1ReviewInvoice({
                 value={header.vendorId ?? ""}
                 disabled={!editable}
                 onChange={(v) => onHeaderChange("vendorId", v || null)}
-                options={[{ value: "", label: "Select vendor…" }, ...vendors.map((v) => ({ value: v.id, label: v.name }))]}
+                options={[{ value: "", label: "Select vendor…" }, ...vendorList.map((v) => ({ value: v.id, label: v.name }))]}
               />
               <SelectField
                 label="Document type"
@@ -218,6 +258,69 @@ export function Step1ReviewInvoice({
               <NumberField label="Fees" value={header.fees} disabled={!editable} onChange={(v) => onHeaderChange("fees", v)} />
               <NumberField label="Total" value={header.total} disabled={!editable} onChange={(v) => onHeaderChange("total", v)} />
             </div>
+
+            {/* Only shown when the extraction recognized a genuine
+                current-document-vs-account-balance ambiguity (Part 15/22)
+                -- never on the ordinary invoice, where this concept
+                doesn't apply. Informational only: the Manager corrects
+                Total above directly if it should read this document's own
+                total instead of the vendor's account balance. */}
+            {aiAmountDue !== null ? (
+              <div className="mt-3 rounded-lg border border-amber-800 bg-amber-950/20 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">Vendor Account</p>
+                <p className="mt-1 text-xs text-amber-200">
+                  This invoice&apos;s printed total ({formatMoney(aiAmountDue, header.currency)}) appears to include a prior account
+                  balance, not just this document. If Total above should instead be this document&apos;s own subtotal + tax + fees,
+                  correct it directly.
+                </p>
+              </div>
+            ) : null}
+
+            {/* Controlled Manager exception (Admin Master Data milestone,
+                Part 15-17): the true vendor may not exist among active
+                vendors yet -- minimal name-only quick-create right here,
+                no Admin required, so Receiving never stalls. */}
+            {editable ? (
+              creatingVendor ? (
+                <div className="mt-3 rounded-lg border border-zinc-700 bg-zinc-950 p-3">
+                  <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                    New Vendor Name
+                    <input
+                      value={newVendorName}
+                      onChange={(e) => setNewVendorName(e.target.value)}
+                      autoFocus
+                      className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-50"
+                    />
+                  </label>
+                  {vendorCreateError ? <p className="mt-2 text-xs text-red-400">{vendorCreateError}</p> : null}
+                  <div className="mt-2 flex gap-3">
+                    <button
+                      type="button"
+                      disabled={vendorCreatePending || !newVendorName.trim()}
+                      onClick={handleCreateVendor}
+                      className="rounded-full bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40"
+                    >
+                      {vendorCreatePending ? "Creating…" : "Create & Use Vendor"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCreatingVendor(false);
+                        setNewVendorName("");
+                        setVendorCreateError(null);
+                      }}
+                      className="text-xs text-zinc-500 hover:text-zinc-300"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button type="button" onClick={() => setCreatingVendor(true)} className="mt-3 text-xs text-amber-300 hover:text-amber-200">
+                  Vendor not listed? + Create New Vendor
+                </button>
+              )
+            ) : null}
           </div>
 
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
@@ -239,6 +342,15 @@ export function Step1ReviewInvoice({
                     highlightedLine === index ? "border-amber-500 bg-amber-950/20" : "border-zinc-800"
                   }`}
                 >
+                  {isRecognizedCreditLine(line) ? (
+                    // A legitimate credit/return line -- recognized from
+                    // its own numbers (negative qty + negative total,
+                    // reconciling arithmetic), never colored/treated like a
+                    // system error (Part 11/14).
+                    <span className="col-span-full inline-flex w-fit items-center rounded-full bg-sky-950 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-400">
+                      Credit
+                    </span>
+                  ) : null}
                   <TextField label="SKU" value={line.vendorSku} disabled={!editable} onChange={(v) => onLineChange(index, { vendorSku: v })} />
                   <TextField label="Description" value={line.description} disabled={!editable} onChange={(v) => onLineChange(index, { description: v })} />
                   <NumberField label="Pkg Qty" value={line.packageQuantity} disabled={!editable} onChange={(v) => onLineChange(index, { packageQuantity: v })} />
@@ -259,37 +371,26 @@ export function Step1ReviewInvoice({
           </div>
 
           {editable ? (
-            <div className="sticky bottom-0 -mx-1 flex flex-col gap-2 rounded-2xl border border-zinc-800 bg-zinc-950/95 px-4 py-3 backdrop-blur">
-              {blockingFlags.length > 0 ? (
-                <p className="text-xs text-amber-400">
-                  Complete {blockingFlags.length} required field{blockingFlags.length === 1 ? "" : "s"} before continuing:{" "}
-                  {blockingFlags.map((f) => f.text).join(" ")}
-                </p>
-              ) : null}
+            <>
               {stepError ? <p className="text-sm text-red-400">{stepError}</p> : null}
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={onContinue}
-                  disabled={continuePending || savePending || blockingFlags.length > 0}
-                  aria-disabled={continuePending || savePending || blockingFlags.length > 0}
-                  title={blockingFlags.length > 0 ? "Complete the required fields listed above before continuing." : undefined}
-                  className="rounded-full bg-amber-400 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {continuePending ? "Saving…" : "Continue to Items"}
-                </button>
-                <button
-                  type="button"
-                  onClick={onSave}
-                  disabled={savePending || continuePending}
-                  className="rounded-full border border-zinc-700 px-4 py-2 text-sm text-zinc-200 disabled:opacity-40"
-                >
-                  {savePending ? "Saving…" : "Save Draft"}
-                </button>
-                {savedMessage ? <span className="text-xs text-emerald-400">{savedMessage}</span> : null}
-                <span className="text-xs text-zinc-500">Item matching may already be running in the background.</span>
-              </div>
-            </div>
+              <WorkflowFooter
+                contextLabel={blockingFlags.length > 0 ? blockingIssueSummaryLabel(blockingFlags.length, "field") : (savedMessage ?? undefined)}
+                contextTone={blockingFlags.length > 0 ? "warning" : "neutral"}
+                onContextClick={blockingFlags.length > 0 && blockingFlags[0].lineIndex !== null ? () => focusLine(blockingFlags[0].lineIndex!) : undefined}
+                primaryLabel="Continue to Items"
+                onPrimary={onContinue}
+                primaryDisabled={savePending || blockingFlags.length > 0}
+                primaryPending={continuePending}
+                primaryPendingLabel="Saving…"
+                primaryTitle={blockingFlags.length > 0 ? "Complete the required fields listed above before continuing." : undefined}
+                secondaryLabel="Save Draft"
+                onSecondary={onSave}
+                secondaryDisabled={continuePending}
+                secondaryPending={savePending}
+                secondaryPendingLabel="Saving…"
+              />
+              <p className="text-xs text-zinc-500">Item matching may already be running in the background.</p>
+            </>
           ) : null}
         </div>
       </div>

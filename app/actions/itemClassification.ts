@@ -47,6 +47,35 @@ export interface LineClassificationRow {
     baseUnitCode: string | null;
     spendCategoryId: string | null;
   } | null;
+  // ---- Receiving UX pass additions (Part 12/13/54): direct inline
+  // display on Confirm Items, no second "View All Item Mappings" page.
+  // All fields below are extensions of the SAME existing query -- no new
+  // read model, no denormalized copy.
+  /** Source-side context (from purchase_document_lines) -- what the
+   * vendor actually invoiced, for verifying a match at a glance. */
+  packageQuantity: number | null;
+  packageUnit: string | null;
+  measuredQuantity: number | null;
+  measuredUnit: string | null;
+  lineTotal: number | null;
+  /** Resolution-side context for a CONFIRMED INVENTORY line -- resolved
+   * directly from the same inventory_items join every other field here
+   * already uses, never a second lookup. */
+  inventoryItemNumber: string | null;
+  inventoryCategoryName: string | null;
+  inventoryBaseUnitCode: string | null;
+  /** Whether the CONFIRMED item was itself created via an AI proposal
+   * (durable, set once at creation -- unlike approval_status, which flips
+   * to CONFIRMED and can no longer distinguish "was this a new-item
+   * proposal" after approval). Used to truthfully label "New Item ·
+   * Manager Approved" without guessing. */
+  inventoryItemCreatedVia: "MANUAL" | "AI_PROPOSED" | null;
+  /** purchase_document_line_classifications' OWN spend_category_id --
+   * present for a CONFIRMED NON_INVENTORY line regardless of whether the
+   * underlying item join resolves; resolved to a display path client-side
+   * from the already-loaded spend-category list (flattenSpendCategoryPaths),
+   * never a second server round trip. */
+  spendCategoryId: string | null;
 }
 
 export type GetPurchaseDocumentLineClassificationsResult = { ok: true; lines: LineClassificationRow[] } | AuthFailure;
@@ -63,14 +92,14 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
   const [{ data: lines }, { data: classifications }] = await Promise.all([
     supabase
       .from("purchase_document_lines")
-      .select("line_key, line_number, vendor_sku, description")
+      .select("line_key, line_number, vendor_sku, description, package_quantity, package_unit, measured_quantity, measured_unit, line_total")
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", auth.manager.organizationId)
       .order("line_number"),
     supabase
       .from("purchase_document_line_classifications")
       .select(
-        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, inventory_items!purchase_document_line_classifications_item_org_fk(id, name), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code))"
+        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, inventory_categories(name), units(code)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code))"
       )
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", auth.manager.organizationId),
@@ -98,10 +127,22 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
         aiConfidence: null,
         aiProposedPurchaseUnit: null,
         aiNewItemProposal: null,
+        packageQuantity: line.package_quantity as number | null,
+        packageUnit: line.package_unit as string | null,
+        measuredQuantity: line.measured_quantity as number | null,
+        measuredUnit: line.measured_unit as string | null,
+        lineTotal: line.line_total as number | null,
+        inventoryItemNumber: null,
+        inventoryCategoryName: null,
+        inventoryBaseUnitCode: null,
+        inventoryItemCreatedVia: null,
+        spendCategoryId: null,
       };
     }
 
     const item = Array.isArray(c.inventory_items) ? c.inventory_items[0] : c.inventory_items;
+    const itemCategory = item ? (Array.isArray(item.inventory_categories) ? item.inventory_categories[0] : item.inventory_categories) : null;
+    const itemUnit = item ? (Array.isArray(item.units) ? item.units[0] : item.units) : null;
     const aiItem = Array.isArray(c.ai_item) ? c.ai_item[0] : c.ai_item;
     const aiItemUnit = aiItem ? (Array.isArray(aiItem.units) ? aiItem.units[0] : aiItem.units) : null;
     const isNewProposal = aiItem?.approval_status === "PENDING_REVIEW";
@@ -122,6 +163,16 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
       aiSuggestedIsNewProposal: isNewProposal,
       aiConfidence: c.ai_confidence as number | null,
       aiProposedPurchaseUnit: (c.ai_proposed_purchase_unit as AiProposedPurchaseUnit | null) ?? null,
+      packageQuantity: line.package_quantity as number | null,
+      packageUnit: line.package_unit as string | null,
+      measuredQuantity: line.measured_quantity as number | null,
+      measuredUnit: line.measured_unit as string | null,
+      lineTotal: line.line_total as number | null,
+      inventoryItemNumber: (item?.item_number as string | null | undefined) ?? null,
+      inventoryCategoryName: (itemCategory?.name as string | undefined) ?? null,
+      inventoryBaseUnitCode: (itemUnit?.code as string | undefined) ?? null,
+      inventoryItemCreatedVia: (item?.created_via as "MANUAL" | "AI_PROPOSED" | null | undefined) ?? null,
+      spendCategoryId: (c.spend_category_id as string | null | undefined) ?? null,
       aiNewItemProposal: isNewProposal
         ? {
             disposition: (aiItem?.disposition as "INVENTORY" | "NON_INVENTORY" | undefined) ?? "INVENTORY",

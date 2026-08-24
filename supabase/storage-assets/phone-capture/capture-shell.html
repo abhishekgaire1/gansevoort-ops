@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Gansevoort Ops — Capture</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #09090b;
+    color: #fafafa;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  main {
+    max-width: 28rem;
+    width: 100%;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+  }
+  .eyebrow { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #71717a; margin: 0 0 2rem; }
+  h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }
+  p { color: #a1a1aa; font-size: 0.875rem; line-height: 1.4; }
+  ul { color: #a1a1aa; font-size: 0.875rem; padding-left: 1.25rem; }
+  .step { display: none; flex-direction: column; flex: 1; }
+  .step.active { display: flex; }
+  .center { align-items: center; justify-content: center; text-align: center; gap: 0.5rem; }
+  img.preview { width: 100%; border-radius: 1rem; border: 1px solid #27272a; object-fit: contain; margin-top: 1.5rem; }
+  .row { display: flex; gap: 0.75rem; margin-top: 1.5rem; }
+  button {
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.9375rem;
+    border-radius: 999px;
+    padding: 1rem 1.5rem;
+    border: 1px solid transparent;
+    cursor: pointer;
+  }
+  button.primary { background: #fbbf24; color: #09090b; width: 100%; margin-top: 2rem; }
+  button.primary:disabled { opacity: 0.4; cursor: default; }
+  button.secondary { background: transparent; border-color: #3f3f46; color: #e4e4e7; flex: 1; }
+  .success { color: #34d399; font-size: 1.125rem; font-weight: 600; }
+  .danger { color: #f87171; font-size: 1rem; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Gansevoort Ops</p>
+
+  <section id="step-loading" class="step center active"><p>Loading…</p></section>
+
+  <section id="step-ready" class="step">
+    <h1>Photograph Invoice</h1>
+    <p>Make sure:</p>
+    <ul>
+      <li>the entire invoice is visible</li>
+      <li>text is in focus</li>
+      <li>there is minimal glare</li>
+    </ul>
+    <input id="camera-input" type="file" accept="image/jpeg,image/png" capture="environment" style="display:none" />
+    <button type="button" class="primary" id="take-photo-btn">Take Photo</button>
+  </section>
+
+  <section id="step-preview" class="step">
+    <img class="preview" id="preview-img" alt="Captured invoice preview" />
+    <div class="row">
+      <button type="button" class="secondary" id="retake-btn">Retake</button>
+      <button type="button" class="primary" id="use-photo-btn" style="margin-top:0;flex:1">Use Photo</button>
+    </div>
+  </section>
+
+  <section id="step-uploading" class="step center"><p>Sending photo…</p></section>
+
+  <section id="step-success" class="step center">
+    <p class="success">✓ Photo Sent</p>
+    <p>You can return to the computer.</p>
+    <p>You may close this page.</p>
+  </section>
+
+  <section id="step-upload-error" class="step center">
+    <p class="danger">Photo Could Not Be Sent</p>
+    <p id="upload-error-message">Check your connection and try again.</p>
+    <div class="row" style="width:100%">
+      <button type="button" class="secondary" id="error-retake-btn">Retake</button>
+      <button type="button" class="primary" id="error-retry-btn" style="margin-top:0;flex:1">Try Again</button>
+    </div>
+  </section>
+
+  <section id="step-expired" class="step center">
+    <p class="danger">This Capture Link Has Expired</p>
+    <p>Return to the computer and generate a new QR code.</p>
+  </section>
+
+  <section id="step-unavailable" class="step center">
+    <p class="danger">This Capture Session Is No Longer Available</p>
+  </section>
+
+  <section id="step-invalid" class="step center">
+    <p class="danger">This Capture Link Is Not Valid</p>
+    <p>Return to the computer and generate a new QR code.</p>
+  </section>
+
+  <section id="step-network-error" class="step center">
+    <p class="danger">Unable to Connect to Gansevoort Ops</p>
+    <p>Check your connection and try again.</p>
+    <button type="button" class="primary" id="network-retry-btn">Try Again</button>
+  </section>
+</main>
+<script>
+(function () {
+  // publishableKey is the project's PUBLIC key (never the secret/service-role
+  // key) -- injected as a literal by scripts/deployPhoneCaptureShellToNetlify.ts
+  // at deploy time, the same way it's already embedded in the desktop Next.js
+  // browser bundle. This file is static (identical for every session): the
+  // capture token is never baked in here -- it's read from this page's own
+  // URL query string at load time, exactly like any static SPA shell reads
+  // a token/ID a link supplied.
+  var publishableKey = "__PHONE_CAPTURE_PUBLISHABLE_KEY__";
+  var token = new URLSearchParams(window.location.search).get("token") || "";
+  // The frontend (this page, hosted on Netlify) and the backend API
+  // (the Supabase Edge Function) are DIFFERENT origins now that the shell
+  // no longer lives on *.supabase.co -- functionUrl must therefore be a
+  // fixed, injected value, never derived from window.location/origin
+  // (that was a real regression caught after the Netlify move: the old
+  // same-origin assumption silently pointed every request at Netlify's own
+  // domain, where no such route exists, leaving the page stuck on
+  // "Loading..." forever with an unhandled promise rejection). Injected
+  // the same way as publishableKey -- public project URL, no secret.
+  var functionUrl = "__PHONE_CAPTURE_API_BASE__";
+
+  var steps = ["loading", "ready", "preview", "uploading", "success", "upload-error", "expired", "unavailable", "invalid", "network-error"];
+  function showStep(name) {
+    for (var i = 0; i < steps.length; i++) {
+      var el = document.getElementById("step-" + steps[i]);
+      if (el) el.classList.toggle("active", steps[i] === name);
+    }
+  }
+
+  var selectedFile = null;
+  var previewUrl = null;
+  var STATUS_TIMEOUT_MS = 12000;
+
+  // Distinguishes a transport/timeout failure (rejects with
+  // {networkError:true}) from a normal, well-formed API response the
+  // backend itself marked ok:false (expired/invalid/unavailable) -- the UI
+  // must never conflate "couldn't reach the server" with "the server said
+  // this token is invalid."
+  function call(action, extra, timeoutMs) {
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, timeoutMs || STATUS_TIMEOUT_MS);
+    var body = Object.assign({ token: token, action: action }, extra || {});
+    return fetch(functionUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+      .then(function (res) {
+        clearTimeout(timer);
+        var contentType = res.headers.get("content-type") || "";
+        if (contentType.indexOf("application/json") === -1) {
+          return Promise.reject({ networkError: true });
+        }
+        return res.json();
+      })
+      .catch(function (err) {
+        clearTimeout(timer);
+        if (err && err.networkError) throw err;
+        throw { networkError: true };
+      });
+  }
+
+  function mapStatusToStep(result) {
+    if (!result.ok) {
+      if (result.reason === "expired") return "expired";
+      return "invalid";
+    }
+    if (result.status === "WAITING") return "ready";
+    if (result.status === "EXPIRED") return "expired";
+    if (result.status === "CANCELLED") return "unavailable";
+    if (result.status === "RECEIVED" || result.status === "CONTINUED") return "success";
+    return "invalid";
+  }
+
+  // Never leaves the UI on "Loading..." indefinitely: every path out of
+  // this function ends by showing SOME terminal/actionable step.
+  function loadStatus() {
+    showStep("loading");
+    call("status")
+      .then(function (result) { showStep(mapStatusToStep(result)); })
+      .catch(function () { showStep("network-error"); });
+  }
+
+  if (!token) {
+    showStep("invalid");
+  } else {
+    loadStatus();
+  }
+
+  document.getElementById("network-retry-btn").addEventListener("click", loadStatus);
+
+  document.getElementById("take-photo-btn").addEventListener("click", function () {
+    document.getElementById("camera-input").click();
+  });
+  document.getElementById("retake-btn").addEventListener("click", function () {
+    document.getElementById("camera-input").click();
+  });
+  document.getElementById("error-retake-btn").addEventListener("click", function () {
+    document.getElementById("camera-input").click();
+  });
+  document.getElementById("error-retry-btn").addEventListener("click", function () {
+    if (selectedFile) usePhoto();
+  });
+
+  document.getElementById("camera-input").addEventListener("change", function (e) {
+    var file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    selectedFile = file;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(file);
+    document.getElementById("preview-img").src = previewUrl;
+    showStep("preview");
+  });
+
+  document.getElementById("use-photo-btn").addEventListener("click", usePhoto);
+
+  function uploadToSignedUrl(signedUrl, file) {
+    var formData = new FormData();
+    formData.append("cacheControl", "3600");
+    formData.append("", file);
+    return fetch(signedUrl, {
+      method: "PUT",
+      headers: {
+        apikey: publishableKey,
+        Authorization: "Bearer " + publishableKey,
+        "x-upsert": "false",
+      },
+      body: formData,
+    }).then(function (res) {
+      if (!res.ok) throw new Error("upload_failed");
+    });
+  }
+
+  function usePhoto() {
+    if (!selectedFile) return;
+    showStep("uploading");
+    var contentType = selectedFile.type || "image/jpeg";
+
+    call("begin-upload", { contentType: contentType })
+      .then(function (begun) {
+        if (!begun.ok) return Promise.reject(begun);
+        return uploadToSignedUrl(begun.signedUrl, selectedFile).then(function () {
+          return call("finish-upload", { contentType: contentType });
+        });
+      })
+      .then(function (finished) {
+        if (!finished.ok) return Promise.reject(finished);
+        showStep("success");
+      })
+      .catch(function (failure) {
+        if (failure && failure.reason === "expired") return showStep("expired");
+        if (failure && failure.reason === "unavailable") return showStep("unavailable");
+        if (failure && failure.reason === "invalid") return showStep("invalid");
+        document.getElementById("upload-error-message").textContent =
+          (failure && failure.message) || "Check your connection and try again.";
+        showStep("upload-error");
+      });
+  }
+})();
+</script>
+</body>
+</html>

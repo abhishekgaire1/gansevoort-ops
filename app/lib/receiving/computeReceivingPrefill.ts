@@ -23,14 +23,14 @@ function unitsMatch(a: string, b: string): boolean {
 /** A real, STATED disagreement between what the invoice says and what the
  * item is confirmed to be received in -- never silently reconciled. A
  * missing invoice unit is NOT a conflict. */
-function unitsConflict(invoiceUnit: string | null, expectedUnit: string | null): boolean {
+export function unitsConflict(invoiceUnit: string | null, expectedUnit: string | null): boolean {
   return invoiceUnit !== null && expectedUnit !== null && !unitsMatch(invoiceUnit, expectedUnit);
 }
 
 /** True only when `candidate` is known (non-null) AND actually matches --
  * a null candidate is never treated as a match, so this never fabricates
  * agreement out of two unknowns. */
-function unitsEqual(unit: string, candidate: string | null): candidate is string {
+export function unitsEqual(unit: string, candidate: string | null): candidate is string {
   return candidate !== null && unitsMatch(unit, candidate);
 }
 
@@ -53,8 +53,17 @@ function unitsEqual(unit: string, candidate: string | null): candidate is string
  * If the invoice DOES explicitly state a unit, and it disagrees with what
  * was remembered/previously confirmed, that is a conflict requiring
  * manager review, not a silent pick of either value.
+ *
+ * Exported (Purchase Price Change Intelligence bug fix, real Bartlett
+ * Heavy Cream regression) for reuse by
+ * app/lib/purchasing/priceComparison.ts's computeCurrentBaseQuantity --
+ * price normalization needs the exact same "is this bare invoice quantity
+ * already in base units, or in the purchase/case unit" resolution this
+ * function already gets right; duplicating it there previously caused the
+ * fixed conversion factor to be applied unconditionally, silently
+ * dividing an already-per-PIECE price by the case-pack size a second time.
  */
-function resolveInvoiceUnit(line: ReceivingLineInfo): { unit: string | null; conflict: { invoiceUnit: string; rememberedUnit: string } | null } {
+export function resolveInvoiceUnit(line: ReceivingLineInfo): { unit: string | null; conflict: { invoiceUnit: string; rememberedUnit: string } | null } {
   const remembered = line.confirmedInvoiceUnitCode;
   if (line.invoicePackageUnit !== null) {
     if (remembered !== null && !unitsMatch(line.invoicePackageUnit, remembered)) {
