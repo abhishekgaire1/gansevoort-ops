@@ -35,6 +35,36 @@ import {
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
 
+/** Generic client-facing message for a genuinely unexpected failure --
+ * same wording app/actions/purchaseDocuments.ts already established for
+ * this exact situation (its own safeMessage() fallback). */
+const GENERIC_ERROR_MESSAGE = "Something went wrong. Try again.";
+
+/** Every business-rule error recordInventoryWasteAction knows how to
+ * translate into its own specific manager-facing message. Anything else
+ * is a genuinely unexpected failure that must never be silently
+ * discarded -- see logIfUnexpected. */
+function isKnownWasteError(err: unknown): boolean {
+  return (
+    err instanceof InsufficientInventoryError ||
+    err instanceof InvalidStorageLocationError ||
+    err instanceof InvalidWasteQuantityError ||
+    err instanceof InvalidWasteItemError ||
+    err instanceof WasteNoteRequiredError ||
+    err instanceof WasteRequestConflictError
+  );
+}
+
+/** The manager-facing message can stay friendly, but an UNEXPECTED error
+ * (not one of the typed business-rule errors above) must never just
+ * vanish behind a generic message with no server-side trace -- mirrors
+ * app/actions/purchaseDocuments.ts's own logIfUnexpected exactly. */
+function logIfUnexpected(actionName: string, err: unknown, context: Record<string, unknown>): void {
+  if (!isKnownWasteError(err)) {
+    console.error(`${actionName}: unexpected error`, { ...context, error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err });
+  }
+}
+
 export type ListWasteStorageLocationsResult = { ok: true; locations: StorageEligibleLocation[] } | AuthFailure;
 
 /** Same active + storage-eligible location set Cycle Count uses (Part 6)
@@ -130,7 +160,8 @@ export async function recordInventoryWasteAction(input: {
     if (err instanceof WasteRequestConflictError) {
       return { ok: false, reason: "request_conflict", message: "This request conflicts with a previous submission. Please try again." };
     }
-    return { ok: false, reason: "misconfigured", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("recordInventoryWasteAction", err, { locationId: input.locationId, inventoryItemId: input.inventoryItemId });
+    return { ok: false, reason: "misconfigured", message: GENERIC_ERROR_MESSAGE };
   }
 }
 

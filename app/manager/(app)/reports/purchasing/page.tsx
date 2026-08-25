@@ -4,8 +4,10 @@ import { getPurchasingReportAction, getPurchasingReportPriceChangesAction, getRe
 import { listVendors } from "@/app/actions/vendors";
 import { listInventoryCategories } from "@/app/actions/itemMaster";
 import { resolveReportPeriod, type ReportPeriodKey } from "../_lib/reportPeriod";
+import { buildExportQueryString } from "../_lib/exportQueryString";
 import { ReportPeriodControl } from "../_components/ReportPeriodControl";
 import { ReportRetryButton } from "../_components/ReportRetryButton";
+import { ReportDownloadMenu } from "../_components/ReportDownloadMenu";
 import { priceChangeTone } from "@/app/lib/purchasing/priceChangePresentation";
 import { PageHeader } from "@/app/components/manager/PageHeader";
 import { EmptyState } from "@/app/components/manager/EmptyState";
@@ -75,7 +77,11 @@ export default async function PurchasingReportPage({ searchParams }: { searchPar
 
   return (
     <div>
-      <PageHeader title="Purchasing" description="Total purchase value, vendor/category/item breakdowns, and recent price changes -- from verified purchase documents only." />
+      <PageHeader
+        title="Purchasing"
+        description="Total purchase value, vendor/category/item breakdowns, and recent price changes -- from verified purchase documents only."
+        action={<ReportDownloadMenu reportType="purchasing" queryString={buildExportQueryString(period, { vendor: vendorId, category: categoryId })} />}
+      />
 
       <div className="mt-4">
         <ReportPeriodControl

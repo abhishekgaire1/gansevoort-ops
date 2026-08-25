@@ -2,8 +2,10 @@ import Link from "next/link";
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getUsageReportAction, getReportsTimezone } from "@/app/actions/reports";
 import { resolveReportPeriod, type ReportPeriodKey } from "../_lib/reportPeriod";
+import { buildExportQueryString } from "../_lib/exportQueryString";
 import { ReportPeriodControl } from "../_components/ReportPeriodControl";
 import { ReportRetryButton } from "../_components/ReportRetryButton";
+import { ReportDownloadMenu } from "../_components/ReportDownloadMenu";
 import { PageHeader } from "@/app/components/manager/PageHeader";
 import { EmptyState } from "@/app/components/manager/EmptyState";
 
@@ -45,7 +47,11 @@ export default async function UsageReportPage({ searchParams }: { searchParams: 
 
   return (
     <div>
-      <PageHeader title="Inventory Usage" description="Withdrawals to stations -- not consumption or sales usage (V1 has no Sales data)." />
+      <PageHeader
+        title="Inventory Usage"
+        description="Withdrawals to stations -- not consumption or sales usage (V1 has no Sales data)."
+        action={<ReportDownloadMenu reportType="usage" queryString={buildExportQueryString(period)} />}
+      />
 
       <div className="mt-4">
         <ReportPeriodControl period={period} customFrom={customFrom} customTo={customTo} buildHref={periodHref} />

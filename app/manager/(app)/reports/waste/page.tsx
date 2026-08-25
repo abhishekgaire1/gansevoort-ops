@@ -3,21 +3,15 @@ import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getWasteReportAction, getReportsTimezone } from "@/app/actions/reports";
 import { listActivityLocationsAction } from "@/app/actions/inventoryActivity";
 import { resolveReportPeriod, type ReportPeriodKey } from "../_lib/reportPeriod";
+import { buildExportQueryString } from "../_lib/exportQueryString";
 import { ReportPeriodControl } from "../_components/ReportPeriodControl";
 import { ReportRetryButton } from "../_components/ReportRetryButton";
+import { ReportDownloadMenu } from "../_components/ReportDownloadMenu";
 import { PageHeader } from "@/app/components/manager/PageHeader";
 import { EmptyState } from "@/app/components/manager/EmptyState";
+import { WASTE_REASON_LABEL as REASON_LABEL } from "@/app/lib/reports/wasteReasonLabels";
 
 export const dynamic = "force-dynamic";
-
-const REASON_LABEL: Record<string, string> = {
-  EXPIRED: "Expired",
-  SPOILED: "Spoiled",
-  DAMAGED: "Damaged",
-  CONTAMINATED: "Contaminated",
-  STORAGE_ISSUE: "Storage Issue",
-  OTHER: "Other",
-};
 
 function firstValue(value: string | string[] | undefined): string | undefined {
   const resolved = Array.isArray(value) ? value[0] : value;
@@ -67,7 +61,11 @@ export default async function WasteReportPage({ searchParams }: { searchParams: 
 
   return (
     <div>
-      <PageHeader title="Waste" description="Tracked-storage inventory waste only -- events and quantity by item and reason." />
+      <PageHeader
+        title="Waste"
+        description="Tracked-storage inventory waste only -- events and quantity by item and reason."
+        action={<ReportDownloadMenu reportType="waste" queryString={buildExportQueryString(period, { location: locationId })} />}
+      />
 
       <div className="mt-4">
         <ReportPeriodControl period={period} customFrom={customFrom} customTo={customTo} buildHref={periodHref} extraHiddenFields={{ location: locationId }} />

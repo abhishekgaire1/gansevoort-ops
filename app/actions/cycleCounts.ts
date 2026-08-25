@@ -70,6 +70,41 @@ const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", messa
 
 const OWNED_BY_ANOTHER_MANAGER_MESSAGE = "This cycle count was started by another manager and can only be resumed by them.";
 
+/** Generic client-facing message for a genuinely unexpected failure --
+ * same wording app/actions/purchaseDocuments.ts already established for
+ * this exact situation (its own safeMessage() fallback). */
+const GENERIC_ERROR_MESSAGE = "Something went wrong. Try again.";
+
+/** Every business-rule error every action in this file knows how to
+ * translate into its own specific manager-facing message. Anything else
+ * is a genuinely unexpected failure (a constraint violation, a bad cast,
+ * a bug) that must never be silently discarded -- see logIfUnexpected. */
+function isKnownCycleCountError(err: unknown): boolean {
+  return (
+    err instanceof CycleCountOwnedByAnotherManagerError ||
+    err instanceof CycleCountLockedError ||
+    err instanceof InvalidStorageLocationError ||
+    err instanceof StaleCycleCountError ||
+    err instanceof MissingCompletionNoteError ||
+    err instanceof CycleCountKnownWasteUnresolvedError ||
+    err instanceof CycleCountWasteAlreadyRecordedError ||
+    err instanceof InvalidWasteQuantityError ||
+    err instanceof CycleCountWasteStaleError ||
+    err instanceof InsufficientInventoryError ||
+    err instanceof WasteNoteRequiredError
+  );
+}
+
+/** The manager-facing message can stay friendly, but an UNEXPECTED error
+ * (not one of the typed business-rule errors above) must never just
+ * vanish behind a generic message with no server-side trace -- mirrors
+ * app/actions/purchaseDocuments.ts's own logIfUnexpected exactly. */
+function logIfUnexpected(actionName: string, err: unknown, context: Record<string, unknown>): void {
+  if (!isKnownCycleCountError(err)) {
+    console.error(`${actionName}: unexpected error`, { ...context, error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err });
+  }
+}
+
 export type ListStorageLocationsResult = { ok: true; locations: StorageEligibleLocation[] } | AuthFailure;
 
 export async function listStorageEligibleLocationsForOrganization(): Promise<ListStorageLocationsResult> {
@@ -149,7 +184,8 @@ export async function startOrResumeCycleCountAction(locationId: string): Promise
     if (err instanceof InvalidStorageLocationError) {
       return { ok: false, reason: "invalid_location", message: "That location is not an active storage location." };
     }
-    return { ok: false, reason: "misconfigured", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("startOrResumeCycleCountAction", err, { locationId });
+    return { ok: false, reason: "misconfigured", message: GENERIC_ERROR_MESSAGE };
   }
 }
 
@@ -229,7 +265,8 @@ export async function addCycleCountLineAction(cycleCountId: string, inventoryIte
     if (err instanceof CycleCountLockedError) {
       return { ok: false, reason: "locked", message: "This cycle count is no longer open for counting." };
     }
-    return { ok: false, reason: "misconfigured", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("addCycleCountLineAction", err, { cycleCountId, inventoryItemId });
+    return { ok: false, reason: "misconfigured", message: GENERIC_ERROR_MESSAGE };
   }
 }
 
@@ -277,7 +314,8 @@ export async function recordCycleCountLineObservationAction(
     if (err instanceof CycleCountLockedError) {
       return { ok: false, reason: "locked", message: "This cycle count is no longer open for counting." };
     }
-    return { ok: false, reason: "misconfigured", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("recordCycleCountLineObservationAction", err, { cycleCountId, inventoryItemId });
+    return { ok: false, reason: "misconfigured", message: GENERIC_ERROR_MESSAGE };
   }
 }
 
@@ -347,7 +385,8 @@ export async function completeCycleCountAction(
         message: "Known waste must be recorded before this cycle count can be completed.",
       };
     }
-    return { ok: false, reason: "misconfigured", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("completeCycleCountAction", err, { cycleCountId, expectedVersion });
+    return { ok: false, reason: "misconfigured", message: GENERIC_ERROR_MESSAGE };
   }
 }
 
@@ -382,7 +421,8 @@ export async function cancelCycleCountAction(cycleCountId: string, expectedVersi
     if (err instanceof CycleCountLockedError) {
       return { ok: false, reason: "locked", message: "This cycle count was already completed or changed. Reload and try again." };
     }
-    return { ok: false, reason: "misconfigured", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("cancelCycleCountAction", err, { cycleCountId, expectedVersion });
+    return { ok: false, reason: "misconfigured", message: GENERIC_ERROR_MESSAGE };
   }
 }
 
@@ -430,7 +470,8 @@ export async function markCycleCountLineKnownWasteAction(
     if (err instanceof InvalidWasteQuantityError) {
       return { ok: false, reason: "invalid_quantity", message: "Enter a valid quantity -- it cannot exceed the negative variance for this item." };
     }
-    return { ok: false, reason: "misconfigured", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("markCycleCountLineKnownWasteAction", err, { cycleCountId, inventoryItemId });
+    return { ok: false, reason: "misconfigured", message: GENERIC_ERROR_MESSAGE };
   }
 }
 
@@ -503,6 +544,7 @@ export async function recordCycleCountLineWasteAction(
     if (err instanceof WasteNoteRequiredError) {
       return { ok: false, reason: "note_required", message: "A note is required when the reason is Other." };
     }
-    return { ok: false, reason: "misconfigured", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("recordCycleCountLineWasteAction", err, { cycleCountId, inventoryItemId });
+    return { ok: false, reason: "misconfigured", message: GENERIC_ERROR_MESSAGE };
   }
 }

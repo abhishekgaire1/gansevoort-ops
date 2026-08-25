@@ -5,8 +5,10 @@ import { listVendors } from "@/app/actions/vendors";
 import { receivingStatusPresentation } from "../../receiving/_lib/receivingPresentation";
 import type { ReceivingItemStatus } from "@/app/lib/documents/documentStatus";
 import { resolveReportPeriod, type ReportPeriodKey } from "../_lib/reportPeriod";
+import { buildExportQueryString } from "../_lib/exportQueryString";
 import { ReportPeriodControl } from "../_components/ReportPeriodControl";
 import { ReportRetryButton } from "../_components/ReportRetryButton";
+import { ReportDownloadMenu } from "../_components/ReportDownloadMenu";
 import { PageHeader } from "@/app/components/manager/PageHeader";
 import { EmptyState } from "@/app/components/manager/EmptyState";
 
@@ -52,7 +54,11 @@ export default async function ReceivingReportPage({ searchParams }: { searchPara
 
   return (
     <div>
-      <PageHeader title="Receiving" description="Documents received, by vendor and status, credits, and posting progress." />
+      <PageHeader
+        title="Receiving"
+        description="Documents received, by vendor and status, credits, and posting progress."
+        action={<ReportDownloadMenu reportType="receiving" queryString={buildExportQueryString(period, { vendor: vendorId })} />}
+      />
 
       <div className="mt-4">
         <ReportPeriodControl period={period} customFrom={customFrom} customTo={customTo} buildHref={periodHref} extraHiddenFields={{ vendor: vendorId }} />

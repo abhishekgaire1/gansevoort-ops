@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InvoiceExtractionResult } from "@/app/lib/ai/tasks/invoiceExtraction/types";
+import { AIProviderError } from "@/app/lib/ai/provider";
 
 // CI-safe: no network, no AI call. Covers the application-level 20MB
 // upload limit (app/actions/aiInvoiceExtraction.ts) -- independent of, and
@@ -247,5 +248,92 @@ describe("extractInvoiceFromUpload -- other upload validation, unaffected by the
     const result = await extractInvoiceFromUpload(formData);
     expect(result).toMatchObject({ ok: false, reason: "invalid_file_type" });
     expect(runInvoiceExtractionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("extractInvoiceFromUpload -- RC1 error-handling: raw provider/unexpected errors never reach the client", () => {
+  const SENSITIVE_PROVIDER_TEXT = "Gemini provider request failed with internal request abc123";
+  const SENSITIVE_UNEXPECTED_TEXT = "postgres internal relation inventory_secret_table";
+  const SENSITIVE_DIAGNOSTIC_TAG = "secret-provider-diagnostic";
+
+  it("1. an AIProviderError whose message wraps raw provider text is never returned to the client", async () => {
+    runInvoiceExtractionMock.mockRejectedValue(new AIProviderError("PROVIDER_REQUEST_FAILED", `Gemini request failed: ${SENSITIVE_PROVIDER_TEXT} (${SENSITIVE_DIAGNOSTIC_TAG})`));
+    const formData = formDataWithFile(pdfBytesOfSize(1024));
+    const result = await extractInvoiceFromUpload(formData);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).not.toContain(SENSITIVE_PROVIDER_TEXT);
+      expect(result.message).not.toContain(SENSITIVE_DIAGNOSTIC_TAG);
+      // pre-approved, per-error-code safe message from extractionErrorMessages.ts
+      expect(result.message).toBe("Couldn't reach the extraction service. Try again in a moment.");
+    }
+  });
+
+  it("2. a generic unexpected Error is not returned raw", async () => {
+    runInvoiceExtractionMock.mockRejectedValue(new Error(SENSITIVE_UNEXPECTED_TEXT));
+    const formData = formDataWithFile(pdfBytesOfSize(1024));
+    const result = await extractInvoiceFromUpload(formData);
+    expect(result).toEqual({ ok: false, reason: "extraction_failed", message: "Extraction failed for an unknown reason. Try again." });
+  });
+
+  it("3. a non-Error thrown value is not exposed to the client", async () => {
+    runInvoiceExtractionMock.mockRejectedValue({ weird: "raw object", detail: SENSITIVE_UNEXPECTED_TEXT });
+    const formData = formDataWithFile(pdfBytesOfSize(1024));
+    const result = await extractInvoiceFromUpload(formData);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).not.toContain(SENSITIVE_UNEXPECTED_TEXT);
+      expect(result.message).not.toContain("[object Object]");
+    }
+  });
+
+  it("4. the server logs the useful internal error (including the provider code) for an AIProviderError", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    runInvoiceExtractionMock.mockRejectedValue(new AIProviderError("SCHEMA_VALIDATION_FAILED", `bad schema: ${SENSITIVE_PROVIDER_TEXT}`));
+    const formData = formDataWithFile(pdfBytesOfSize(1024));
+    await extractInvoiceFromUpload(formData);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "extractInvoiceFromUpload: extraction failed",
+      expect.objectContaining({ error: expect.objectContaining({ message: expect.stringContaining(SENSITIVE_PROVIDER_TEXT), code: "SCHEMA_VALIDATION_FAILED" }) })
+    );
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("4b. the server logs a genuinely unexpected (non-AIProviderError) failure too", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    runInvoiceExtractionMock.mockRejectedValue(new Error(SENSITIVE_UNEXPECTED_TEXT));
+    const formData = formDataWithFile(pdfBytesOfSize(1024));
+    await extractInvoiceFromUpload(formData);
+    expect(consoleErrorSpy).toHaveBeenCalledWith("extractInvoiceFromUpload: extraction failed", expect.objectContaining({ error: expect.objectContaining({ message: SENSITIVE_UNEXPECTED_TEXT }) }));
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("5. existing safe validation errors (file too large / empty / wrong type) remain unchanged -- never routed through the AI-error path at all", async () => {
+    const tooLarge = await extractInvoiceFromUpload(formDataWithFile(pdfBytesOfSize(TWENTY_MB + 1)));
+    expect(tooLarge).toEqual({ ok: false, reason: "file_too_large", message: "Invoice files must be 20 MB or smaller." });
+
+    const empty = await extractInvoiceFromUpload(formDataWithFile(Buffer.alloc(0)));
+    expect(empty).toEqual({ ok: false, reason: "invalid_file_type", message: "The uploaded file is empty." });
+
+    expect(runInvoiceExtractionMock).not.toHaveBeenCalled();
+  });
+
+  it("6. authorization/organization context (the GEMINI_API_KEY gate) remains unchanged", async () => {
+    const originalKey = process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    const result = await extractInvoiceFromUpload(formDataWithFile(pdfBytesOfSize(1024)));
+    expect(result).toEqual({ ok: false, reason: "misconfigured", message: "GEMINI_API_KEY is not set." });
+    expect(runInvoiceExtractionMock).not.toHaveBeenCalled();
+    process.env.GEMINI_API_KEY = originalKey;
+  });
+
+  it("7. success behavior is unchanged", async () => {
+    runInvoiceExtractionMock.mockResolvedValue(FAKE_RESULT);
+    const result = await extractInvoiceFromUpload(formDataWithFile(pdfBytesOfSize(1024)));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.model).toBe(FAKE_RESULT.model);
+      expect(result.result.provider).toBe(FAKE_RESULT.provider);
+    }
   });
 });

@@ -9,6 +9,25 @@ import {
 } from "@/app/lib/inventory/withdrawalBatch";
 import { BatchInsufficientInventoryError, InvalidStorageLocationError, type InsufficientBatchLine } from "@/app/lib/inventory/errors";
 
+/** Generic client-facing message for a genuinely unexpected failure --
+ * same wording app/actions/purchaseDocuments.ts already established for
+ * this exact situation (its own safeMessage() fallback). */
+const GENERIC_ERROR_MESSAGE = "Something went wrong. Try again.";
+
+function isKnownWithdrawalBatchError(err: unknown): boolean {
+  return err instanceof BatchInsufficientInventoryError || err instanceof InvalidStorageLocationError;
+}
+
+/** The employee-facing message can stay friendly, but an UNEXPECTED error
+ * must never just vanish behind a generic message with no server-side
+ * trace -- mirrors app/actions/purchaseDocuments.ts's own
+ * logIfUnexpected exactly. Shared-kiosk-facing, same as recordWithdrawal. */
+function logIfUnexpected(actionName: string, err: unknown, context: Record<string, unknown>): void {
+  if (!isKnownWithdrawalBatchError(err)) {
+    console.error(`${actionName}: unexpected error`, { ...context, error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err });
+  }
+}
+
 export interface RecordWithdrawalBatchInput {
   stationId: string;
   cartLines: WithdrawalBatchCartLine[];
@@ -64,6 +83,7 @@ export async function recordWithdrawalBatch(kioskToken: string, input: RecordWit
     if (err instanceof InvalidStorageLocationError) {
       return { ok: false, reason: "invalid_location", message: "One of the selected locations is no longer available. Reload and choose again." };
     }
-    return { ok: false, reason: "rpc_error", message: err instanceof Error ? err.message : String(err) };
+    logIfUnexpected("recordWithdrawalBatch", err, { stationId: input.stationId, lineCount: input.cartLines.length });
+    return { ok: false, reason: "rpc_error", message: GENERIC_ERROR_MESSAGE };
   }
 }

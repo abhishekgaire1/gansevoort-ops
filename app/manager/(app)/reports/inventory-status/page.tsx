@@ -3,6 +3,7 @@ import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getInventoryStatusReportAction } from "@/app/actions/reports";
 import { listActivityLocationsAction } from "@/app/actions/inventoryActivity";
 import { ReportRetryButton } from "../_components/ReportRetryButton";
+import { ReportDownloadMenu } from "../_components/ReportDownloadMenu";
 import { PageHeader } from "@/app/components/manager/PageHeader";
 import { EmptyState } from "@/app/components/manager/EmptyState";
 
@@ -35,7 +36,11 @@ export default async function InventoryStatusReportPage({ searchParams }: { sear
 
   return (
     <div>
-      <PageHeader title="Inventory Status" description="Current authoritative balances -- low stock and out-of-stock items." />
+      <PageHeader
+        title="Inventory Status"
+        description="Current authoritative balances -- low stock and out-of-stock items."
+        action={<ReportDownloadMenu reportType="inventory-status" queryString={locationId ? `location=${encodeURIComponent(locationId)}` : ""} />}
+      />
 
       <form method="get" className="mt-4 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-xs text-zinc-400">

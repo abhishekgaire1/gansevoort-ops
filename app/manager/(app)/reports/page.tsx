@@ -2,7 +2,9 @@ import Link from "next/link";
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getPurchasingReportAction, getReceivingReportAction, getUsageReportAction, getWasteReportAction, getInventoryStatusReportAction, getReportsTimezone } from "@/app/actions/reports";
 import { resolveReportPeriod, type ReportPeriodKey } from "./_lib/reportPeriod";
+import { buildExportQueryString } from "./_lib/exportQueryString";
 import { ReportPeriodControl } from "./_components/ReportPeriodControl";
+import { ReportDownloadMenu } from "./_components/ReportDownloadMenu";
 import { PageHeader } from "@/app/components/manager/PageHeader";
 
 export const dynamic = "force-dynamic";
@@ -55,7 +57,11 @@ export default async function ReportsOverviewPage({ searchParams }: { searchPara
 
   return (
     <div>
-      <PageHeader title="Reports" description="Operational summary across Receiving and Inventory -- deeper detail lives on each dedicated report." />
+      <PageHeader
+        title="Reports"
+        description="Operational summary across Receiving and Inventory -- deeper detail lives on each dedicated report."
+        action={<ReportDownloadMenu reportType="overview" queryString={buildExportQueryString(period)} />}
+      />
 
       <div className="mt-4">
         <ReportPeriodControl period={period} customFrom={customFrom} customTo={customTo} buildHref={periodHref} />

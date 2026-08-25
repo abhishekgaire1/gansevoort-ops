@@ -89,6 +89,7 @@ function buildNav(isAdmin: boolean): NavItem[] {
         { label: "Activity", href: "/manager/inventory/activity", isActive: (p) => p.startsWith("/manager/inventory/activity") },
         { label: "Cycle Count", href: "/manager/inventory/cycle-count", isActive: (p) => p.startsWith("/manager/inventory/cycle-count") },
         { label: "Inventory Waste", href: "/manager/inventory/waste", isActive: (p) => p.startsWith("/manager/inventory/waste") },
+        { label: "Inventory Alerts", href: "/manager/inventory/alerts", isActive: (p) => p.startsWith("/manager/inventory/alerts") },
       ],
     },
     // V1 Reports foundation -- everything here is a read-only aggregate

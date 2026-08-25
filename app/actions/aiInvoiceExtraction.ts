@@ -5,6 +5,7 @@ import { AIProviderError } from "@/app/lib/ai/provider";
 import { runInvoiceExtraction } from "@/app/lib/ai/tasks/invoiceExtraction/runInvoiceExtraction";
 import type { NormalizedInvoiceExtraction, ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
 import { ACCEPTED_MIME_TYPES, sniffMimeType } from "@/app/lib/files/sniffMimeType";
+import { safeExtractionErrorMessage } from "@/app/lib/documents/extractionErrorMessages";
 
 /**
  * Dev-test-harness Server Action only (app/manager/ai-test/invoice) --
@@ -92,9 +93,21 @@ export async function extractInvoiceFromUpload(formData: FormData, compareModel?
       },
     };
   } catch (err) {
+    // The raw message here (for AIProviderError, this already includes
+    // the underlying provider/network error text -- see
+    // app/lib/ai/providers/gemini.ts's PROVIDER_REQUEST_FAILED) is useful
+    // for diagnosis but must never reach the client -- logged here,
+    // server-side only, then translated via the SAME safe, pre-approved
+    // per-error-code messages the real (production) extraction-status
+    // surface already uses (app/lib/documents/extractionErrorMessages.ts),
+    // rather than inventing a second generic message for this dev-only
+    // test harness.
+    console.error("extractInvoiceFromUpload: extraction failed", {
+      error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack, code: err instanceof AIProviderError ? err.code : undefined } : err,
+    });
     if (err instanceof AIProviderError) {
-      return { ok: false, reason: "extraction_failed", message: err.message };
+      return { ok: false, reason: "extraction_failed", message: safeExtractionErrorMessage(err.code) };
     }
-    return { ok: false, reason: "extraction_failed", message: err instanceof Error ? err.message : "Extraction failed for an unknown reason." };
+    return { ok: false, reason: "extraction_failed", message: safeExtractionErrorMessage(null) };
   }
 }

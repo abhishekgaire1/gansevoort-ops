@@ -4,25 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { listNotifications, markAllNotificationsRead, markNotificationRead } from "@/app/actions/notifications";
 import type { UserNotification } from "@/app/lib/notifications/types";
+import { entityHref } from "@/app/lib/notifications/entityHref";
 
 /** Minimal in-app bell/badge/dropdown -- no email/SMS/push. Polls the same
  * lightweight way StatusPoller already works for extraction status: a
  * plain interval while the dropdown could plausibly have new content,
  * no websockets/real-time infrastructure. */
 const POLL_INTERVAL_MS = 30_000;
-
-function entityHref(notification: UserNotification): string {
-  if (notification.entityType === "purchase_document") {
-    return `/manager/purchases/${notification.entityId}`;
-  }
-  if (notification.entityType === "inventory_cycle_count") {
-    return `/manager/inventory/cycle-count/${notification.entityId}`;
-  }
-  if (notification.entityType === "inventory_waste_event") {
-    return `/manager/inventory/waste/${notification.entityId}`;
-  }
-  return "#";
-}
 
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
