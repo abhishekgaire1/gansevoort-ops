@@ -60,19 +60,47 @@ describe("listItemUsageUnitsAction", () => {
   it("maps primary/secondary usage-unit rows, org-scoped and active-only", async () => {
     fromMock.mockReturnValue(
       fakeSelectChain([
-        { id: "usage-1", usage_slot: 1, confirmed_at: "2026-01-01T00:00:00Z", inventory_item_units: { unit_id: "unit-lb", units: { code: "LB", name: "Pound" } } },
-        { id: "usage-2", usage_slot: 2, confirmed_at: "2026-02-01T00:00:00Z", inventory_item_units: { unit_id: "unit-case", units: { code: "CASE", name: "Case" } } },
+        {
+          id: "usage-1",
+          usage_slot: 1,
+          confirmed_at: "2026-01-01T00:00:00Z",
+          inventory_item_units: { unit_id: "unit-lb", requires_actual_measurement: false, units: { code: "LB", name: "Pound" } },
+        },
+        {
+          id: "usage-2",
+          usage_slot: 2,
+          confirmed_at: "2026-02-01T00:00:00Z",
+          inventory_item_units: { unit_id: "unit-case", requires_actual_measurement: false, units: { code: "CASE", name: "Case" } },
+        },
       ])
     );
     const result = await listItemUsageUnitsAction("item-1");
     expect(result).toEqual({
       ok: true,
       units: [
-        { usageUnitId: "usage-1", slot: 1, unitId: "unit-lb", unitCode: "LB", unitName: "Pound", confirmedAt: "2026-01-01T00:00:00Z" },
-        { usageUnitId: "usage-2", slot: 2, unitId: "unit-case", unitCode: "CASE", unitName: "Case", confirmedAt: "2026-02-01T00:00:00Z" },
+        { usageUnitId: "usage-1", slot: 1, unitId: "unit-lb", unitCode: "LB", unitName: "Pound", confirmedAt: "2026-01-01T00:00:00Z", requiresActualMeasurement: false },
+        { usageUnitId: "usage-2", slot: 2, unitId: "unit-case", unitCode: "CASE", unitName: "Case", confirmedAt: "2026-02-01T00:00:00Z", requiresActualMeasurement: false },
       ],
     });
     expect(fromMock).toHaveBeenCalledWith("inventory_item_usage_units");
+  });
+
+  it("weigh-at-kiosk restoration: reports requiresActualMeasurement true for a measured usage unit", async () => {
+    fromMock.mockReturnValue(
+      fakeSelectChain([
+        {
+          id: "usage-1",
+          usage_slot: 1,
+          confirmed_at: "2026-01-01T00:00:00Z",
+          inventory_item_units: { unit_id: "unit-box", requires_actual_measurement: true, units: { code: "BOX", name: "Box" } },
+        },
+      ])
+    );
+    const result = await listItemUsageUnitsAction("item-1");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.units[0].requiresActualMeasurement).toBe(true);
+    }
   });
 });
 
@@ -85,6 +113,19 @@ describe("addSecondaryUsageUnitAction", () => {
       p_inventory_item_id: "item-1",
       p_secondary_unit_code: "CASE",
       p_secondary_conversion_factor: 24,
+      p_requires_actual_measurement: false,
+    });
+  });
+
+  it("weigh-at-kiosk restoration: passes p_requires_actual_measurement true and a null factor when the manager explicitly confirms a measured secondary unit", async () => {
+    await addSecondaryUsageUnitAction("item-1", "BOX", null, true);
+    expect(rpcMock).toHaveBeenCalledWith("manager_add_secondary_usage_unit", {
+      p_organization_id: "org-1",
+      p_app_user_id: "admin-1",
+      p_inventory_item_id: "item-1",
+      p_secondary_unit_code: "BOX",
+      p_secondary_conversion_factor: null,
+      p_requires_actual_measurement: true,
     });
   });
 

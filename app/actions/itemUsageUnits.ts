@@ -23,6 +23,11 @@ export interface ItemUsageUnitSummary {
   unitCode: string;
   unitName: string;
   confirmedAt: string | null;
+  /** Whether this slot is "measure at withdrawal" (weigh-at-kiosk
+   * restoration, approved product decision) rather than a fixed
+   * conversion factor -- never the factor itself, which this screen
+   * never needs or shows. */
+  requiresActualMeasurement: boolean;
 }
 
 export type ListItemUsageUnitsResult = { ok: true; units: ItemUsageUnitSummary[] } | AuthFailure;
@@ -31,7 +36,7 @@ interface UsageUnitRow {
   id: string;
   usage_slot: number;
   confirmed_at: string | null;
-  inventory_item_units: { unit_id: string; units: { code: string; name: string } | { code: string; name: string }[] | null } | null;
+  inventory_item_units: { unit_id: string; requires_actual_measurement: boolean; units: { code: string; name: string } | { code: string; name: string }[] | null } | null;
 }
 
 export async function listItemUsageUnitsAction(itemId: string): Promise<ListItemUsageUnitsResult> {
@@ -41,7 +46,7 @@ export async function listItemUsageUnitsAction(itemId: string): Promise<ListItem
   const supabase = getServiceRoleClient();
   const { data, error } = await supabase
     .from("inventory_item_usage_units")
-    .select("id, usage_slot, confirmed_at, inventory_item_units!inner(unit_id, units(code, name))")
+    .select("id, usage_slot, confirmed_at, inventory_item_units!inner(unit_id, requires_actual_measurement, units(code, name))")
     .eq("organization_id", auth.manager.organizationId)
     .eq("inventory_item_id", itemId)
     .eq("is_active", true)
@@ -58,6 +63,7 @@ export async function listItemUsageUnitsAction(itemId: string): Promise<ListItem
       unitCode: unit?.code ?? "",
       unitName: unit?.name ?? "",
       confirmedAt: row.confirmed_at,
+      requiresActualMeasurement: iiu?.requires_actual_measurement ?? false,
     };
   });
 
@@ -66,7 +72,20 @@ export async function listItemUsageUnitsAction(itemId: string): Promise<ListItem
 
 export type UsageUnitMutationResult = { ok: true } | AuthFailure | { ok: false; reason: "error"; message: string };
 
-export async function addSecondaryUsageUnitAction(itemId: string, secondaryUnitCode: string, secondaryConversionFactor: number): Promise<UsageUnitMutationResult> {
+/**
+ * requiresActualMeasurement defaults to false (fixed conversion, unchanged
+ * behavior). When true, secondaryConversionFactor must be null -- the
+ * employee supplies the actual measured base quantity at withdrawal time
+ * instead (weigh-at-kiosk restoration, approved product decision). The
+ * manager is always the one confirming this mode here -- an AI proposal
+ * elsewhere may recommend a mode, but never calls this action directly.
+ */
+export async function addSecondaryUsageUnitAction(
+  itemId: string,
+  secondaryUnitCode: string,
+  secondaryConversionFactor: number | null,
+  requiresActualMeasurement = false
+): Promise<UsageUnitMutationResult> {
   const auth = await requireAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
@@ -77,6 +96,7 @@ export async function addSecondaryUsageUnitAction(itemId: string, secondaryUnitC
     p_inventory_item_id: itemId,
     p_secondary_unit_code: secondaryUnitCode,
     p_secondary_conversion_factor: secondaryConversionFactor,
+    p_requires_actual_measurement: requiresActualMeasurement,
   });
   if (error) {
     const mapped = mapItemMasterRpcError(error);

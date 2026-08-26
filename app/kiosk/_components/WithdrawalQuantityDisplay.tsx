@@ -1,6 +1,11 @@
 interface WithdrawalQuantityDisplayProps {
   value: string;
   unit: string;
+  /** Defaults to "Withdraw Quantity" -- pass "Measure at Withdrawal" (or
+   * equivalent) when the selected usage unit requires actual measurement
+   * (weigh-at-kiosk restoration), so the employee never mistakes a
+   * measured entry for a simple count. */
+  label?: string;
 }
 
 /**
@@ -16,10 +21,10 @@ interface WithdrawalQuantityDisplayProps {
  * always the thing typing into it, exactly like the ValueCard it replaces
  * here.
  */
-export function WithdrawalQuantityDisplay({ value, unit }: WithdrawalQuantityDisplayProps) {
+export function WithdrawalQuantityDisplay({ value, unit, label = "Withdraw Quantity" }: WithdrawalQuantityDisplayProps) {
   return (
     <div className="flex w-full flex-1 flex-col items-center justify-center gap-1.5 rounded-2xl border border-kiosk-amber/40 bg-kiosk-amber/5 px-4 py-6 text-center">
-      <span className="text-xs font-semibold uppercase tracking-wide text-kiosk-text-muted">Withdraw Quantity</span>
+      <span className="text-xs font-semibold uppercase tracking-wide text-kiosk-text-muted">{label}</span>
       <span className="flex items-baseline justify-center gap-3">
         <span
           className="font-bold tabular-nums leading-none text-kiosk-text"

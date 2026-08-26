@@ -529,7 +529,7 @@ export function KioskApp() {
           sourceLocationId: line.sourceLocationId,
           enteredQuantity: line.enteredQuantity,
           enteredUnitId: line.enteredUnitId,
-          measuredBaseQuantity: null,
+          measuredBaseQuantity: line.measuredBaseQuantity,
         })),
       });
 
@@ -820,14 +820,25 @@ export function KioskApp() {
                       onSelect={(unitId) => dispatch({ type: "USAGE_UNIT_SELECTED", unitId })}
                     />
                   ) : null}
-                  <WithdrawalQuantityDisplay
-                    value={state.enteredQuantity}
-                    unit={
-                      state.usageUnits.secondary && state.selectedUsageUnitId === state.usageUnits.secondary.unitId
-                        ? state.usageUnits.secondary.unitCode
-                        : state.usageUnits.primary.unitCode
-                    }
-                  />
+                  {(() => {
+                    const chosenUnit =
+                      state.usageUnits!.secondary && state.selectedUsageUnitId === state.usageUnits!.secondary.unitId
+                        ? state.usageUnits!.secondary
+                        : state.usageUnits!.primary;
+                    // Weigh-at-kiosk restoration: a measured unit shows the
+                    // ITEM's own base unit here, never the selected usage
+                    // unit's code -- measured_base_quantity is always
+                    // expressed in the base unit regardless of which slot
+                    // was chosen, and no conversion factor is ever shown or
+                    // requested for a measured unit.
+                    return (
+                      <WithdrawalQuantityDisplay
+                        value={state.enteredQuantity}
+                        unit={chosenUnit.requiresActualMeasurement ? state.usageUnits!.baseUnitCode : chosenUnit.unitCode}
+                        label={chosenUnit.requiresActualMeasurement ? "Measure at Withdrawal" : "Withdraw Quantity"}
+                      />
+                    );
+                  })()}
                   {overAvailable && selectedLocationAvailability !== null ? (
                     <p role="alert" className="text-sm font-medium text-kiosk-coral-strong">
                       Only {formatKioskQuantity(selectedLocationAvailability.balance)} {selectedLocationAvailability.baseUnitCode} are currently available.

@@ -46,6 +46,17 @@ export interface CartLine {
    * selected when this line was added/last saved -- NOT necessarily the
    * item's base unit under the purchase-versus-usage unit model. */
   unitCode: string;
+  /** Non-null only when the selected usage unit is "measure at
+   * withdrawal" (weigh-at-kiosk restoration) -- the same value the
+   * employee typed into enteredQuantity, carried through as the
+   * authoritative measured base quantity the server must use directly,
+   * never an invented conversion. Null for a fixed-conversion unit. */
+  measuredBaseQuantity: string | null;
+  /** The item's own base unit code -- always populated, but only
+   * DISPLAYED in place of unitCode when measuredBaseQuantity is set
+   * (weigh-at-kiosk restoration): "8 LB" (measured, base unit), never "8
+   * BOX" (which would misleadingly read as a count of boxes). */
+  baseUnitCode: string;
 }
 
 export function cartLineKey(inventoryItemId: string, sourceLocationId: string): string {
@@ -71,8 +82,18 @@ function applyCartLine(cart: CartLine[], excludeLineId: string | null, line: Car
 
   const existing = remaining[idx];
   const combinedQuantity = String((Number(existing.enteredQuantity) || 0) + (Number(line.enteredQuantity) || 0));
+  // measuredBaseQuantity combines the same additive way -- two separate
+  // weighings of the same item/source really did add that much base
+  // quantity together. Only combines when BOTH lines are measured (the
+  // same physical unit choice produced both); existing.measuredBaseQuantity
+  // is null exactly when this combine can't apply (different unit mode),
+  // which the caller never allows to reach here in practice.
+  const combinedMeasured =
+    existing.measuredBaseQuantity !== null && line.measuredBaseQuantity !== null
+      ? String((Number(existing.measuredBaseQuantity) || 0) + (Number(line.measuredBaseQuantity) || 0))
+      : line.measuredBaseQuantity;
   const updated = [...remaining];
-  updated[idx] = { ...line, enteredQuantity: combinedQuantity };
+  updated[idx] = { ...line, enteredQuantity: combinedQuantity, measuredBaseQuantity: combinedMeasured };
   return updated;
 }
 
@@ -420,6 +441,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         enteredQuantity: state.enteredQuantity,
         enteredUnitId: chosenUnit.unitId,
         unitCode: chosenUnit.unitCode,
+        measuredBaseQuantity: chosenUnit.requiresActualMeasurement ? state.enteredQuantity : null,
+        baseUnitCode: state.usageUnits.baseUnitCode,
       };
 
       return {
@@ -489,6 +512,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         enteredQuantity: state.enteredQuantity,
         enteredUnitId: chosenUnit.unitId,
         unitCode: chosenUnit.unitCode,
+        measuredBaseQuantity: chosenUnit.requiresActualMeasurement ? state.enteredQuantity : null,
+        baseUnitCode: state.usageUnits.baseUnitCode,
       };
 
       return {

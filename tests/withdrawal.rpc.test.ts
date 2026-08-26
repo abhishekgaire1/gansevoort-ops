@@ -143,40 +143,37 @@ describe("record_inventory_withdrawal", () => {
     expect(result.normalizedBaseQuantity).toBe("2.5");
   });
 
-  it("rejects a withdrawal entered in a non-base packaging unit (BOX), even though it's a configured active inventory_item_units row, with no partial rows", async () => {
+  it("weigh-at-kiosk restoration (20260811100126): a withdrawal entered in a confirmed MEASURED secondary usage unit (BOX) succeeds and posts exactly the submitted measured base quantity, never a computed conversion", async () => {
     const clientRequestId = randomUUID();
-    await expect(
-      recordInventoryWithdrawal(fx.supabase, {
-        performedByAppUserId: fx.changeableEmployeeAppUserId,
-        stationId: fx.stationId,
-        sourceLocationId: locationId,
-        inventoryItemId: fx.variableWeightItemId,
-        enteredQuantity: "2",
-        enteredUnitId: fx.variableWeightBoxUnitId,
-        measuredBaseQuantity: "8",
-        clientRequestId,
-      })
-    ).rejects.toThrow(/must be inventory_item_id .* base unit/);
-    // No row for THIS request id exists at all -- proves the whole call
-    // rolled back, not just the failing statement. Scoped to
-    // clientRequestId (never a broad station/employee count) so this can't
-    // be thrown off by unrelated concurrently-running test files.
+    const result = await recordInventoryWithdrawal(fx.supabase, {
+      performedByAppUserId: fx.changeableEmployeeAppUserId,
+      stationId: fx.stationId,
+      sourceLocationId: locationId,
+      inventoryItemId: fx.variableWeightItemId,
+      enteredQuantity: "2",
+      enteredUnitId: fx.variableWeightBoxUnitId,
+      measuredBaseQuantity: "8",
+      clientRequestId,
+    });
+    expect(result.normalizedBaseQuantity).toBe("8");
     const count = await movementCountForRequest(clientRequestId);
-    expect(count).toBe(0);
+    expect(count).toBe(1);
   });
 
-  it("rejects a withdrawal entered in a non-base packaging unit (CASE), even though it has a valid fixed conversion_factor", async () => {
-    await expect(
-      recordInventoryWithdrawal(fx.supabase, {
-        performedByAppUserId: fx.changeableEmployeeAppUserId,
-        stationId: fx.stationId,
-        sourceLocationId: locationId,
-        inventoryItemId: fx.fixedConversionItemId,
-        enteredQuantity: "3",
-        enteredUnitId: fx.fixedConversionCaseUnitId,
-        clientRequestId: randomUUID(),
-      })
-    ).rejects.toThrow(/must be inventory_item_id .* base unit/);
+  it("a withdrawal entered in a confirmed FIXED secondary usage unit (CASE) succeeds, deriving the base quantity from the confirmed factor, never a client-supplied one", async () => {
+    const result = await recordInventoryWithdrawal(fx.supabase, {
+      performedByAppUserId: fx.changeableEmployeeAppUserId,
+      stationId: fx.stationId,
+      sourceLocationId: locationId,
+      inventoryItemId: fx.fixedConversionItemId,
+      enteredQuantity: "3",
+      enteredUnitId: fx.fixedConversionCaseUnitId,
+      clientRequestId: randomUUID(),
+    });
+    // fixedConversionCaseUnitId's confirmed factor is 10 (see
+    // testFixtures.ts) -- 3 CASE * 10 = 30, never anything the client
+    // could have supplied or influenced.
+    expect(result.normalizedBaseQuantity).toBe("30");
   });
 
   it("preserves package-unit mappings untouched -- BOX and CASE remain active, correctly configured inventory_item_units rows even though withdrawal now rejects them", async () => {

@@ -26,6 +26,13 @@ export interface KioskUsageUnitOption {
   unitCode: string;
   unitName: string;
   slot: KioskUsageSlot;
+  /** True when this unit is "measure at withdrawal" (approved product
+   * decision restoring weigh-at-kiosk support, 20260811100126): no fixed
+   * factor is assumed, and the employee must enter the actual measured
+   * base quantity directly at withdrawal time -- see
+   * enforce_movement_line_measurement. False means the server derives
+   * the base quantity from a confirmed fixed conversion_factor instead. */
+  requiresActualMeasurement: boolean;
 }
 
 export interface KioskUsageUnits {
@@ -36,6 +43,11 @@ export interface KioskUsageUnits {
   /** True only when a secondary exists -- a one-unit item gets rigid,
    * selector-free quantity entry (approved-plan §11). */
   needsSelector: boolean;
+  /** The item's own authoritative base unit code -- shown beside the
+   * measured-quantity field regardless of which usage unit is selected,
+   * since measured_base_quantity is always expressed in THIS unit, never
+   * the selected usage unit's own code (weigh-at-kiosk restoration). */
+  baseUnitCode: string;
 }
 
 export type GetKioskUsageUnitsResult =
@@ -47,6 +59,7 @@ interface UsageUnitRow {
   usage_slot: number;
   inventory_item_units: {
     unit_id: string;
+    requires_actual_measurement: boolean;
     units: { code: string; name: string } | { code: string; name: string }[] | null;
   } | null;
 }
@@ -58,7 +71,7 @@ export async function getKioskUsageUnitsForItem(
 ): Promise<GetKioskUsageUnitsResult> {
   const { data: item, error: itemError } = await supabase
     .from("inventory_items")
-    .select("id")
+    .select("id, base_unit_id")
     .eq("id", inventoryItemId)
     .eq("organization_id", organizationId)
     .maybeSingle();
@@ -69,6 +82,12 @@ export async function getKioskUsageUnitsForItem(
   if (!item) {
     return { ok: false, reason: "item_not_found" };
   }
+
+  const { data: baseUnit, error: baseUnitError } = await supabase.from("units").select("code").eq("id", item.base_unit_id).single();
+  if (baseUnitError) {
+    throw new Error(`getKioskUsageUnitsForItem base-unit lookup failed: ${baseUnitError.message}`);
+  }
+  const baseUnitCode = baseUnit.code as string;
 
   const { data: rows, error: rowsError } = await supabase
     .from("inventory_item_usage_units")
@@ -89,7 +108,14 @@ export async function getKioskUsageUnitsForItem(
     const unit = (Array.isArray(iiu.units) ? iiu.units[0] : iiu.units) as { code: string; name: string } | null;
     if (!unit) return null;
     const slot = row.usage_slot === 2 ? 2 : 1;
-    return { usageUnitId: row.id, unitId: iiu.unit_id, unitCode: unit.code, unitName: unit.name, slot };
+    return {
+      usageUnitId: row.id,
+      unitId: iiu.unit_id,
+      unitCode: unit.code,
+      unitName: unit.name,
+      slot,
+      requiresActualMeasurement: iiu.requires_actual_measurement,
+    };
   };
 
   const options = ((rows ?? []) as unknown as UsageUnitRow[]).map(toOption).filter((o): o is KioskUsageUnitOption => o !== null);
@@ -102,6 +128,6 @@ export async function getKioskUsageUnitsForItem(
 
   return {
     ok: true,
-    units: { primary, secondary, needsSelector: secondary !== null },
+    units: { primary, secondary, needsSelector: secondary !== null, baseUnitCode },
   };
 }

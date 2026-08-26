@@ -2,18 +2,24 @@ import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getKioskUsageUnitsForItem } from "@/app/lib/kiosk/withdrawalUnit";
 
-// CI-safe: no network, no database -- fakes the two-query Supabase chain
-// under the purchase-versus-usage unit model (20260811100119): an item
-// lookup (org-scoped existence check), then the item's confirmed kiosk
-// usage units (inventory_item_usage_units joined to inventory_item_units/
-// units) -- one required primary (usage_slot 1), one optional secondary
-// (usage_slot 2). Deliberately never fetches or returns conversion_factor
-// -- the server always re-derives the authoritative factor itself at
-// withdrawal time (approved-plan §11).
+// CI-safe: no network, no database -- fakes the three-query Supabase chain
+// under the purchase-versus-usage unit model (20260811100119, extended by
+// 20260811100126 for weigh-at-kiosk restoration): an item lookup
+// (org-scoped existence check, also returning base_unit_id), a lookup of
+// that base unit's own code (shown beside a measured field regardless of
+// which usage unit is selected), then the item's confirmed kiosk usage
+// units (inventory_item_usage_units joined to inventory_item_units/units)
+// -- one required primary (usage_slot 1), one optional secondary
+// (usage_slot 2), each carrying requiresActualMeasurement. Deliberately
+// never fetches or returns conversion_factor -- the server always
+// re-derives the authoritative factor itself at withdrawal time
+// (approved-plan §11).
 
 interface FakeSupabaseOptions {
   item: Record<string, unknown> | null;
   itemError?: unknown;
+  baseUnit?: Record<string, unknown> | null;
+  baseUnitError?: unknown;
   usageUnitRows?: Record<string, unknown>[] | null;
   usageUnitsError?: unknown;
 }
@@ -27,11 +33,22 @@ function usageUnitRow(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
-function createFakeSupabase({ item, itemError = null, usageUnitRows = [], usageUnitsError = null }: FakeSupabaseOptions) {
+function createFakeSupabase({
+  item,
+  itemError = null,
+  baseUnit = { code: "LB" },
+  baseUnitError = null,
+  usageUnitRows = [],
+  usageUnitsError = null,
+}: FakeSupabaseOptions) {
   const itemMaybeSingle = vi.fn().mockResolvedValue({ data: item, error: itemError });
   const itemEqOrg = vi.fn().mockReturnValue({ maybeSingle: itemMaybeSingle });
   const itemEqId = vi.fn().mockReturnValue({ eq: itemEqOrg });
   const itemSelect = vi.fn().mockReturnValue({ eq: itemEqId });
+
+  const baseUnitSingle = vi.fn().mockResolvedValue({ data: baseUnit, error: baseUnitError });
+  const baseUnitEqId = vi.fn().mockReturnValue({ single: baseUnitSingle });
+  const baseUnitSelect = vi.fn().mockReturnValue({ eq: baseUnitEqId });
 
   const usageUnitsOrder = vi.fn().mockResolvedValue({ data: usageUnitRows, error: usageUnitsError });
   const usageUnitsEqIiuActive = vi.fn().mockReturnValue({ order: usageUnitsOrder });
@@ -42,6 +59,7 @@ function createFakeSupabase({ item, itemError = null, usageUnitRows = [], usageU
 
   const from = vi.fn((table: string) => {
     if (table === "inventory_items") return { select: itemSelect };
+    if (table === "units") return { select: baseUnitSelect };
     if (table === "inventory_item_usage_units") return { select: usageUnitsSelect };
     throw new Error(`unexpected table: ${table}`);
   });
@@ -51,6 +69,7 @@ function createFakeSupabase({ item, itemError = null, usageUnitRows = [], usageU
     from,
     itemEqId,
     itemEqOrg,
+    baseUnitEqId,
     usageUnitsSelect,
     usageUnitsEqOrg,
     usageUnitsEqItem,
@@ -69,37 +88,50 @@ describe("getKioskUsageUnitsForItem", () => {
   });
 
   it("scopes the item lookup by both id and organization_id", async () => {
-    const { client, itemEqId, itemEqOrg } = createFakeSupabase({ item: { id: "item-1" }, usageUnitRows: [usageUnitRow()] });
+    const { client, itemEqId, itemEqOrg } = createFakeSupabase({
+      item: { id: "item-1", base_unit_id: "unit-lb" },
+      usageUnitRows: [usageUnitRow()],
+    });
     await getKioskUsageUnitsForItem(client, "org-1", "item-1");
     expect(itemEqId).toHaveBeenCalledWith("id", "item-1");
     expect(itemEqOrg).toHaveBeenCalledWith("organization_id", "org-1");
   });
 
+  it("looks up the item's own base unit code by base_unit_id", async () => {
+    const { client, baseUnitEqId } = createFakeSupabase({
+      item: { id: "item-1", base_unit_id: "unit-lb" },
+      usageUnitRows: [usageUnitRow()],
+    });
+    await getKioskUsageUnitsForItem(client, "org-1", "item-1");
+    expect(baseUnitEqId).toHaveBeenCalledWith("id", "unit-lb");
+  });
+
   it("returns unit_not_configured when there is no active primary (slot 1) usage unit", async () => {
-    const { client } = createFakeSupabase({ item: { id: "item-1" }, usageUnitRows: [] });
+    const { client } = createFakeSupabase({ item: { id: "item-1", base_unit_id: "unit-lb" }, usageUnitRows: [] });
     const result = await getKioskUsageUnitsForItem(client, "org-1", "item-1");
     expect(result).toEqual({ ok: false, reason: "unit_not_configured" });
   });
 
   it("returns a one-unit result (no selector needed) when only a primary usage unit exists", async () => {
     const { client } = createFakeSupabase({
-      item: { id: "item-1" },
+      item: { id: "item-1", base_unit_id: "unit-lb" },
       usageUnitRows: [usageUnitRow({ id: "usage-1", usage_slot: 1 })],
     });
     const result = await getKioskUsageUnitsForItem(client, "org-1", "item-1");
     expect(result).toEqual({
       ok: true,
       units: {
-        primary: { usageUnitId: "usage-1", unitId: "unit-lb", unitCode: "LB", unitName: "Pound", slot: 1 },
+        primary: { usageUnitId: "usage-1", unitId: "unit-lb", unitCode: "LB", unitName: "Pound", slot: 1, requiresActualMeasurement: false },
         secondary: null,
         needsSelector: false,
+        baseUnitCode: "LB",
       },
     });
   });
 
   it("returns needsSelector true with both units when a secondary usage unit is also confirmed", async () => {
     const { client } = createFakeSupabase({
-      item: { id: "item-1" },
+      item: { id: "item-1", base_unit_id: "unit-lb" },
       usageUnitRows: [
         usageUnitRow({ id: "usage-1", usage_slot: 1 }),
         usageUnitRow({
@@ -113,22 +145,50 @@ describe("getKioskUsageUnitsForItem", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.units.needsSelector).toBe(true);
-      expect(result.units.secondary).toEqual({ usageUnitId: "usage-2", unitId: "unit-case", unitCode: "CASE", unitName: "Case", slot: 2 });
+      expect(result.units.secondary).toEqual({
+        usageUnitId: "usage-2",
+        unitId: "unit-case",
+        unitCode: "CASE",
+        unitName: "Case",
+        slot: 2,
+        requiresActualMeasurement: false,
+      });
+    }
+  });
+
+  it("marks a measured secondary usage unit's requiresActualMeasurement true (weigh-at-kiosk restoration)", async () => {
+    const { client } = createFakeSupabase({
+      item: { id: "item-1", base_unit_id: "unit-lb" },
+      usageUnitRows: [
+        usageUnitRow({ id: "usage-1", usage_slot: 1 }),
+        usageUnitRow({
+          id: "usage-2",
+          usage_slot: 2,
+          inventory_item_units: { unit_id: "unit-box", is_active: true, requires_actual_measurement: true, units: { code: "BOX", name: "Box" } },
+        }),
+      ],
+    });
+    const result = await getKioskUsageUnitsForItem(client, "org-1", "item-1");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.units.secondary?.requiresActualMeasurement).toBe(true);
+      expect(result.units.primary.requiresActualMeasurement).toBe(false);
+      expect(result.units.baseUnitCode).toBe("LB");
     }
   });
 
   it("never includes a conversion factor anywhere in the result -- display fields only", async () => {
-    const { client } = createFakeSupabase({ item: { id: "item-1" }, usageUnitRows: [usageUnitRow()] });
+    const { client } = createFakeSupabase({ item: { id: "item-1", base_unit_id: "unit-lb" }, usageUnitRows: [usageUnitRow()] });
     const result = await getKioskUsageUnitsForItem(client, "org-1", "item-1");
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(Object.keys(result.units.primary)).toEqual(["usageUnitId", "unitId", "unitCode", "unitName", "slot"]);
+      expect(Object.keys(result.units.primary)).toEqual(["usageUnitId", "unitId", "unitCode", "unitName", "slot", "requiresActualMeasurement"]);
     }
   });
 
   it("scopes the usage-unit query to the organization, the item, both is_active flags, and orders by usage_slot ascending", async () => {
     const { client, usageUnitsSelect, usageUnitsEqOrg, usageUnitsEqItem, usageUnitsEqActive, usageUnitsEqIiuActive, usageUnitsOrder } = createFakeSupabase({
-      item: { id: "item-1" },
+      item: { id: "item-1", base_unit_id: "unit-lb" },
       usageUnitRows: [usageUnitRow()],
     });
     await getKioskUsageUnitsForItem(client, "org-1", "item-1");
@@ -145,8 +205,13 @@ describe("getKioskUsageUnitsForItem", () => {
     await expect(getKioskUsageUnitsForItem(client, "org-1", "item-1")).rejects.toThrow("boom");
   });
 
+  it("throws on a Postgres error from the base-unit lookup", async () => {
+    const { client } = createFakeSupabase({ item: { id: "item-1", base_unit_id: "unit-lb" }, baseUnitError: { message: "boom" } });
+    await expect(getKioskUsageUnitsForItem(client, "org-1", "item-1")).rejects.toThrow("boom");
+  });
+
   it("throws on a Postgres error from the usage-unit query", async () => {
-    const { client } = createFakeSupabase({ item: { id: "item-1" }, usageUnitsError: { message: "boom" } });
+    const { client } = createFakeSupabase({ item: { id: "item-1", base_unit_id: "unit-lb" }, usageUnitsError: { message: "boom" } });
     await expect(getKioskUsageUnitsForItem(client, "org-1", "item-1")).rejects.toThrow("boom");
   });
 });

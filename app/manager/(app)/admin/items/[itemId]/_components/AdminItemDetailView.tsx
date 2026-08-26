@@ -259,14 +259,28 @@ function UsageUnitsSection({ itemId, units, usageUnits }: { itemId: string; unit
   const [adding, setAdding] = useState(false);
   const [secondaryUnitCode, setSecondaryUnitCode] = useState("");
   const [secondaryFactor, setSecondaryFactor] = useState("");
+  // Fixed conversion (unchanged behavior) unless the manager explicitly
+  // switches to Measured -- weigh-at-kiosk restoration (approved product
+  // decision). An AI proposal may one day recommend a mode here, but this
+  // toggle is what actually commits it: the manager must explicitly
+  // select and save, never an automatic classification.
+  const [secondaryMode, setSecondaryMode] = useState<"fixed" | "measured">("fixed");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const canSaveSecondary =
+    secondaryUnitCode !== "" && (secondaryMode === "measured" || (secondaryFactor.trim() !== "" && Number(secondaryFactor) > 0));
+
   async function handleAddSecondary() {
-    if (!secondaryUnitCode || !secondaryFactor.trim() || Number(secondaryFactor) <= 0) return;
+    if (!canSaveSecondary) return;
     setPending(true);
     setError(null);
-    const result = await addSecondaryUsageUnitAction(itemId, secondaryUnitCode, Number(secondaryFactor));
+    const result = await addSecondaryUsageUnitAction(
+      itemId,
+      secondaryUnitCode,
+      secondaryMode === "measured" ? null : Number(secondaryFactor),
+      secondaryMode === "measured"
+    );
     setPending(false);
     if (!result.ok) {
       setError("message" in result ? result.message : "Unable to add secondary usage unit.");
@@ -275,6 +289,7 @@ function UsageUnitsSection({ itemId, units, usageUnits }: { itemId: string; unit
     setAdding(false);
     setSecondaryUnitCode("");
     setSecondaryFactor("");
+    setSecondaryMode("fixed");
     router.refresh();
   }
 
@@ -313,6 +328,7 @@ function UsageUnitsSection({ itemId, units, usageUnits }: { itemId: string; unit
             <p className="text-sm font-medium text-zinc-200">{primary ? `${primary.unitName} (${primary.unitCode})` : "Not configured"}</p>
             <p className="text-[11px] text-zinc-500">Primary</p>
           </div>
+          {primary ? <UsageUnitModeBadge requiresActualMeasurement={primary.requiresActualMeasurement} /> : null}
         </div>
 
         {secondary ? (
@@ -323,7 +339,8 @@ function UsageUnitsSection({ itemId, units, usageUnits }: { itemId: string; unit
               </p>
               <p className="text-[11px] text-zinc-500">Secondary</p>
             </div>
-            <div className="flex gap-3">
+            <div className="flex items-center gap-3">
+              <UsageUnitModeBadge requiresActualMeasurement={secondary.requiresActualMeasurement} />
               <button type="button" disabled={pending} onClick={() => handleMakePrimary(secondary.usageUnitId)} className="text-xs font-medium text-amber-300 hover:text-amber-200 disabled:opacity-40">
                 Make Primary
               </button>
@@ -345,24 +362,57 @@ function UsageUnitsSection({ itemId, units, usageUnits }: { itemId: string; unit
                     </option>
                   ))}
               </select>
-              <input
-                type="number"
-                placeholder="Conversion factor"
-                value={secondaryFactor}
-                onChange={(e) => setSecondaryFactor(e.target.value)}
-                className="w-32 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
-              />
+              <div className="flex rounded-lg border border-zinc-700 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setSecondaryMode("fixed")}
+                  className={`rounded-l-lg px-2 py-1.5 ${secondaryMode === "fixed" ? "bg-amber-400 text-zinc-950 font-semibold" : "bg-zinc-900 text-zinc-300"}`}
+                >
+                  Fixed conversion
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSecondaryMode("measured")}
+                  className={`rounded-r-lg px-2 py-1.5 ${secondaryMode === "measured" ? "bg-amber-400 text-zinc-950 font-semibold" : "bg-zinc-900 text-zinc-300"}`}
+                >
+                  Measured at withdrawal
+                </button>
+              </div>
+              {secondaryMode === "fixed" ? (
+                <input
+                  type="number"
+                  placeholder="Conversion factor"
+                  value={secondaryFactor}
+                  onChange={(e) => setSecondaryFactor(e.target.value)}
+                  className="w-32 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
+                />
+              ) : null}
             </div>
+            {secondaryMode === "measured" ? (
+              <p className="text-[11px] text-zinc-500">
+                No conversion factor is stored -- the employee enters the actual measured quantity, in this item&apos;s own base unit, at every
+                withdrawal.
+              </p>
+            ) : null}
             <div className="flex gap-3">
               <button
                 type="button"
-                disabled={pending || !secondaryUnitCode || !secondaryFactor.trim() || Number(secondaryFactor) <= 0}
+                disabled={pending || !canSaveSecondary}
                 onClick={handleAddSecondary}
                 className="rounded-full bg-emerald-500 px-3 py-1 text-xs font-semibold text-zinc-950 disabled:opacity-40"
               >
                 {pending ? "Saving…" : "Save"}
               </button>
-              <button type="button" onClick={() => setAdding(false)} className="text-xs text-zinc-500 hover:text-zinc-300">
+              <button
+                type="button"
+                onClick={() => {
+                  setAdding(false);
+                  setSecondaryMode("fixed");
+                  setSecondaryUnitCode("");
+                  setSecondaryFactor("");
+                }}
+                className="text-xs text-zinc-500 hover:text-zinc-300"
+              >
                 Cancel
               </button>
             </div>
@@ -376,5 +426,17 @@ function UsageUnitsSection({ itemId, units, usageUnits }: { itemId: string; unit
 
       {error ? <p className="mt-2 text-sm text-red-400">{error}</p> : null}
     </div>
+  );
+}
+
+function UsageUnitModeBadge({ requiresActualMeasurement }: { requiresActualMeasurement: boolean }) {
+  return requiresActualMeasurement ? (
+    <span className="rounded-full border border-sky-800 bg-sky-950/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300">
+      Measured
+    </span>
+  ) : (
+    <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-400">
+      Fixed
+    </span>
   );
 }

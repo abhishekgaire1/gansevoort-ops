@@ -262,20 +262,41 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     { organization_id: organizationId, name: `${TEST_PREFIX}Variable Weight Item` },
     { organization_id: organizationId, category_id: categoryId, base_unit_id: lbUnitId, name: `${TEST_PREFIX}Variable Weight Item` }
   );
-  await findOrInsert(
+  const variableWeightBoxIiuId = await findOrInsert(
     supabase,
     "inventory_item_units",
     { inventory_item_id: variableWeightItemId, unit_id: boxUnitId },
     { inventory_item_id: variableWeightItemId, unit_id: boxUnitId, requires_actual_measurement: true, is_default_entry_unit: true }
   );
-  // Self-referencing base-unit row: the only unit an ISSUE_TO_STATION
-  // withdrawal may use for this item under the withdrawal-unit
-  // simplification -- BOX above stays purely for a future receiving flow.
-  await findOrInsert(
+  // Self-referencing base-unit row: LB is this item's own base unit --
+  // BOX above is a SEPARATE, measured packaging unit.
+  const variableWeightLbIiuId = await findOrInsert(
     supabase,
     "inventory_item_units",
     { inventory_item_id: variableWeightItemId, unit_id: lbUnitId },
     { inventory_item_id: variableWeightItemId, unit_id: lbUnitId, conversion_factor: 1, is_default_entry_unit: false }
+  );
+  // Kiosk usage-unit registration (20260811100119 backfills this
+  // automatically for items that already existed when it was applied --
+  // this fixture item is created fresh by whichever test file runs
+  // first, so it never got backfilled and must register explicitly).
+  // LB (the base unit) is primary; BOX is confirmed as a MEASURED
+  // secondary -- weigh-at-kiosk restoration (20260811100126, approved
+  // product decision): a manager has explicitly confirmed employees may
+  // withdraw a box and weigh it, never a manager_add_secondary_usage_unit
+  // fixed-factor row (BOX genuinely varies in weight, which is the whole
+  // point of this fixture).
+  await findOrInsert(
+    supabase,
+    "inventory_item_usage_units",
+    { organization_id: organizationId, inventory_item_id: variableWeightItemId, usage_slot: 1 },
+    { organization_id: organizationId, inventory_item_id: variableWeightItemId, inventory_item_unit_id: variableWeightLbIiuId, usage_slot: 1, is_active: true }
+  );
+  await findOrInsert(
+    supabase,
+    "inventory_item_usage_units",
+    { organization_id: organizationId, inventory_item_id: variableWeightItemId, usage_slot: 2 },
+    { organization_id: organizationId, inventory_item_id: variableWeightItemId, inventory_item_unit_id: variableWeightBoxIiuId, usage_slot: 2, is_active: true }
   );
 
   const fixedConversionItemId = await findOrInsert(
@@ -284,7 +305,7 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     { organization_id: organizationId, name: `${TEST_PREFIX}Fixed Conversion Item` },
     { organization_id: organizationId, category_id: categoryId, base_unit_id: pieceUnitId, name: `${TEST_PREFIX}Fixed Conversion Item` }
   );
-  await findOrInsert(
+  const fixedConversionCaseIiuId = await findOrInsert(
     supabase,
     "inventory_item_units",
     { inventory_item_id: fixedConversionItemId, unit_id: caseUnitId },
@@ -292,11 +313,26 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
   );
   // Self-referencing base-unit row -- same role as variableWeightLbUnitId
   // above, but for a fixed-conversion-style packaging unit (CASE).
-  await findOrInsert(
+  const fixedConversionPieceIiuId = await findOrInsert(
     supabase,
     "inventory_item_units",
     { inventory_item_id: fixedConversionItemId, unit_id: pieceUnitId },
     { inventory_item_id: fixedConversionItemId, unit_id: pieceUnitId, conversion_factor: 1, is_default_entry_unit: false }
+  );
+  // PIECE (base) primary, CASE confirmed as a FIXED secondary (factor 10)
+  // -- same rationale as variableWeightItemId above, fixed-conversion
+  // side.
+  await findOrInsert(
+    supabase,
+    "inventory_item_usage_units",
+    { organization_id: organizationId, inventory_item_id: fixedConversionItemId, usage_slot: 1 },
+    { organization_id: organizationId, inventory_item_id: fixedConversionItemId, inventory_item_unit_id: fixedConversionPieceIiuId, usage_slot: 1, is_active: true }
+  );
+  await findOrInsert(
+    supabase,
+    "inventory_item_usage_units",
+    { organization_id: organizationId, inventory_item_id: fixedConversionItemId, usage_slot: 2 },
+    { organization_id: organizationId, inventory_item_id: fixedConversionItemId, inventory_item_unit_id: fixedConversionCaseIiuId, usage_slot: 2, is_active: true }
   );
 
   const noRuleItemId = await findOrInsert(
