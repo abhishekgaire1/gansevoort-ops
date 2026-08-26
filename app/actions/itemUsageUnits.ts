@@ -22,7 +22,7 @@ export interface ItemUsageUnitSummary {
   unitId: string;
   unitCode: string;
   unitName: string;
-  confirmedAt: string;
+  confirmedAt: string | null;
 }
 
 export type ListItemUsageUnitsResult = { ok: true; units: ItemUsageUnitSummary[] } | AuthFailure;
@@ -30,7 +30,7 @@ export type ListItemUsageUnitsResult = { ok: true; units: ItemUsageUnitSummary[]
 interface UsageUnitRow {
   id: string;
   usage_slot: number;
-  confirmed_at: string;
+  confirmed_at: string | null;
   inventory_item_units: { unit_id: string; units: { code: string; name: string } | { code: string; name: string }[] | null } | null;
 }
 

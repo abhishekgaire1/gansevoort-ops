@@ -246,15 +246,19 @@ alter table public.purchase_document_line_classifications
 -- already existed and was already the item's sole withdrawal unit by
 -- application convention (app/lib/kiosk/withdrawalUnit.ts) -- this simply
 -- makes that convention an explicit, database-authoritative fact.
--- confirmed_by_app_user_id is deliberately left NULL (see the table
--- comment above) -- confirmed_at reuses the item's own real created_at as
--- the best-available honest timestamp, never a fabricated "confirmation."
+-- confirmed_by_app_user_id AND confirmed_at are both left NULL --
+-- inventory_item_usage_units_confirmed_pair_check (above) requires them
+-- to be null together, and no manager actually confirmed this slot under
+-- the new model: backfilling a real timestamp here without a real actor
+-- would itself be a fabricated "confirmation," which is exactly what this
+-- backfill must avoid. Honestly represented as "migrated, never
+-- explicitly confirmed by a manager under this model."
 -- Non-INVENTORY items and PENDING_REVIEW proposals are excluded: neither
 -- has (or should have) a usage configuration.
 insert into public.inventory_item_usage_units (
   organization_id, inventory_item_id, inventory_item_unit_id, usage_slot, is_active, confirmed_by_app_user_id, confirmed_at
 )
-select ii.organization_id, ii.id, iiu.id, 1, true, null, ii.created_at
+select ii.organization_id, ii.id, iiu.id, 1, true, null, null
   from public.inventory_items ii
   join public.inventory_item_units iiu
     on iiu.inventory_item_id = ii.id
