@@ -273,7 +273,96 @@ Test in both portrait and landscape:
 
 ---
 
-## O. Final outcome
+## O. Ask Gansevoort
+
+Manager/admin-only, read-only AI chat. Uses synthetic DEV data only. None
+of the scenarios below are pre-marked as passed -- record Pass/Fail/Not
+Applicable for each during the real manual pass.
+
+1. The "Ask Gansevoort" floating button appears for a signed-in manager/admin.
+2. The button and chat interface do NOT appear anywhere in the employee kiosk (PIN entry, station selection, withdrawal screens).
+3. The drawer opens on click and closes via the close button, the backdrop, and the Escape key, each restoring focus to the trigger button.
+4. Desktop: the drawer opens as a right-side panel (~420-480px wide) without covering the entire screen or blocking the rest of the page from being reachable once closed.
+5. iPad portrait: the panel is full/near-full-screen, no horizontal scrolling or clipped content.
+6. iPad landscape: same, with the input and send button still reachable without the keyboard hiding them.
+7. Typing, Enter-to-send, Shift+Enter for a new line, and the on-screen keyboard all behave correctly; sending is disabled while a request is in flight and while the question is blank.
+8. The four suggested questions appear on first open and each one submits correctly when tapped.
+9. Inventory question (e.g. "Which inventory items are low right now?") returns a plausible answer with Inventory Status evidence.
+10. Purchasing question (e.g. "Which vendor had the most purchases?") returns an answer with Purchasing Report evidence.
+11. Receiving question (e.g. "What is received but not posted?") returns an answer with Receiving Report evidence.
+12. Usage question (e.g. "Which station used the most inventory this week?") returns an answer with Usage Report evidence.
+13. Waste question (e.g. "What were the top waste items this month?") returns an answer with Waste Report evidence, and never mentions station waste as tracked.
+14. Cycle-count question (e.g. "Which counts were completed recently?") returns an answer with a link to the correct cycle count detail page, and never mentions second-manager approval.
+15. Inventory Alert question (e.g. "Show recent high-withdrawal alerts.") returns an answer describing alerts as informational only, with a link to the correct alert detail page, and no Approve/Reject/Acknowledge action anywhere.
+16. Every evidence card link opens the correct manager page/record when clicked.
+17. The date range or "as of" time shown matches the organization's own timezone and the question asked (e.g. "this week" resolves to the correct 7-day window).
+18. A question with genuinely no matching data returns "I don't have enough verified data to answer that confidently" rather than a guess.
+19. An out-of-scope or nonsensical question is handled safely (no crash, no fabricated answer).
+20. Asking Ask Gansevoort to perform an action (e.g. "record a withdrawal of 10 lb of chicken") returns exactly: "Ask Gansevoort can explain your operational data, but it cannot make changes." -- and no inventory/withdrawal/waste/cycle-count record is created.
+21. If the AI provider is unavailable or times out, the chat shows a safe, generic message ("Ask Gansevoort is temporarily unavailable. Try again shortly." or similar) -- never a raw error or stack trace.
+22. Asking more questions than the rate limit allows in a short window shows a safe "You've reached the question limit..." message, not a crash.
+23. Disconnecting/interrupting the network mid-request is handled safely (no stuck spinner forever, a way to retry).
+24. If the manager's session expires mid-conversation, the chat shows a safe "session expired" state rather than a broken request.
+25. "New conversation" clears the visible history; refreshing or closing the page also clears it (no persisted chat history anywhere).
+26. No response ever shows a raw provider/database error message, stack trace, or internal id in the answer text.
+27. No answer or evidence card ever shows another organization's data.
+28. Answers include the "AI can make mistakes. Verify important decisions using the cited records." footer, and any answer with incomplete data shows its warning text.
+
+### Item purchase cost and multi-turn follow-ups
+
+None of the scenarios below are pre-marked as passed -- record Pass/Fail/Not Applicable for each during the real manual pass, using a synthetic test item with known, verified purchase history.
+
+29. Direct item-cost question (e.g. "How much did Whole Milk Quart cost us?") returns the latest verified purchase price, its vendor and document date, and the normalized price per base unit -- not an organization-wide purchasing total.
+30. Follow-up using "it" (ask about an item's inventory, then ask "How much did it cost us?" in the next message) correctly answers about the SAME item's cost, not a repeated inventory quantity and not an aggregate total.
+31. Item clarification on the next turn (ask "How much did it cost us?" with no item yet named, then reply with just the item's name on the following turn) resolves to that item's verified cost, not a fresh unrelated answer.
+32. "What about the average price?" after a cost answer returns the recent weighted-average price for the SAME item, correctly weighted by quantity (not a plain average of individual purchase prices).
+33. Package-to-base-unit conversion is shown correctly (e.g. a per-case verified price and its correctly normalized per-piece/per-unit price for the same purchase).
+34. Current-stock estimate (e.g. "How much are all 406 worth?") combines the current quantity with the latest verified purchase price, and explicitly states "This is an operational estimate, not an accounting inventory valuation."
+35. An item that exists in inventory but has no verified/posted purchase cost gets a clear, explicit answer to that effect -- never a fallback to an unrelated organization-wide total, and never a guessed cost.
+36. An ambiguous item name (matching more than one inventory item) makes the assistant ask which item is meant, listing the candidates, rather than silently picking one.
+37. A cost question about an item that does not exist at all is handled safely (no crash, no invented cost).
+38. Cross-organization purchase/vendor data is never shown in a cost answer or its evidence.
+39. Evidence links for a cost answer point to the item's own detail page and/or the vendor-filtered Purchasing Report -- both real, working links.
+40. Refreshing the page or starting "New conversation" clears the pending item-cost context along with the rest of the conversation (no stale item carried over from a previous browser tab session).
+41. No inventory, purchasing, receiving, or any other record is created, changed, or posted at any point during item-cost questions -- read-only throughout.
+42. A synthetic item with a PARTIALLY posted purchase line (e.g. 5 of 10 cases posted so far) does not show an inflated interim unit cost -- either that purchase is silently excluded, or the item correctly reports no verified cost, never the too-high partial figure.
+43. Evidence for a cost answer links to the actual verified purchase document (showing vendor, date, line items and price), not only the item's own detail page.
+44. If a weighted average genuinely cannot be confirmed complete for the requested window, the assistant says so plainly rather than presenting a partial sample as "the" weighted average.
+
+### General Report Builder (natural-language downloadable Excel reports)
+
+None of the scenarios below are pre-marked as passed -- record Pass/Fail/Not Applicable for each during the real manual pass, using synthetic operational data and synthetic verified purchase history. The Waste Cost Report scenarios from an earlier milestone are superseded by this section -- Waste is now one of nine registered reports here, not a separate architecture.
+
+45. Purchasing export: "Export purchases from [vendor] this month by item" produces a real .xlsx with vendor/category/item totals and, if requested, recent price changes.
+46. Receiving export: "Create a receiving report grouped by vendor" produces a real .xlsx with document counts and posting status by vendor/status -- never a fabricated dollar figure (this dataset carries none).
+47. Inventory-status export: "Give me a current low-stock inventory report" produces a real .xlsx of currently low/out-of-stock items -- clearly a point-in-time snapshot, never a historical reconstruction.
+48. Usage export: "Give me an Excel report of withdrawals by station for last week" produces a real .xlsx with item/station withdrawal totals for that exact week.
+49. Waste export: "Create a report of all waste from the last 10 days and include pricing" produces a real .xlsx with waste event detail, By Item, and By Reason sheets, priced/unpriced counts, and the required estimated-cost disclaimer.
+50. Cycle-count export: "Create a cycle-count variance report for August" produces a real .xlsx of that month's cycle-count sessions with counted/variance item counts -- never a resurrected second-manager-approval or 20%-threshold concept.
+51. Inventory-alert export: "Download all open inventory alerts" produces a real .xlsx of High-Withdrawal Alerts -- clearly informational, never framed as pending approval.
+52. Reports-overview export: a general overview export produces the same fixed whole-organization metrics as the on-screen Overview page, nothing invented.
+53. Item-cost-history export: "Export the price history for Whole Milk Quart" requires and uses a single resolved item, and lists its verified purchase lines newest first with normalized per-base-unit cost.
+54. Relative dates: "last 10 days," "yesterday," "this week," "last week," "this month," and "last month" each resolve to the exact correct calendar range in the organization's own timezone.
+55. Custom/named dates: an explicit date range and a named month (e.g. "August 2026") both resolve correctly, including a leap-day February and a December-to-January rollover.
+56. A vendor, item, station, and location filter each correctly narrow a report to just that record when the manager names one that exists.
+57. A grouping request (e.g. "grouped by vendor") selects the correct sheet/breakdown; an unsupported grouping falls back to the report's default and the assistant says so.
+58. A specific column selection is honored where supported; an unsupported column request is dropped with an honest explanation, never silently invented.
+59. Pricing supported: a dataset with `includePricing` produces real priced figures with the correct "actual" vs "estimated" framing and, for estimated pricing, the required disclaimer sentence.
+60. Pricing unsupported: asking for pricing on Receiving or Cycle Counts is refused for pricing specifically (the report itself still generates) with a plain explanation that this dataset has no dollar amounts.
+61. Unpriced records: at least one dataset's export shows some records priced and others explicitly marked unpriced, with a truthful priced/unpriced count and a total that only ever sums the priced records.
+62. Empty reports: requesting any dataset for a period/filter with zero matching records still downloads a valid workbook with headers, metadata, and a clear "no records" message.
+63. Ambiguous filters: naming a vendor/item/station/location that matches more than one real record makes the assistant list the candidates and ask which one, rather than guessing.
+64. Excel download on desktop: the "Download [Report Name] (.xlsx)" button downloads a real, openable file with a sensible filename for at least three different report types.
+65. Excel download on iPad: the same download button works by tap, and the file is accessible afterward.
+66. Repeated download: clicking the same download button a second time, or asking the same export question again in a new conversation, succeeds again without error and produces the same figures.
+67. Tampered request: manually editing the browser's request to change an allowlisted filter/column/grouping value is either honored (if still a valid, registered option for that report) or safely rejected -- it can never reach an unregistered field or another organization's data.
+68. Cross-organization rejection: a report requested for one organization never contains another organization's records, vendors, items, or documents, and a spoofed organization id in the request has no effect.
+69. Range-over-maximum: requesting a transactional report's date range beyond its maximum (90 days) is refused with a clear message from both the chat tool and, if hit directly, the download route.
+70. No database mutation: no inventory, purchasing, receiving, waste, cycle-count, alert, or any other record is created, changed, or posted at any point while preparing or downloading any report -- read-only throughout, confirmed by checking no new rows appear anywhere.
+
+---
+
+## P. Final outcome
 
 - [ ] Every scenario above is marked **Pass**, **Fail**, or **Not
       Applicable**.

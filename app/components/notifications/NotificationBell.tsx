@@ -17,6 +17,7 @@ export function NotificationBell() {
   const [notifications, setNotifications] = useState<UserNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   async function refresh() {
     const result = await listNotifications();
@@ -48,6 +49,18 @@ export function NotificationBell() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  useEffect(() => {
+    if (!open) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
+
   async function handleOpen() {
     setOpen((prev) => !prev);
   }
@@ -68,8 +81,10 @@ export function NotificationBell() {
   return (
     <div ref={containerRef} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         onClick={handleOpen}
+        aria-expanded={open}
         className="relative rounded-full p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
         aria-label="Notifications"
       >

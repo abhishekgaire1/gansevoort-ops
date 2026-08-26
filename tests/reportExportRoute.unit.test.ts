@@ -40,7 +40,13 @@ vi.mock("@/app/lib/reports/receivingReport", () => ({ getReceivingReport: getRec
 const { getInventoryStatusReportMock } = vi.hoisted(() => ({ getInventoryStatusReportMock: vi.fn() }));
 vi.mock("@/app/lib/reports/inventoryStatusReport", () => ({ getInventoryStatusReport: getInventoryStatusReportMock }));
 
-import { GET } from "@/app/manager/(app)/reports/export/route";
+const { getReportDefinitionMock } = vi.hoisted(() => ({ getReportDefinitionMock: vi.fn() }));
+vi.mock("@/app/lib/reports/registry", () => ({ getReportDefinition: getReportDefinitionMock }));
+
+const { revalidateReportSpecificationMock } = vi.hoisted(() => ({ revalidateReportSpecificationMock: vi.fn() }));
+vi.mock("@/app/lib/reports/registry/revalidateSpecification", () => ({ revalidateReportSpecification: revalidateReportSpecificationMock }));
+
+import { GET, POST } from "@/app/manager/(app)/reports/export/route";
 
 const ORG_ID = "org-1";
 
@@ -69,6 +75,10 @@ function requestFor(path: string): NextRequest {
   return new NextRequest(new URL(path, "https://example.com"));
 }
 
+function postRequestFor(body: unknown): NextRequest {
+  return new NextRequest(new URL("/manager/reports/export", "https://example.com"), { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
+}
+
 beforeEach(() => {
   requireManagerOrAdminMock.mockReset();
   getServiceRoleClientMock.mockReset();
@@ -79,6 +89,8 @@ beforeEach(() => {
   getWasteReportMock.mockReset().mockResolvedValue(EMPTY_WASTE);
   getReceivingReportMock.mockReset().mockResolvedValue(EMPTY_RECEIVING);
   getInventoryStatusReportMock.mockReset().mockResolvedValue(EMPTY_INVENTORY_STATUS);
+  getReportDefinitionMock.mockReset();
+  revalidateReportSpecificationMock.mockReset();
   getServiceRoleClientMock.mockReturnValue(fakeServiceClient({}));
   requireManagerOrAdminMock.mockResolvedValue({ ok: true, manager: { appUserId: "u1", organizationId: ORG_ID, authUserId: "au1", roles: ["manager"] } });
 });
@@ -206,5 +218,104 @@ describe("export Route Handler", () => {
     expect(getUsageReportMock).toHaveBeenCalled();
     expect(getWasteReportMock).toHaveBeenCalled();
     expect(getInventoryStatusReportMock).toHaveBeenCalled();
+  });
+
+});
+
+describe("POST /manager/reports/export -- the General Report Builder's authenticated download route (Section 11)", () => {
+  const SAMPLE_SPEC = { reportId: "waste", dateRange: { startDate: "2026-08-16", endDate: "2026-08-20", isPointInTime: false }, filters: [], grouping: null, columns: ["a"], includePricing: false, format: "xlsx" as const };
+  const LOAD_RESULT = {
+    summaryMetrics: [{ label: "Records", value: 2, format: "integer" as const }],
+    tables: [{ sheetName: "Details", title: "Details", columns: [{ key: "a", header: "A", format: "text" as const }], rows: [{ a: "x" }, { a: "y" }], isPrimaryDetail: true }],
+    isEmpty: false,
+    recordCount: 2,
+    pricedCount: null,
+    unpricedCount: null,
+    limitations: [],
+  };
+
+  function fakeDef(loadReport = vi.fn(async () => LOAD_RESULT)) {
+    return { id: "waste", name: "Waste Report", loadReport };
+  }
+
+  it("requires manager/admin auth before touching the request body", async () => {
+    requireManagerOrAdminMock.mockResolvedValue({ ok: false, reason: "not_authenticated" });
+    const response = await POST(postRequestFor(SAMPLE_SPEC));
+    expect(response.status).toBe(401);
+    expect(getReportDefinitionMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown/unsupported report id", async () => {
+    getReportDefinitionMock.mockReturnValue(null);
+    const response = await POST(postRequestFor({ ...SAMPLE_SPEC, reportId: "sales" }));
+    expect(response.status).toBe(400);
+  });
+
+  it("organization id is derived from auth, never from the request body", async () => {
+    getReportDefinitionMock.mockReturnValue(fakeDef());
+    revalidateReportSpecificationMock.mockResolvedValue({ ok: true, spec: SAMPLE_SPEC });
+    await POST(postRequestFor({ ...SAMPLE_SPEC, organizationId: "attacker-org" }));
+    expect(revalidateReportSpecificationMock).toHaveBeenCalledWith(expect.objectContaining({ organizationId: ORG_ID }), expect.anything(), expect.anything());
+  });
+
+  it("a tampered/invalid specification is rejected with the revalidator's own safe message, never a generic 500", async () => {
+    getReportDefinitionMock.mockReturnValue(fakeDef());
+    revalidateReportSpecificationMock.mockResolvedValue({ ok: false, message: "This report supports a maximum range of 90 days." });
+    const response = await POST(postRequestFor(SAMPLE_SPEC));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.message).toBe("This report supports a maximum range of 90 days.");
+  });
+
+  it("produces a real xlsx workbook with the correct headers", async () => {
+    getReportDefinitionMock.mockReturnValue(fakeDef());
+    revalidateReportSpecificationMock.mockResolvedValue({ ok: true, spec: SAMPLE_SPEC });
+    const response = await POST(postRequestFor(SAMPLE_SPEC));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toContain("spreadsheetml");
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="waste_2026-08-16_to_2026-08-20.xlsx"');
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const workbook = XLSX.read(buffer, { type: "buffer" });
+    expect(workbook.SheetNames).toContain("Summary");
+    expect(workbook.SheetNames).toContain("Details");
+  });
+
+  it("an empty report (zero rows) still downloads successfully as a valid workbook", async () => {
+    getReportDefinitionMock.mockReturnValue(
+      fakeDef(vi.fn(async () => ({ summaryMetrics: [{ label: "Records", value: 0, format: "integer" as const }], tables: [{ sheetName: "Details", title: "Details", columns: [{ key: "a", header: "A", format: "text" as const }], rows: [], isPrimaryDetail: true }], isEmpty: true, recordCount: 0, pricedCount: null, unpricedCount: null, limitations: [] })))
+    );
+    revalidateReportSpecificationMock.mockResolvedValue({ ok: true, spec: SAMPLE_SPEC });
+    const response = await POST(postRequestFor(SAMPLE_SPEC));
+    expect(response.status).toBe(200);
+  });
+
+  it("a loader failure returns a generic 500, never a raw error", async () => {
+    getReportDefinitionMock.mockReturnValue(
+      fakeDef(vi.fn(async () => {
+        throw new Error("db exploded");
+      }))
+    );
+    revalidateReportSpecificationMock.mockResolvedValue({ ok: true, spec: SAMPLE_SPEC });
+    const response = await POST(postRequestFor(SAMPLE_SPEC));
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body.message).toBe("Could not generate the report. Try again.");
+    expect(body.message).not.toContain("db exploded");
+  });
+
+  it("rejects an invalid JSON body safely", async () => {
+    const badRequest = new NextRequest(new URL("/manager/reports/export", "https://example.com"), { method: "POST", body: "not json", headers: { "Content-Type": "application/json" } });
+    const response = await POST(badRequest);
+    expect(response.status).toBe(400);
+  });
+
+  it("point-in-time reports (no date range) still produce a valid, dateRange-less workbook with a sensible filename", async () => {
+    getReportDefinitionMock.mockReturnValue(fakeDef());
+    const pointInTimeSpec = { ...SAMPLE_SPEC, dateRange: { startDate: "", endDate: "", isPointInTime: true } };
+    revalidateReportSpecificationMock.mockResolvedValue({ ok: true, spec: pointInTimeSpec });
+    const response = await POST(postRequestFor(pointInTimeSpec));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Disposition")).toMatch(/^attachment; filename="waste_\d{4}-\d{2}-\d{2}\.xlsx"$/);
   });
 });

@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { reportLabelForPathname } from "./_lib/reportErrorLabel";
+import { RouteErrorBoundary } from "@/app/components/manager/RouteErrorBoundary";
 
 /**
  * Reports reliability/UX pass -- the route-level error boundary for the
@@ -25,25 +25,14 @@ import { reportLabelForPathname } from "./_lib/reportErrorLabel";
  * rather than a permanent blank screen.
  *
  * Never exposes SQLSTATE/stack/Supabase/JWT detail to the Manager --
- * `error.message` is deliberately never rendered; the full error is
- * already logged server-side (either by this effect, or by the report
- * action's own loadFailure() for an ordinary data failure).
+ * RouteErrorBoundary only ever logs the opaque `digest` to the browser
+ * console, never `error.message`/`error.stack`; the full error is already
+ * logged server-side (by the report action's own loadFailure(), for an
+ * ordinary data failure).
  */
 export default function ReportsError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   const pathname = usePathname();
   const label = reportLabelForPathname(pathname);
 
-  useEffect(() => {
-    console.error("[reports] route-level render error", { pathname, message: error.message, digest: error.digest });
-  }, [error, pathname]);
-
-  return (
-    <div className="mt-6 rounded-2xl border border-amber-900/60 bg-amber-950/10 p-6 text-center">
-      <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">{label} Unavailable</p>
-      <p className="mt-2 text-sm text-zinc-300">We couldn&apos;t load this report.</p>
-      <button type="button" onClick={reset} className="mt-4 rounded-full bg-amber-400 px-5 py-2 text-sm font-semibold text-zinc-950">
-        Try Again
-      </button>
-    </div>
-  );
+  return <RouteErrorBoundary sectionLabel={label} error={error} reset={reset} />;
 }

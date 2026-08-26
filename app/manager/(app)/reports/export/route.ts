@@ -22,6 +22,9 @@ import { buildReportCsvBuffer } from "@/app/lib/reports/export/csvWriter";
 import { buildReportPdfBuffer } from "@/app/lib/reports/export/pdfWriter";
 import { buildExportFilename } from "@/app/lib/reports/export/exportFilename";
 import type { ReportExportDocument, ReportExportFilterDescriptor, ReportExportFormat, ReportExportType } from "@/app/lib/reports/export/reportExportModel";
+import { getReportDefinition } from "@/app/lib/reports/registry";
+import { revalidateReportSpecification } from "@/app/lib/reports/registry/revalidateSpecification";
+import type { ReportRuntimeContext } from "@/app/lib/reports/registry/types";
 
 /**
  * Shared Report Export Foundation (Section 5). One Route Handler serves
@@ -48,6 +51,8 @@ import type { ReportExportDocument, ReportExportFilterDescriptor, ReportExportFo
 
 const REPORT_TYPES: ReportExportType[] = ["overview", "purchasing", "usage", "inventory-status", "waste", "receiving"];
 const FORMATS: ReportExportFormat[] = ["xlsx", "csv", "pdf"];
+
+class ExportValidationError extends Error {}
 
 const CONTENT_TYPE: Record<ReportExportFormat, string> = {
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -168,6 +173,9 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (err) {
+    if (err instanceof ExportValidationError) {
+      return errorResponse(400, err.message);
+    }
     console.error(`[reports:export] FAILED report=${reportType} format=${format} organizationId=${organizationId} error=${err instanceof Error ? err.message : String(err)}`);
     return errorResponse(500, "Could not generate the report. Try again.");
   }
@@ -233,4 +241,96 @@ async function renderExport(doc: ReportExportDocument, format: ReportExportForma
   if (format === "xlsx") return buildReportWorkbookBuffer(doc);
   if (format === "csv") return buildReportCsvBuffer(doc);
   return buildReportPdfBuffer(doc);
+}
+
+/**
+ * General Report Builder -- the authenticated download endpoint for
+ * every REGISTRY report (Section 11). The chat tool hands the manager a
+ * ChatDownload carrying a `reportSpecification`; the client POSTs that
+ * specification back HERE, UNCHANGED -- but this route treats it as an
+ * untrusted REQUEST, never as authorization. Organization id always
+ * comes from requireManagerOrAdmin(), never from the request body, and
+ * revalidateReportSpecification() independently re-checks the report id,
+ * date range, every filter (re-proven to belong to THIS organization),
+ * grouping, and columns against the SAME registry the chat tool used --
+ * a modified client can, at most, request a different already-registered
+ * filter/column/grouping; it can never escape the organization or reach
+ * an unregistered field.
+ */
+export async function POST(request: NextRequest) {
+  let auth: Awaited<ReturnType<typeof requireManagerOrAdmin>>;
+  try {
+    auth = await requireManagerOrAdmin();
+  } catch (err) {
+    if (err instanceof AuthInfrastructureError) {
+      console.error(`[reports:export:post] AUTH_INFRA_FAILURE error=${err.message}`);
+      return errorResponse(503, "Could not generate the report. Try again.");
+    }
+    throw err;
+  }
+  if (!auth.ok) {
+    return errorResponse(auth.reason === "not_authenticated" ? 401 : 403, "You must be signed in as a manager or admin.");
+  }
+  const organizationId = auth.manager.organizationId;
+
+  let rawBody: unknown;
+  try {
+    rawBody = await request.json();
+  } catch {
+    return errorResponse(400, "Invalid request.");
+  }
+  if (!rawBody || typeof rawBody !== "object" || typeof (rawBody as { reportId?: unknown }).reportId !== "string") {
+    return errorResponse(400, "Invalid request.");
+  }
+  const def = getReportDefinition((rawBody as { reportId: string }).reportId);
+  if (!def) {
+    return errorResponse(400, "Unsupported report type.");
+  }
+
+  const serviceClient = getServiceRoleClient();
+  const timeZone = await resolveOrganizationTimezone(serviceClient, organizationId).catch(() => "America/New_York");
+  const runtimeCtx: ReportRuntimeContext = { supabase: serviceClient, organizationId, timeZone, now: new Date() };
+
+  const revalidated = await revalidateReportSpecification(runtimeCtx, def, rawBody);
+  if (!revalidated.ok) {
+    return errorResponse(400, revalidated.message);
+  }
+  const spec = revalidated.spec;
+
+  try {
+    const loadResult = await def.loadReport(runtimeCtx, spec);
+
+    const doc: ReportExportDocument = {
+      reportType: def.id,
+      reportTitle: def.name,
+      organizationName: "Gansevoort Ops",
+      timeZone,
+      generatedAt: runtimeCtx.now,
+      dateRange: spec.dateRange.isPointInTime ? null : { startDate: spec.dateRange.startDate, endDate: spec.dateRange.endDate },
+      filters: spec.filters.map((f) => ({ label: f.label, value: f.name })),
+      summaryMetrics: loadResult.summaryMetrics,
+      tables: loadResult.tables,
+    };
+
+    console.log(
+      `[reports:export:post] report=${def.id} organizationId=${organizationId} dateRange=${doc.dateRange ? `${doc.dateRange.startDate}..${doc.dateRange.endDate}` : "n/a"} filters=${JSON.stringify(spec.filters)}`
+    );
+
+    const body = buildReportWorkbookBuffer(doc);
+    const generatedOnDate = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(runtimeCtx.now);
+    const datePart = !doc.dateRange ? generatedOnDate : doc.dateRange.startDate === doc.dateRange.endDate ? doc.dateRange.startDate : `${doc.dateRange.startDate}_to_${doc.dateRange.endDate}`;
+    const filename = `${def.id.replace(/_/g, "-")}_${datePart}.xlsx`;
+
+    return new NextResponse(new Uint8Array(body), {
+      status: 200,
+      headers: {
+        "Content-Type": CONTENT_TYPE.xlsx,
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (err) {
+    console.error(`[reports:export:post] FAILED report=${def.id} organizationId=${organizationId} error=${err instanceof Error ? err.message : String(err)}`);
+    return errorResponse(500, "Could not generate the report. Try again.");
+  }
 }

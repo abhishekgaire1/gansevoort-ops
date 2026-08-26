@@ -13,6 +13,7 @@ import { StatusPoller } from "@/app/components/documents/StatusPoller";
 import { deriveDocumentStatus, type DocumentDisplayStatus } from "@/app/lib/documents/documentStatus";
 import { shouldPollForStatuses } from "@/app/lib/documents/pollingDecision";
 import { safeExtractionErrorMessage } from "@/app/lib/documents/extractionErrorMessages";
+import { openPendingTab, resolvePendingTab, closePendingTab } from "@/app/lib/browser/pendingTab";
 import type { NormalizedInvoiceExtraction, ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
 import type { PurchaseDocumentStatus } from "@/app/lib/purchaseDocuments/types";
 
@@ -88,6 +89,7 @@ export function DocumentDetailView({
   const [viewUrl, setViewUrl] = useState<string | null>(null);
   const [viewError, setViewError] = useState<string | null>(null);
   const [downloadPending, setDownloadPending] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [retryPending, setRetryPending] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [draftPending, setDraftPending] = useState(false);
@@ -119,12 +121,20 @@ export function DocumentDetailView({
   }, [documentId]);
 
   async function handleDownload() {
+    // Opened synchronously, before the await below, so Mobile Safari's
+    // popup blocker never gets a chance to treat this as a non-gesture-
+    // triggered window.open() (see app/lib/browser/pendingTab.ts).
+    const pendingTab = openPendingTab();
     setDownloadPending(true);
+    setDownloadError(null);
     const result = await getDocumentDownloadUrl(documentId);
     setDownloadPending(false);
-    if (result.ok) {
-      window.open(result.url, "_blank", "noopener,noreferrer");
+    if (!result.ok) {
+      closePendingTab(pendingTab);
+      setDownloadError(result.message);
+      return;
     }
+    resolvePendingTab(pendingTab, result.url);
   }
 
   async function handleRetry() {
@@ -223,6 +233,7 @@ export function DocumentDetailView({
           ) : null}
         </div>
       </div>
+      {downloadError ? <p className="mt-2 text-sm text-red-400">{downloadError}</p> : null}
       {retryError ? <p className="mt-2 text-sm text-red-400">{retryError}</p> : null}
       {draftError ? <p className="mt-2 text-sm text-red-400">{draftError}</p> : null}
 

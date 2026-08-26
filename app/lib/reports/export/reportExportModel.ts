@@ -57,7 +57,12 @@ export interface ReportExportDateRange {
 }
 
 export interface ReportExportDocument {
-  reportType: ReportExportType;
+  /** Informational only -- no writer (xlsx/csv/pdf) branches on this
+   * value. Left as a plain string (rather than ReportExportType) so the
+   * General Report Builder's registry-based reports (Section 6, keyed by
+   * a separate ReportId) can produce a document too, without forcing an
+   * artificial union merge between two independently-evolving id sets. */
+  reportType: string;
   reportTitle: string;
   organizationName: string;
   timeZone: string;

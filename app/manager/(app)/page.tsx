@@ -2,21 +2,27 @@ import Link from "next/link";
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getReceivingQueue } from "@/app/lib/documents/receivingQueue";
 import { listCycleCountDraftStatus } from "@/app/actions/cycleCounts";
+import { listUnresolvedClassificationsForReview } from "@/app/actions/itemClassification";
 import { resolveEmployeeDisplayNames } from "@/app/lib/inventory/cycleCounts";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { secondaryButtonClass } from "@/app/components/manager/buttonStyles";
-import { viewerRelationshipFor } from "@/app/manager/(app)/receiving/_lib/receivingPresentation";
+import { viewerRelationshipFor, matchesReceivingTab } from "@/app/manager/(app)/receiving/_lib/receivingPresentation";
 
 /**
  * The manager landing page (Manager UX & Navigation Milestone, Part 11):
  * "what needs me right now," never analytics/reporting. Every "Needs
  * Your Attention" item is backed by a real, already-implemented query --
  * ready-for-verification count reuses the exact same getReceivingQueue
- * the Receiving Queue itself uses, and "cycle count in progress" reuses
+ * the Receiving Queue itself uses, "cycle count in progress" reuses
  * listCycleCountDraftStatus filtered to counts THIS manager owns (the
- * only ones they can genuinely "Resume"). No variance-approval item is
- * shown -- that workflow does not exist yet anywhere in this codebase,
- * and Part 11 is explicit: never fake an attention item.
+ * only ones they can genuinely "Resume"), "documents need attention"
+ * reuses the Receiving Queue's own NEEDS_ATTENTION tab grouping
+ * (matchesReceivingTab -- never a second, competing definition of what
+ * counts as needing attention), and "items need classification" reuses
+ * the same org-wide recovery queue /manager/items/review itself is built
+ * on. No variance-approval item is shown -- that workflow does not exist
+ * yet anywhere in this codebase, and Part 11 is explicit: never fake an
+ * attention item.
  */
 export const dynamic = "force-dynamic";
 
@@ -32,9 +38,14 @@ export default async function ManagerDashboardPage() {
   if (!auth.ok) return null;
 
   const supabase = getServiceRoleClient();
-  const [readyForVerification, draftsResult, names] = await Promise.all([
+  const [readyForVerification, fullReceivingQueue, draftsResult, classificationsResult, names] = await Promise.all([
     getReceivingQueue(auth.manager.organizationId, { status: "READY_FOR_VERIFICATION" }),
+    // Unfiltered -- the same shape the Receiving Queue page itself fetches
+    // for its own "Needs Attention" tab, so this count can never disagree
+    // with what that tab actually shows.
+    getReceivingQueue(auth.manager.organizationId, {}),
     listCycleCountDraftStatus(),
+    listUnresolvedClassificationsForReview(),
     resolveEmployeeDisplayNames(supabase, [auth.manager.appUserId]),
   ]);
 
@@ -54,6 +65,15 @@ export default async function ManagerDashboardPage() {
     (item) => viewerRelationshipFor(item.createdByAppUserId, auth.manager.appUserId) === "eligible_verifier"
   );
 
+  // Documents nobody has started yet -- extracted-but-unverified, a
+  // stalled/failed extraction, or an already-open draft (the identical
+  // grouping the Receiving Queue's own "Needs Attention" tab uses, not a
+  // second definition). Any manager may pick these up, same as that tab
+  // itself is not preparer/verifier-restricted.
+  const needsAttentionCount = fullReceivingQueue.filter((item) => matchesReceivingTab(item.status, "NEEDS_ATTENTION")).length;
+
+  const unresolvedClassificationCount = classificationsResult.ok ? classificationsResult.lines.length : 0;
+
   const attentionItems: { key: string; label: string; actionLabel: string; href: string }[] = [];
   if (needsMyVerification.length > 0) {
     attentionItems.push({
@@ -61,6 +81,22 @@ export default async function ManagerDashboardPage() {
       label: `${needsMyVerification.length} ${needsMyVerification.length === 1 ? "invoice" : "invoices"} need${needsMyVerification.length === 1 ? "s" : ""} your verification`,
       actionLabel: "Verify →",
       href: "/manager/receiving?tab=READY_FOR_VERIFICATION",
+    });
+  }
+  if (needsAttentionCount > 0) {
+    attentionItems.push({
+      key: "receiving-needs-attention",
+      label: `${needsAttentionCount} document${needsAttentionCount === 1 ? "" : "s"} need${needsAttentionCount === 1 ? "s" : ""} attention`,
+      actionLabel: "Review →",
+      href: "/manager/receiving?tab=NEEDS_ATTENTION",
+    });
+  }
+  if (unresolvedClassificationCount > 0) {
+    attentionItems.push({
+      key: "unresolved-classifications",
+      label: `${unresolvedClassificationCount} item${unresolvedClassificationCount === 1 ? "" : "s"} need${unresolvedClassificationCount === 1 ? "s" : ""} classification`,
+      actionLabel: "Resolve →",
+      href: "/manager/items/review",
     });
   }
   if (ownDrafts.length > 0) {

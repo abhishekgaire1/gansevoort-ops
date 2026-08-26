@@ -115,6 +115,12 @@ export function ItemMappingPanel({
   const [loading, setLoading] = useState(true);
   const [runningMatch, setRunningMatch] = useState(false);
   const [bulkConfirmPending, setBulkConfirmPending] = useState(false);
+  // Guards handleApproveExisting/handleMarkNonInventory against a double
+  // tap/click firing the same line's approve-or-reject action twice
+  // before the first request's `load()` re-render can disable it --
+  // scoped to one lineKey at a time since different lines are
+  // independent actions.
+  const [actionPendingLineKey, setActionPendingLineKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [overrideFormLineKey, setOverrideFormLineKey] = useState<string | null>(null);
   // A CONFIRMED line stays clean by default; while the document is still
@@ -331,7 +337,10 @@ export function ItemMappingPanel({
   }
 
   async function handleApproveExisting(lineKey: string, inventoryItemId: string) {
+    if (actionPendingLineKey) return;
+    setActionPendingLineKey(lineKey);
     const result = await approveExistingItemClassification({ purchaseDocumentId, lineKey, inventoryItemId });
+    setActionPendingLineKey(null);
     if (!result.ok) {
       setError(result.message);
       return;
@@ -342,8 +351,11 @@ export function ItemMappingPanel({
   }
 
   async function handleMarkNonInventory(line: LineClassificationRow) {
+    if (actionPendingLineKey) return;
+    setActionPendingLineKey(line.lineKey);
     const name = line.aiSuggestedInventoryItemName ?? line.description ?? "Non-inventory line";
     const result = await markLineNonInventory(purchaseDocumentId, line.lineKey, name, line.aiSuggestedIsNewProposal ? line.aiSuggestedInventoryItemId : null);
+    setActionPendingLineKey(null);
     if (!result.ok) {
       setError(result.message);
       return;
@@ -520,6 +532,7 @@ export function ItemMappingPanel({
                 onApproveExisting={(itemId) => handleApproveExisting(line.lineKey, itemId)}
                 onMarkNonInventory={() => handleMarkNonInventory(line)}
                 onReviewNewItem={() => setShowNewItemModal(true)}
+                actionPending={actionPendingLineKey === line.lineKey}
               />
             ))}
           </div>
@@ -546,6 +559,7 @@ export function ItemMappingPanel({
                 onToggleOverrideForm={() => setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey)}
                 onApproveExisting={(itemId) => handleApproveExisting(line.lineKey, itemId)}
                 onMarkNonInventory={() => handleMarkNonInventory(line)}
+                actionPending={actionPendingLineKey === line.lineKey}
                 priceComparison={priceComparisons[line.lineKey]}
                 priceHistoryExpanded={expandedPriceHistoryLineKey === line.lineKey}
                 priceHistory={priceHistoryByLineKey[line.lineKey]}
@@ -577,6 +591,7 @@ export function ItemMappingPanel({
                 onToggleOverrideForm={() => setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey)}
                 onApproveExisting={(itemId) => handleApproveExisting(line.lineKey, itemId)}
                 onMarkNonInventory={() => handleMarkNonInventory(line)}
+                actionPending={actionPendingLineKey === line.lineKey}
               />
             ))}
           </div>
@@ -643,6 +658,7 @@ function ResolvedLineRow({
   onToggleOverrideForm,
   onApproveExisting,
   onMarkNonInventory,
+  actionPending,
   priceComparison,
   priceHistoryExpanded,
   priceHistory,
@@ -659,6 +675,10 @@ function ResolvedLineRow({
   onToggleOverrideForm: () => void;
   onApproveExisting: (itemId: string) => void;
   onMarkNonInventory: () => void;
+  /** True while THIS line's approve/mark-non-inventory request is in
+   * flight -- disables its own buttons so a fast double-tap can't fire
+   * the same mutation twice before the panel reloads. */
+  actionPending?: boolean;
   /** Purchase Price Change Intelligence (V1) -- only ever meaningful for
    * an INVENTORY line; omitted entirely on the Non-Inventory render path. */
   priceComparison?: PriceComparisonResult;
@@ -710,12 +730,12 @@ function ResolvedLineRow({
       {editing ? (
         <div className="flex w-full flex-col gap-2 border-t border-zinc-800 pt-3 sm:col-span-2">
           <div className="flex flex-wrap items-center gap-2">
-            <button type="button" onClick={onToggleOverrideForm} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300">
+            <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 disabled:opacity-40">
               Choose Different Item
             </button>
             {line.disposition !== "NON_INVENTORY" ? (
-              <button type="button" onClick={onMarkNonInventory} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300">
-                Mark Non-Inventory
+              <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 disabled:opacity-40">
+                {actionPending ? "Marking…" : "Mark Non-Inventory"}
               </button>
             ) : null}
           </div>
@@ -829,6 +849,7 @@ function NeedsReviewLineRow({
   onApproveExisting,
   onMarkNonInventory,
   onReviewNewItem,
+  actionPending,
 }: {
   id?: string;
   line: LineClassificationRow;
@@ -839,6 +860,10 @@ function NeedsReviewLineRow({
   onApproveExisting: (itemId: string) => void;
   onMarkNonInventory: () => void;
   onReviewNewItem: () => void;
+  /** True while THIS line's approve/mark-non-inventory request is in
+   * flight -- disables its own buttons so a fast double-tap can't fire
+   * the same mutation twice before the panel reloads. */
+  actionPending?: boolean;
 }) {
   return (
     <div id={id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between">
@@ -865,15 +890,20 @@ function NeedsReviewLineRow({
             )}
             <div className="flex flex-wrap justify-end gap-2">
               {line.aiSuggestedInventoryItemId ? (
-                <button type="button" onClick={() => onApproveExisting(line.aiSuggestedInventoryItemId!)} className="rounded-full border border-emerald-700 px-3 py-1 text-xs text-emerald-300">
-                  Approve
+                <button
+                  type="button"
+                  disabled={actionPending}
+                  onClick={() => onApproveExisting(line.aiSuggestedInventoryItemId!)}
+                  className="rounded-full border border-emerald-700 px-3 py-1 text-xs text-emerald-300 disabled:opacity-40"
+                >
+                  {actionPending ? "Approving…" : "Approve"}
                 </button>
               ) : null}
-              <button type="button" onClick={onToggleOverrideForm} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300">
+              <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 disabled:opacity-40">
                 Choose Item
               </button>
-              <button type="button" onClick={onMarkNonInventory} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300">
-                Non-Inventory
+              <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 disabled:opacity-40">
+                {actionPending ? "Marking…" : "Non-Inventory"}
               </button>
             </div>
           </>

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getDocumentDownloadUrl } from "@/app/actions/documentAccess";
+import { openPendingTab, resolvePendingTab, closePendingTab } from "@/app/lib/browser/pendingTab";
 import { initiatePurchaseDocumentAmendment, getPurchaseDocumentReviewSummary, getReceiptHistoryForPurchaseDocument } from "@/app/actions/purchaseDocuments";
 import { ReceivingPanel } from "./ReceivingPanel";
 import { inventoryPostingBadgeLabel } from "@/app/lib/purchaseDocuments/getInventoryPostingStatus";
@@ -90,6 +91,7 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
   const [downloadPending, setDownloadPending] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [viewPending, setViewPending] = useState(false);
+  const [viewError, setViewError] = useState<string | null>(null);
   const [amendReason, setAmendReason] = useState("");
   const [amendPending, setAmendPending] = useState(false);
   const [amendError, setAmendError] = useState<string | null>(null);
@@ -151,12 +153,20 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
   }
 
   async function handleViewOriginal() {
+    // Opened synchronously, before the await below, so Mobile Safari's
+    // popup blocker never gets a chance to treat this as a non-gesture-
+    // triggered window.open() (see app/lib/browser/pendingTab.ts).
+    const pendingTab = openPendingTab();
     setViewPending(true);
+    setViewError(null);
     const result = await getDocumentDownloadUrl(props.documentId);
     setViewPending(false);
-    if (result.ok) {
-      window.open(result.url, "_blank", "noopener,noreferrer");
+    if (!result.ok) {
+      closePendingTab(pendingTab);
+      setViewError(result.message);
+      return;
     }
+    resolvePendingTab(pendingTab, result.url);
   }
 
   async function handlePostToInventory() {
@@ -348,6 +358,8 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
               {downloadPending ? "Preparing…" : "Download"}
             </button>
           </div>
+          {viewError ? <p className="mt-2 text-xs text-red-400">{viewError}</p> : null}
+          {downloadError ? <p className="mt-2 text-xs text-red-400">{downloadError}</p> : null}
 
           <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3">
             <DetailField label="Vendor" value={props.vendorName} />
@@ -671,6 +683,7 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
           </Section>
         ) : null}
 
+        {viewError ? <p className="mt-4 text-sm text-red-400">{viewError}</p> : null}
         {downloadError ? <p className="mt-4 text-sm text-red-400">{downloadError}</p> : null}
         {amendError ? <p className="mt-4 text-sm text-red-400">{amendError}</p> : null}
 

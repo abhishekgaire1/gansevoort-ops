@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { NotificationBell } from "@/app/components/notifications/NotificationBell";
+import { AskGansevoortLauncher } from "@/app/components/manager/askGansevoort/AskGansevoortLauncher";
 import { signOutManager } from "@/app/actions/managerAuth";
 
 /**
@@ -155,13 +156,15 @@ function buildNav(isAdmin: boolean): NavItem[] {
   // administration of organization master data is Admin-only, not
   // something every Manager sees under "Settings"). Items is read-only
   // browse and stays Manager-visible, now as its own top-level entry
-  // rather than a single-child "Settings" group.
+  // rather than a single-child "Settings" group. No separatorBefore here
+  // -- Items is an ordinary operational module like Reports/Categories,
+  // not a distinct section worth its own divider; a lone item sitting
+  // below an otherwise-unexplained line looked like a rendering bug.
   nav.push({
     label: "Items",
     href: "/manager/items",
-    icon: <SettingsIcon />,
+    icon: <ItemsIcon />,
     isActive: (p) => p.startsWith("/manager/items"),
-    separatorBefore: true,
   });
 
   return nav;
@@ -227,6 +230,7 @@ export function ManagerShell({ managerName, isAdmin, children }: { managerName: 
         </header>
         <main className="flex-1 px-4 py-6 md:px-6 md:py-8">{children}</main>
       </div>
+      <AskGansevoortLauncher />
     </div>
   );
 }
@@ -429,11 +433,12 @@ function CategoriesIcon() {
   );
 }
 
-function SettingsIcon() {
+function ItemsIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 0 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 0 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 0 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 0 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1Z" />
+      <path d="M12 3 3 7.5v9L12 21l9-4.5v-9L12 3Z" />
+      <path d="M3 7.5 12 12l9-4.5" />
+      <path d="M12 12v9" />
     </svg>
   );
 }
