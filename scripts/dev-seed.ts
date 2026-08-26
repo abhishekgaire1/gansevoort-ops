@@ -40,7 +40,7 @@ function requireEnv(name: string): string {
 }
 
 function randomPin(): string {
-  return String(randomInt(0, 1_000_000)).padStart(6, "0");
+  return String(randomInt(0, 10_000)).padStart(4, "0");
 }
 
 function randomPassword(): string {
@@ -202,7 +202,7 @@ async function ensureEmployee(
     const { value: pin, wasGenerated: pinWasGenerated } = envOrGenerated(spec.pinEnvVar, randomPin);
     if (!isValidPinFormat(pin)) {
       throw new Error(
-        `${spec.pinEnvVar} is set to "${pin}", which is not a valid PIN (must be exactly 6 digits). ` +
+        `${spec.pinEnvVar} is set to "${pin}", which is not a valid PIN (must be exactly 4 digits). ` +
           `Fix .env.local, or leave it blank to auto-generate one.`
       );
     }

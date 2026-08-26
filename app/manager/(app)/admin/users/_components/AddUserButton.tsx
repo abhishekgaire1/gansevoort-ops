@@ -85,6 +85,10 @@ export function AddUserButton({ stations }: { stations: KioskStation[] }) {
       }
 
       if (role === "employee") {
+        if (grantKioskAccess && !/^\d{4}$/.test(pin)) {
+          setError("Enter a 4-digit PIN.");
+          return;
+        }
         if (grantKioskAccess && pin !== confirmPin) {
           setError("PIN and confirmation do not match.");
           return;
@@ -266,29 +270,34 @@ export function AddUserButton({ stations }: { stations: KioskStation[] }) {
                   </label>
 
                   {grantKioskAccess ? (
-                    <div className="flex gap-3">
-                      <label className="flex flex-1 flex-col gap-1 text-xs text-zinc-400">
-                        New PIN
-                        <input
-                          type="password"
-                          inputMode="numeric"
-                          maxLength={6}
-                          value={pin}
-                          onChange={(e) => setPin(e.target.value)}
-                          className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
-                        />
-                      </label>
-                      <label className="flex flex-1 flex-col gap-1 text-xs text-zinc-400">
-                        Confirm PIN
-                        <input
-                          type="password"
-                          inputMode="numeric"
-                          maxLength={6}
-                          value={confirmPin}
-                          onChange={(e) => setConfirmPin(e.target.value)}
-                          className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
-                        />
-                      </label>
+                    <div className="flex flex-col gap-2">
+                      <p className="text-xs text-zinc-500">Enter a 4-digit PIN.</p>
+                      <div className="flex gap-3">
+                        <label className="flex flex-1 flex-col gap-1 text-xs text-zinc-400">
+                          New PIN
+                          <input
+                            type="password"
+                            inputMode="numeric"
+                            autoComplete="off"
+                            maxLength={4}
+                            value={pin}
+                            onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                            className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+                          />
+                        </label>
+                        <label className="flex flex-1 flex-col gap-1 text-xs text-zinc-400">
+                          Confirm PIN
+                          <input
+                            type="password"
+                            inputMode="numeric"
+                            autoComplete="off"
+                            maxLength={4}
+                            value={confirmPin}
+                            onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                            className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+                          />
+                        </label>
+                      </div>
                     </div>
                   ) : null}
                 </>

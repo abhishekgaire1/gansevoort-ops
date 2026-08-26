@@ -6,6 +6,7 @@ import { listActiveStationsForOrganization } from "@/app/lib/kiosk/stations";
 import { PageHeader } from "@/app/components/manager/PageHeader";
 import { AdminUsersView } from "./_components/AdminUsersView";
 import { AddUserButton } from "./_components/AddUserButton";
+import { KioskPinLockoutPanel } from "./_components/KioskPinLockoutPanel";
 
 /**
  * Admin -> Users hub (Admin Foundation milestone, Part 7) -- a child of
@@ -30,6 +31,7 @@ export default async function AdminUsersPage() {
   return (
     <div className="mx-auto max-w-4xl">
       <PageHeader title="Users" description="Manage employees and application access." action={<AddUserButton stations={stations} />} />
+      <KioskPinLockoutPanel />
       <AdminUsersView initialUsers={users} stations={stations} />
     </div>
   );

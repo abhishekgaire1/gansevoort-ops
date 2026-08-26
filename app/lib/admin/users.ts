@@ -43,6 +43,11 @@ export interface AdminUserSummary {
    * Access Management milestone) has neither PIN field set. Never the
    * PIN itself. */
   hasPin: boolean;
+  /** True only when hasPin is also true: a configured PIN that predates
+   * the four-digit kiosk PIN feature and cannot authenticate at the
+   * kiosk until a manager assigns a new four-digit PIN (forced-reset
+   * transition). Never true for an employee with no PIN at all. */
+  kioskPinResetRequired: boolean;
   roles: string[];
   /** The role that is actually GRANTED (usable for authorization) --
    * never influenced by an in-progress or failed invitation. */
@@ -76,6 +81,7 @@ interface AdminUserRow {
   out_is_app_user_active: boolean | null;
   out_has_auth_account: boolean;
   out_has_pin: boolean;
+  out_kiosk_pin_reset_required: boolean;
   out_intended_role: PrimaryRole | null;
   out_provisioning_status: ProvisioningStatus;
   out_pending_email: string | null;
@@ -96,6 +102,7 @@ function mapUserRow(row: AdminUserRow): AdminUserSummary {
     isAppUserActive: row.out_is_app_user_active,
     hasAuthAccount: row.out_has_auth_account,
     hasPin: row.out_has_pin,
+    kioskPinResetRequired: row.out_kiosk_pin_reset_required,
     roles,
     primaryRole,
     intendedRole: row.out_intended_role,
@@ -184,7 +191,7 @@ export interface CreateEmployeeResult {
 export async function createEmployee(supabase: SupabaseClient, input: CreateEmployeeInput): Promise<CreateEmployeeResult> {
   if (input.grantKioskAccess) {
     if (!input.pin || !isValidPinFormat(input.pin)) {
-      throw new AdminValidationError("Enter a 6-digit PIN for kiosk access.");
+      throw new AdminValidationError("Enter a 4-digit PIN for kiosk access.");
     }
   }
 

@@ -13,7 +13,7 @@ import { argon2id, argon2Verify } from "hash-wasm";
  * where native N-API bindings cannot load.
  */
 
-const PIN_PATTERN = /^\d{6}$/;
+const PIN_PATTERN = /^\d{4}$/;
 
 export function isValidPinFormat(pin: string): boolean {
   return PIN_PATTERN.test(pin);
@@ -55,7 +55,7 @@ export async function verifyPinHash(pin: string, pinHash: string): Promise<boole
 
 // Fixed input for the precomputed dummy hash below -- its value is
 // arbitrary and never a real credential; what matters is that it's stable.
-const DUMMY_PIN_FOR_TIMING = "000000";
+const DUMMY_PIN_FOR_TIMING = "0000";
 
 // Computed once, lazily, on first use, and cached for the life of the
 // process -- never regenerated per request. Generating a fresh dummy hash

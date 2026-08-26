@@ -39,7 +39,7 @@ import { CartReviewGroups } from "./CartReviewGroups";
 import { SuccessState } from "./SuccessState";
 import { ErrorState } from "./ErrorState";
 
-const PIN_LENGTH = 6;
+const PIN_LENGTH = 4;
 const SESSION_TICK_INTERVAL_MS = 5000;
 const GENERIC_NETWORK_ERROR = "Something went wrong. Please try again.";
 const GENERIC_SUBMIT_ERROR = "This withdrawal couldn't be completed. You can try again or go back to make changes.";
@@ -580,7 +580,9 @@ export function KioskApp() {
           <h1 className="text-3xl font-semibold text-kiosk-text">Gansevoort Liberty Market</h1>
           <p className="mt-2 text-lg text-kiosk-text-muted">Enter your PIN to begin</p>
         </div>
-        <PinDisplay length={PIN_LENGTH} filled={pinDigits.length} />
+        <div role="group" aria-label="4-digit employee PIN">
+          <PinDisplay length={PIN_LENGTH} filled={pinDigits.length} />
+        </div>
         {state.errorBanner ? (
           <p role="alert" className="max-w-xs text-center text-base font-medium text-kiosk-coral-strong">
             {state.errorBanner.message}

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { hashPinForStorage, hashPinLookup } from "@/app/lib/auth/pin";
-import { checkAndIncrementPinRateLimit, deriveRateLimitKey } from "@/app/lib/auth/rateLimit";
+import { deriveRateLimitKey, incrementPinRateLimit, MAX_FAILURES_IP, WINDOW_SECONDS_IP } from "@/app/lib/auth/rateLimit";
 import { verifyPinCore } from "@/app/lib/auth/verifyPin";
 import { resolveTestOrgId } from "./testFixtures";
 
@@ -30,11 +30,13 @@ import { resolveTestOrgId } from "./testFixtures";
  * app_users row is only ever found when the submitted PIN already equals
  * the one the account was set up with; an incorrect PIN can never be
  * attributed to a specific employee. There is intentionally no
- * per-employee failed-attempt counter or lockout -- brute-forcing the PIN
- * space is blunted only by the source-based rate limiter, covered below.
+ * per-employee failed-attempt counter or lockout -- brute-forcing the
+ * four-digit PIN space is blunted by the layered device/IP/organization
+ * failed-attempt scopes plus the separate all-attempts CPU throttle (see
+ * rateLimit.ts), covered below.
  */
 
-const PIN = "483920";
+const PIN = "4839";
 const EMPLOYEE_CODE = "TEST-PIN-FIXTURE";
 
 let supabase: SupabaseClient;
@@ -52,7 +54,13 @@ let canonicalPinHash: string;
 async function resetFixtureState(): Promise<void> {
   await supabase
     .from("app_users")
-    .update({ is_active: true, pin_lookup_hash: canonicalPinLookupHash, pin_hash: canonicalPinHash })
+    .update({
+      is_active: true,
+      pin_lookup_hash: canonicalPinLookupHash,
+      pin_hash: canonicalPinHash,
+      kiosk_pin_format_version: "FOUR_DIGIT",
+      kiosk_pin_reset_required: false,
+    })
     .eq("id", appUserId);
 }
 
@@ -110,7 +118,8 @@ describe("verifyPinCore", () => {
     const result = await verifyPinCore(supabase, {
       pin: PIN,
       organizationId,
-      sourceIdentifier: "test-source-correct-pin",
+      sourceIp: "203.0.113.10",
+      deviceId: "test-device-correct-pin",
       pinPepper,
       kioskTokenSecret,
     });
@@ -125,9 +134,10 @@ describe("verifyPinCore", () => {
     const { data: before } = await supabase.from("app_users").select("*").eq("id", appUserId).single();
 
     const result = await verifyPinCore(supabase, {
-      pin: "000111",
+      pin: "0001",
       organizationId,
-      sourceIdentifier: "test-source-no-match",
+      sourceIp: "203.0.113.11",
+      deviceId: "test-device-no-match",
       pinPepper,
       kioskTokenSecret,
     });
@@ -144,7 +154,25 @@ describe("verifyPinCore", () => {
     const result = await verifyPinCore(supabase, {
       pin: PIN,
       organizationId,
-      sourceIdentifier: "test-source-inactive",
+      sourceIp: "203.0.113.12",
+      deviceId: "test-device-inactive",
+      pinPepper,
+      kioskTokenSecret,
+    });
+    expect(result).toEqual({ ok: false, reason: "invalid_pin" });
+
+    await resetFixtureState();
+  });
+
+  it("rejects a correct PIN still marked legacy/reset-required (forced-reset transition), with the same generic reason", async () => {
+    await resetFixtureState();
+    await supabase.from("app_users").update({ kiosk_pin_format_version: "LEGACY_SIX_DIGIT", kiosk_pin_reset_required: true }).eq("id", appUserId);
+
+    const result = await verifyPinCore(supabase, {
+      pin: PIN,
+      organizationId,
+      sourceIp: "203.0.113.13",
+      deviceId: "test-device-reset-required",
       pinPepper,
       kioskTokenSecret,
     });
@@ -159,13 +187,14 @@ describe("verifyPinCore", () => {
     // identification of this exact account by the correct PIN) intact --
     // simulates the accounts' two credential fields having gone out of
     // sync, not a mistyped PIN.
-    const mismatchedHash = await hashPinForStorage("111222");
+    const mismatchedHash = await hashPinForStorage("1112");
     await supabase.from("app_users").update({ pin_hash: mismatchedHash }).eq("id", appUserId);
 
     const result = await verifyPinCore(supabase, {
       pin: PIN,
       organizationId,
-      sourceIdentifier: "test-source-credential-integrity",
+      sourceIp: "203.0.113.14",
+      deviceId: "test-device-credential-integrity",
       pinPepper,
       kioskTokenSecret,
     });
@@ -176,17 +205,17 @@ describe("verifyPinCore", () => {
 });
 
 describe("PIN verify rate limiting", () => {
-  it("blocks a single source after enough attempts within a window, while a different source is unaffected", async () => {
-    const key = deriveRateLimitKey(`test-rate-limit-source-${Date.now()}`);
-    const otherKey = deriveRateLimitKey(`test-rate-limit-other-${Date.now()}`);
+  it("blocks a single source after enough FAILED attempts within a window, while a different source is unaffected", async () => {
+    const key = deriveRateLimitKey("ip", `test-rate-limit-source-${Date.now()}`);
+    const otherKey = deriveRateLimitKey("ip", `test-rate-limit-other-${Date.now()}`);
 
-    let lastResult: { allowed: boolean } = { allowed: true };
-    for (let i = 0; i < 25; i++) {
-      lastResult = await checkAndIncrementPinRateLimit(supabase, organizationId, key);
+    let lastCount = 0;
+    for (let i = 0; i < MAX_FAILURES_IP + 5; i++) {
+      lastCount = await incrementPinRateLimit(supabase, organizationId, "ip", key, WINDOW_SECONDS_IP);
     }
-    expect(lastResult.allowed).toBe(false);
+    expect(lastCount).toBeGreaterThan(MAX_FAILURES_IP);
 
-    const otherResult = await checkAndIncrementPinRateLimit(supabase, organizationId, otherKey);
-    expect(otherResult.allowed).toBe(true);
+    const otherCount = await incrementPinRateLimit(supabase, organizationId, "ip", otherKey, WINDOW_SECONDS_IP);
+    expect(otherCount).toBe(1);
   });
 });

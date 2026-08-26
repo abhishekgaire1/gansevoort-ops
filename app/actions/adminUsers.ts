@@ -20,6 +20,7 @@ import {
 import { AdminActionError } from "@/app/lib/admin/errors";
 import { inviteManagerOrAdmin, resendInvitation, sendAdminTriggeredPasswordReset } from "@/app/lib/admin/invitations";
 import { resolveSiteOrigin } from "@/app/lib/auth/siteOrigin";
+import { getOrgPinRateLimitStatus, unlockOrgPinRateLimits, type OrgPinRateLimitStatus } from "@/app/lib/auth/rateLimit";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as an Admin." };
@@ -236,4 +237,39 @@ export async function sendPasswordResetAction(email: string): Promise<SendPasswo
   const result = await sendAdminTriggeredPasswordReset(getServiceRoleClient(), auth.manager.organizationId, email, `${origin}/manager/reset-password`);
   if (!result.ok) return { ok: false, reason: "error", message: result.message };
   return { ok: true };
+}
+
+export type GetOrgPinRateLimitStatusResult = { ok: true; status: OrgPinRateLimitStatus } | AuthFailure;
+
+/** Read-only: whether this Admin's own organization's kiosk PIN login is
+ * currently locked out (org-wide failed-attempt scope only) and when that
+ * lockout's window expires. Never exposes raw IPs, rate-limit keys, or
+ * any employee/PIN data -- see getOrgPinRateLimitStatus's own comment. */
+export async function getOrgPinRateLimitStatusAction(): Promise<GetOrgPinRateLimitStatusResult> {
+  const auth = await requireAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  const status = await getOrgPinRateLimitStatus(getServiceRoleClient(), auth.manager.organizationId);
+  return { ok: true, status };
+}
+
+export type UnlockOrgPinRateLimitsActionResult = { ok: true } | AuthFailure | { ok: false; reason: "error"; message: string };
+
+/** Operational recovery: clears every PIN rate-limit record for this
+ * Admin's own organization only -- organizationId always comes from
+ * requireAdmin()'s server-resolved session, never client input. Restores
+ * kiosk login ATTEMPTS only; does not change any employee's PIN, hash, or
+ * kiosk token. Writes exactly one audit event (KIOSK_PIN_RATE_LIMIT_UNLOCK,
+ * see unlock_org_pin_rate_limits). Client only ever receives generic
+ * success/error, never the underlying counters. */
+export async function unlockOrgPinRateLimitsAction(): Promise<UnlockOrgPinRateLimitsActionResult> {
+  const auth = await requireAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  try {
+    await unlockOrgPinRateLimits(getServiceRoleClient(), auth.manager.organizationId, auth.manager.appUserId);
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "error", message: "Unable to unlock kiosk PIN attempts. Try again." };
+  }
 }
