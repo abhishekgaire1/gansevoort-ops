@@ -8,6 +8,10 @@ import {
   ItemProposalReferencedError,
   LineNotFoundInCurrentRevisionError,
   ReceiptNotFoundOrInvalidError,
+  LineAlreadyConfirmedAgainstDifferentItemError,
+  InvalidUsageUnitConfigurationError,
+  NonInventoryItemUsageUnitError,
+  UsageUnitStateError,
 } from "@/app/lib/itemMaster/errors";
 import { approveLineClassificationNewItemRpc } from "@/app/lib/itemMaster/approveLineClassificationNewItemRpc";
 import { approveLineClassificationExistingItemRpc } from "@/app/lib/itemMaster/approveLineClassificationExistingItemRpc";
@@ -43,6 +47,27 @@ describe("mapItemMasterRpcError", () => {
     expect(err).not.toBeInstanceOf(SpendCategoryCycleError);
     expect(err.message).toBe("boom");
   });
+
+  // Purchase-versus-usage unit model (20260811100120/100122) -- freshly
+  // allocated GA062-GA068, never GA020/GA031-GA036 (see the migrations'
+  // own comments for why those were already claimed elsewhere).
+  it("maps GA062 to LineAlreadyConfirmedAgainstDifferentItemError", () => {
+    expect(mapItemMasterRpcError({ code: "GA062", message: "m" })).toBeInstanceOf(LineAlreadyConfirmedAgainstDifferentItemError);
+  });
+
+  it("maps GA063 and GA064 to InvalidUsageUnitConfigurationError", () => {
+    expect(mapItemMasterRpcError({ code: "GA063", message: "m" })).toBeInstanceOf(InvalidUsageUnitConfigurationError);
+    expect(mapItemMasterRpcError({ code: "GA064", message: "m" })).toBeInstanceOf(InvalidUsageUnitConfigurationError);
+  });
+
+  it("maps GA065 to NonInventoryItemUsageUnitError", () => {
+    expect(mapItemMasterRpcError({ code: "GA065", message: "m" })).toBeInstanceOf(NonInventoryItemUsageUnitError);
+  });
+
+  it("maps GA067 and GA068 to UsageUnitStateError", () => {
+    expect(mapItemMasterRpcError({ code: "GA067", message: "m" })).toBeInstanceOf(UsageUnitStateError);
+    expect(mapItemMasterRpcError({ code: "GA068", message: "m" })).toBeInstanceOf(UsageUnitStateError);
+  });
 });
 
 describe("approveLineClassificationNewItemRpc", () => {
@@ -76,8 +101,33 @@ describe("approveLineClassificationNewItemRpc", () => {
       p_purchase_unit_code: null,
       p_receiving_behavior: null,
       p_fixed_conversion_factor: null,
+      p_secondary_usage_unit_code: null,
+      p_secondary_conversion_factor: null,
     });
     expect(result).toEqual({ inventoryItemId: "item-1", classificationId: "class-1" });
+  });
+
+  it("passes a manager-confirmed secondary usage unit through as its own trailing params -- never derived from any AI proposal", async () => {
+    const { client, rpc } = fakeSupabase({ data: [{ out_inventory_item_id: "item-1", out_classification_id: "class-1" }], error: null });
+
+    await approveLineClassificationNewItemRpc(client, {
+      purchaseDocumentId: "pd-1",
+      lineKey: "line-1",
+      organizationId: "org-1",
+      appUserId: "user-1",
+      finalName: "Chicken Thigh",
+      disposition: "INVENTORY",
+      categoryId: "cat-1",
+      spendCategoryId: "spend-1",
+      baseUnitCode: "LB",
+      secondaryUsageUnitCode: "CASE",
+      secondaryConversionFactor: 24,
+    });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "approve_line_classification_new_item",
+      expect.objectContaining({ p_secondary_usage_unit_code: "CASE", p_secondary_conversion_factor: 24 })
+    );
   });
 
   it("throws LineNotFoundInCurrentRevisionError for GA011", async () => {
@@ -115,8 +165,29 @@ describe("approveLineClassificationExistingItemRpc", () => {
       p_app_user_id: "user-1",
       p_inventory_item_id: "item-1",
       p_remember_vendor_mapping: true,
+      p_purchase_unit_code: null,
+      p_receiving_behavior: null,
+      p_fixed_conversion_factor: null,
     });
     expect(result).toEqual({ classificationId: "class-1" });
+  });
+
+  it("registers a NEW vendor SKU's purchase package for an already-confirmed item without touching any other vendor's/SKU's configuration (approved-plan §8)", async () => {
+    const { client, rpc } = fakeSupabase({ data: [{ out_classification_id: "class-1" }], error: null });
+    await approveLineClassificationExistingItemRpc(client, {
+      purchaseDocumentId: "pd-1",
+      lineKey: "line-1",
+      organizationId: "org-1",
+      appUserId: "user-1",
+      inventoryItemId: "item-1",
+      purchaseUnitCode: "CASE",
+      receivingBehavior: "FIXED_CONVERSION",
+      fixedConversionFactor: 12,
+    });
+    expect(rpc).toHaveBeenCalledWith(
+      "approve_line_classification_existing_item",
+      expect.objectContaining({ p_purchase_unit_code: "CASE", p_receiving_behavior: "FIXED_CONVERSION", p_fixed_conversion_factor: 12 })
+    );
   });
 
   it("throws ItemNotPendingReviewError for GA009", async () => {

@@ -14,6 +14,14 @@
  * only -- approve_line_classification_new_item enforces spend category
  * server-side too (see 20260811100051), since client validation alone is
  * never sufficient.
+ *
+ * Purchase-versus-usage unit model (approved-plan §7) additions: an
+ * OPTIONAL secondary kiosk usage unit, distinct from the item's base unit
+ * (the always-present primary), with its own positive conversion factor.
+ * Never required -- an empty secondaryUsageUnitCode is a fully valid,
+ * one-unit item. Server-side, upsert_secondary_usage_unit
+ * (20260811100120) re-checks the exact same distinctness/positivity rule
+ * -- this is the client-side half only.
  */
 
 export interface NewItemVerificationFields {
@@ -25,6 +33,8 @@ export interface NewItemVerificationFields {
   purchaseUnitCode: string;
   receivingBehavior: string;
   fixedConversionFactor: string;
+  secondaryUsageUnitCode: string;
+  secondaryConversionFactor: string;
 }
 
 export interface NewItemVerificationStatus {
@@ -32,11 +42,20 @@ export interface NewItemVerificationStatus {
   canVerify: boolean;
   usesDistinctPurchaseUnit: boolean;
   needsConversionFactor: boolean;
+  hasSecondaryUsageUnit: boolean;
+  /** True when the vendor purchase unit and the secondary kiosk usage
+   * unit share the same global unit code but were confirmed with
+   * different conversion factors -- a legitimate, deliberately supported
+   * configuration (approved-plan §5: "vendor CASE" vs "kiosk CASE" can
+   * mean different quantities), surfaced as a warning for the manager to
+   * confirm rather than silently forced to match either way. */
+  sameCodeDifferentFactorWarning: boolean;
 }
 
 export function computeNewItemVerificationStatus(fields: NewItemVerificationFields): NewItemVerificationStatus {
   const usesDistinctPurchaseUnit = fields.disposition === "INVENTORY" && fields.purchaseUnitCode !== "" && fields.purchaseUnitCode !== fields.baseUnitCode;
   const needsConversionFactor = usesDistinctPurchaseUnit && fields.receivingBehavior === "FIXED_CONVERSION";
+  const hasSecondaryUsageUnit = fields.disposition === "INVENTORY" && fields.secondaryUsageUnitCode !== "";
 
   const missing: string[] = [];
   if (!fields.name.trim()) missing.push("Item name");
@@ -46,6 +65,21 @@ export function computeNewItemVerificationStatus(fields: NewItemVerificationFiel
   if (needsConversionFactor && (!fields.fixedConversionFactor.trim() || Number(fields.fixedConversionFactor) <= 0)) {
     missing.push("Fixed conversion factor");
   }
+  if (hasSecondaryUsageUnit && fields.secondaryUsageUnitCode === fields.baseUnitCode) {
+    missing.push("Secondary usage unit (must differ from the base unit)");
+  }
+  if (hasSecondaryUsageUnit && (!fields.secondaryConversionFactor.trim() || Number(fields.secondaryConversionFactor) <= 0)) {
+    missing.push("Secondary usage unit conversion factor");
+  }
 
-  return { missing, canVerify: missing.length === 0, usesDistinctPurchaseUnit, needsConversionFactor };
+  const sameCodeDifferentFactorWarning =
+    hasSecondaryUsageUnit &&
+    usesDistinctPurchaseUnit &&
+    needsConversionFactor &&
+    fields.secondaryUsageUnitCode === fields.purchaseUnitCode &&
+    fields.secondaryConversionFactor.trim() !== "" &&
+    fields.fixedConversionFactor.trim() !== "" &&
+    Number(fields.secondaryConversionFactor) !== Number(fields.fixedConversionFactor);
+
+  return { missing, canVerify: missing.length === 0, usesDistinctPurchaseUnit, needsConversionFactor, hasSecondaryUsageUnit, sameCodeDifferentFactorWarning };
 }

@@ -419,7 +419,76 @@ record Pass/Fail/Not Applicable for each during the real manual pass.
 
 ---
 
-## Q. Final outcome
+## Q. Purchase-versus-usage unit model (kiosk primary/secondary units, vendor packaging)
+
+Using synthetic test items/vendors only. None of the scenarios below are
+pre-marked as passed -- record Pass/Fail/Not Applicable for each during the
+real manual pass.
+
+1. A brand-new INVENTORY item confirmed with only a primary kiosk usage
+   unit (no secondary) shows rigid, selector-free quantity entry at the
+   kiosk -- no unit picker appears at all.
+2. A brand-new INVENTORY item confirmed with both a primary and a
+   secondary kiosk usage unit shows a touch-friendly selector at the
+   kiosk, defaulting to the primary unit.
+3. Switching the kiosk unit selector from primary to secondary resets the
+   entered quantity rather than silently reinterpreting an already-typed
+   number in the new unit.
+4. The employee's chosen unit (primary or secondary) is clearly displayed
+   at the withdrawal confirmation step and matches what is actually
+   recorded on the resulting movement.
+5. A vendor purchase-only unit (e.g. a case configured solely for
+   receiving, never confirmed as a kiosk usage unit) never appears as a
+   kiosk withdrawal option for that item.
+6. Two vendors selling the same item in a same-named unit (e.g. both use
+   the code "CASE") but different physical case sizes each post the
+   correct, independently correct inventory quantity when received --
+   neither vendor's case size leaks into the other's receiving math.
+7. A single vendor changing their case size for an item going forward
+   (a new confirmed package version) does not alter any previously
+   posted receiving quantity, movement, or historical cost for that same
+   vendor's earlier deliveries.
+8. The New Items Found review screen shows Inventory Identity, How This
+   Item Will Be Used, How This Vendor Sells It, and Correlation Review as
+   distinct sections, with VERIFY ITEM disabled until every required
+   field -- including a valid, distinct secondary unit and its positive
+   conversion factor, if one is configured -- is satisfied.
+9. Choosing a secondary kiosk usage unit that shares a unit code with the
+   vendor's purchase unit but has a different confirmed conversion factor
+   produces a visible warning before the item can be verified, with an
+   option to reuse the vendor's confirmed factor instead of typing it
+   again.
+10. An AI-proposed unit or conversion factor is never auto-applied to a
+    new item -- the manager must explicitly confirm every unit/conversion
+    field before VERIFY ITEM can succeed.
+11. From Item Master, a manager can add a secondary kiosk usage unit to
+    an already-confirmed item, and it becomes selectable at the kiosk the
+    next time that item is chosen.
+12. From Item Master, a manager can change which of an item's two active
+    usage units is primary, and the kiosk reflects the new default
+    immediately on the next selection of that item.
+13. From Item Master, deactivating a secondary usage unit removes it from
+    the kiosk selector going forward without altering any historical
+    withdrawal record that used it while it was active.
+14. Confirming an already-known item against a NEW vendor's purchase
+    package (a different SKU or case size than any existing vendor
+    mapping) succeeds without altering any other vendor's or SKU's
+    existing package for that same item.
+15. A withdrawal attempt using a unit that is not an active, confirmed
+    kiosk usage unit for the item is safely rejected even if somehow
+    submitted directly (e.g. a stale or tampered client request) -- the
+    kiosk's own displayed options are never the only thing preventing it.
+16. An Item Purchase Cost / Item Cost History answer for a historical
+    purchase uses the vendor/SKU package that was actually in effect on
+    that purchase's own document date, never a vendor package change made
+    afterward.
+17. Waste and cycle counts continue to use only the item's base unit --
+    no unit selector or secondary-unit option appears in either
+    workflow.
+
+---
+
+## R. Final outcome
 
 - [ ] Every scenario above is marked **Pass**, **Fail**, or **Not
       Applicable**.

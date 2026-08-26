@@ -26,7 +26,12 @@ import {
   markLineNonInventory,
   bulkConfirmClassifications,
 } from "@/app/actions/itemClassification";
-import { LineNotFoundInCurrentRevisionError, ItemNotPendingReviewError } from "@/app/lib/itemMaster/errors";
+import {
+  LineNotFoundInCurrentRevisionError,
+  ItemNotPendingReviewError,
+  LineAlreadyConfirmedAgainstDifferentItemError,
+  InvalidUsageUnitConfigurationError,
+} from "@/app/lib/itemMaster/errors";
 
 const MANAGER = {
   ok: true as const,
@@ -103,6 +108,24 @@ describe("approveNewItemClassification", () => {
     const result = await approveNewItemClassification(input);
     expect(result).toMatchObject({ ok: false, reason: "line_not_found" });
   });
+
+  it("passes a manager-confirmed secondary usage unit through to the RPC untouched", async () => {
+    approveNewMock.mockResolvedValue({ inventoryItemId: "item-1", classificationId: "class-1" });
+    await approveNewItemClassification({ ...input, secondaryUsageUnitCode: "CASE", secondaryConversionFactor: 24 });
+    expect(approveNewMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ secondaryUsageUnitCode: "CASE", secondaryConversionFactor: 24 }));
+  });
+
+  it("maps LineAlreadyConfirmedAgainstDifferentItemError to a line_conflict result", async () => {
+    approveNewMock.mockRejectedValue(new LineAlreadyConfirmedAgainstDifferentItemError("conflict"));
+    const result = await approveNewItemClassification(input);
+    expect(result).toMatchObject({ ok: false, reason: "line_conflict" });
+  });
+
+  it("maps InvalidUsageUnitConfigurationError to an invalid_usage_unit result carrying the RPC's own message", async () => {
+    approveNewMock.mockRejectedValue(new InvalidUsageUnitConfigurationError("the secondary usage unit must be different from the base unit"));
+    const result = await approveNewItemClassification(input);
+    expect(result).toMatchObject({ ok: false, reason: "invalid_usage_unit", message: "the secondary usage unit must be different from the base unit" });
+  });
 });
 
 describe("approveExistingItemClassification", () => {
@@ -116,6 +139,22 @@ describe("approveExistingItemClassification", () => {
     approveExistingMock.mockResolvedValue({ classificationId: "class-1" });
     const result = await approveExistingItemClassification({ purchaseDocumentId: "pd-1", lineKey: "line-1", inventoryItemId: "item-1" });
     expect(result).toEqual({ ok: true, inventoryItemId: "item-1" });
+  });
+
+  it("registers a new vendor SKU's purchase package alongside an existing item, passed straight through to the RPC", async () => {
+    approveExistingMock.mockResolvedValue({ classificationId: "class-1" });
+    await approveExistingItemClassification({
+      purchaseDocumentId: "pd-1",
+      lineKey: "line-1",
+      inventoryItemId: "item-1",
+      purchaseUnitCode: "CASE",
+      receivingBehavior: "FIXED_CONVERSION",
+      fixedConversionFactor: 12,
+    });
+    expect(approveExistingMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ purchaseUnitCode: "CASE", receivingBehavior: "FIXED_CONVERSION", fixedConversionFactor: 12 })
+    );
   });
 });
 

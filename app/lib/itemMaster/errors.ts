@@ -32,6 +32,23 @@ export const ITEM_MASTER_SQLSTATE = {
    * Inventory Category, child categories for a Spend Category). */
   INVENTORY_CATEGORY_HAS_ACTIVE_ITEMS: "GA055",
   SPEND_CATEGORY_HAS_ACTIVE_CHILDREN: "GA056",
+  /** Purchase-versus-usage unit model (20260811100120) -- a line was
+   * already CONFIRMED against a different item than this call would
+   * resolve to; a genuine retry of the SAME resolution is unaffected. */
+  SAME_LINE_DIFFERENT_ITEM_CONFLICT: "GA062",
+  /** A proposed secondary kiosk usage unit was the same unit as the
+   * item's base/primary unit. */
+  SECONDARY_USAGE_UNIT_NOT_DISTINCT: "GA063",
+  /** A secondary kiosk usage unit needs a positive conversion factor. */
+  SECONDARY_USAGE_UNIT_INVALID_FACTOR: "GA064",
+  /** A NON_INVENTORY item cannot carry a kiosk usage-unit configuration. */
+  NON_INVENTORY_ITEM_CANNOT_HAVE_USAGE_UNIT: "GA065",
+  /** manager_add_secondary_usage_unit (20260811100122): the item has no
+   * active primary usage unit to add a secondary alongside. */
+  NO_ACTIVE_PRIMARY_USAGE_UNIT: "GA067",
+  /** manager_set_primary_usage_unit (20260811100122): the target unit is
+   * not an active usage unit for this item. */
+  USAGE_UNIT_NOT_ACTIVE_FOR_ITEM: "GA068",
 } as const;
 
 export class SpendCategoryCycleError extends Error {
@@ -133,6 +150,46 @@ export class DuplicateItemNameError extends Error {
   }
 }
 
+/** A line's classification was already CONFIRMED against a different item
+ * than this same-key resubmission would resolve to (20260811100120) --
+ * fails closed rather than silently reassigning a completed approval. */
+export class LineAlreadyConfirmedAgainstDifferentItemError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LineAlreadyConfirmedAgainstDifferentItemError";
+  }
+}
+
+/** A proposed kiosk usage-unit configuration was invalid -- the secondary
+ * unit matched the base/primary unit, or its conversion factor wasn't a
+ * positive number (20260811100120). */
+export class InvalidUsageUnitConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidUsageUnitConfigurationError";
+  }
+}
+
+/** A NON_INVENTORY item cannot carry a kiosk usage-unit configuration
+ * (20260811100120). */
+export class NonInventoryItemUsageUnitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonInventoryItemUsageUnitError";
+  }
+}
+
+/** manager_add_secondary_usage_unit/manager_set_primary_usage_unit
+ * (20260811100122) rejected the request: no active primary to add a
+ * secondary alongside, or the target unit isn't an active usage unit for
+ * this item. */
+export class UsageUnitStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UsageUnitStateError";
+  }
+}
+
 export function mapItemMasterRpcError(error: { code?: string; message: string; details?: string | null }): Error {
   switch (error.code) {
     case ITEM_MASTER_SQLSTATE.SPEND_CATEGORY_CYCLE:
@@ -156,6 +213,16 @@ export function mapItemMasterRpcError(error: { code?: string; message: string; d
       return new FixedConversionQuantityMismatchError(error.message);
     case ITEM_MASTER_SQLSTATE.DUPLICATE_ITEM_NAME:
       return new DuplicateItemNameError(error.message, error.details ?? undefined);
+    case ITEM_MASTER_SQLSTATE.SAME_LINE_DIFFERENT_ITEM_CONFLICT:
+      return new LineAlreadyConfirmedAgainstDifferentItemError(error.message);
+    case ITEM_MASTER_SQLSTATE.SECONDARY_USAGE_UNIT_NOT_DISTINCT:
+    case ITEM_MASTER_SQLSTATE.SECONDARY_USAGE_UNIT_INVALID_FACTOR:
+      return new InvalidUsageUnitConfigurationError(error.message);
+    case ITEM_MASTER_SQLSTATE.NON_INVENTORY_ITEM_CANNOT_HAVE_USAGE_UNIT:
+      return new NonInventoryItemUsageUnitError(error.message);
+    case ITEM_MASTER_SQLSTATE.NO_ACTIVE_PRIMARY_USAGE_UNIT:
+    case ITEM_MASTER_SQLSTATE.USAGE_UNIT_NOT_ACTIVE_FOR_ITEM:
+      return new UsageUnitStateError(error.message);
     case PURCHASE_DOCUMENT_SQLSTATE.NOT_PREPARER:
       return new NotPreparerError(error.message);
     case PURCHASE_DOCUMENT_SQLSTATE.VERIFIED_LOCKED:

@@ -6,7 +6,7 @@ import { listActiveStations } from "@/app/actions/stations";
 import { listActiveInventoryItems } from "@/app/actions/inventoryItems";
 import { getEmployeeRecentWithdrawnItemIds } from "@/app/actions/recentItems";
 import { getInventorySearchSignals } from "@/app/actions/searchSignals";
-import { getWithdrawalUnit } from "@/app/actions/withdrawalUnit";
+import { getKioskUsageUnits } from "@/app/actions/withdrawalUnit";
 import { getKioskItemAvailabilityAction } from "@/app/actions/inventoryAvailability";
 import { refreshKioskSession } from "@/app/actions/kioskSession";
 import { recordWithdrawalBatch } from "@/app/actions/withdrawalBatch";
@@ -33,6 +33,7 @@ import { RecentItemsStrip } from "./RecentItemsStrip";
 import { WithdrawalQuantityDisplay } from "./WithdrawalQuantityDisplay";
 import { QuantityEntrySkeleton } from "./QuantityEntrySkeleton";
 import { StockAvailabilityCard } from "./StockAvailabilityCard";
+import { UsageUnitSelector } from "./UsageUnitSelector";
 import { SetupRequiredNotice } from "./SetupRequiredNotice";
 import { CardGridSkeleton } from "./CardGridSkeleton";
 import { CartReviewGroups } from "./CartReviewGroups";
@@ -323,10 +324,11 @@ export function KioskApp() {
     };
   }, [state.step, state.searchSignals, state.kioskToken, retryTick]);
 
-  // ---- Withdrawal unit fetch --------------------------------------------
-  // Under the withdrawal-unit simplification an employee always withdraws
-  // in the item's own base unit -- see app/lib/kiosk/withdrawalUnit.ts. The
-  // item catalog already excludes items missing that mapping (see
+  // ---- Kiosk usage units fetch -------------------------------------------
+  // Under the purchase-versus-usage unit model an employee withdraws in
+  // whichever confirmed kiosk usage unit(s) the item has -- one required
+  // primary, one optional secondary -- see app/lib/kiosk/withdrawalUnit.ts.
+  // The item catalog already excludes items missing a primary (see
   // app/lib/kiosk/inventoryItems.ts), so "unit_not_configured" here means a
   // rare race (master data changed after the catalog was fetched but before
   // this item was selected) -- shown as a small inline notice on this same
@@ -335,7 +337,7 @@ export function KioskApp() {
     if (
       state.step !== "quantity_entry" ||
       !state.selectedItem ||
-      state.withdrawalUnit !== null ||
+      state.usageUnits !== null ||
       state.withdrawalUnitUnavailable ||
       !state.kioskToken
     ) {
@@ -344,7 +346,7 @@ export function KioskApp() {
     let cancelled = false;
     (async () => {
       try {
-        const result = await getWithdrawalUnit(state.kioskToken!, state.selectedItem!.id);
+        const result = await getKioskUsageUnits(state.kioskToken!, state.selectedItem!.id);
         if (cancelled) return;
         if (!result.ok) {
           if (result.reason === "item_not_found") {
@@ -356,7 +358,7 @@ export function KioskApp() {
           }
           return;
         }
-        dispatch({ type: "WITHDRAWAL_UNIT_LOADED", unit: result.unit });
+        dispatch({ type: "USAGE_UNITS_LOADED", units: result.units });
       } catch {
         if (!cancelled) dispatch({ type: "SCREEN_ERROR", message: GENERIC_NETWORK_ERROR });
       }
@@ -364,7 +366,7 @@ export function KioskApp() {
     return () => {
       cancelled = true;
     };
-  }, [state.step, state.selectedItem, state.withdrawalUnit, state.withdrawalUnitUnavailable, state.kioskToken, retryTick]);
+  }, [state.step, state.selectedItem, state.usageUnits, state.withdrawalUnitUnavailable, state.kioskToken, retryTick]);
 
   // ---- Stock availability fetch (2A.5) -------------------------------------
   // Loaded in parallel with the withdrawal unit, once per selected item --
@@ -546,17 +548,18 @@ export function KioskApp() {
             .map((l) => {
               const line = byId.get(cartLineKey(l.inventoryItemId, l.sourceLocationId));
               const label = line ? `${line.itemName} (${line.sourceLocationName})` : "One item";
-              const unit = line?.baseUnitCode ?? "";
+              const unit = line?.unitCode ?? "";
               return `${label}: requested ${formatKioskQuantity(l.requestedQuantity)} ${unit}, only ${formatKioskQuantity(l.availableQuantity)} ${unit} available now.`;
             })
             .join(" ");
           dispatch({ type: "SUBMIT_FAILED", message: detail || result.message });
           return;
         }
-        if (result.reason === "invalid_location") {
-          // A chosen location is no longer valid -- force a fresh
-          // browsing/availability load rather than letting the employee
-          // retry against a location that can never succeed.
+        if (result.reason === "invalid_location" || result.reason === "unit_not_authorized") {
+          // A chosen location is no longer valid, or an item's kiosk
+          // usage unit was reconfigured/deactivated since it was added --
+          // force a fresh browsing/unit-load rather than letting the
+          // employee retry against a choice that can never succeed.
           dispatch({ type: "BACK_TO_ITEMS", message: result.message });
           return;
         }
@@ -703,7 +706,7 @@ export function KioskApp() {
     const reviewLabel = isEditing ? "Save & Review Withdrawal →" : "Add & Review Withdrawal →";
     const handleContinueShoppingAction = () => (isEditing ? handleSaveCartLineEdit("item_select") : handleAddToCart("item_select"));
     const handleReviewAction = () => (isEditing ? handleSaveCartLineEdit("review") : handleAddToCart("review"));
-    const completionDisabled = !state.withdrawalUnit || !canContinueQuantity;
+    const completionDisabled = !state.usageUnits || !canContinueQuantity;
     const effectiveBalanceByLocationId = new Map((effectiveLocations ?? []).map((l) => [l.locationId, l.balance]));
 
     content = (
@@ -722,7 +725,7 @@ export function KioskApp() {
               <div className="mx-auto mb-3 w-full max-w-[1120px]">
                 <ErrorState
                   title={state.errorBanner.message}
-                  primaryAction={state.withdrawalUnit === null ? { label: "Retry", onClick: handleRetry } : { label: "Dismiss", onClick: () => dispatch({ type: "DISMISS_SCREEN_ERROR" }) }}
+                  primaryAction={state.usageUnits === null ? { label: "Retry", onClick: handleRetry } : { label: "Dismiss", onClick: () => dispatch({ type: "DISMISS_SCREEN_ERROR" }) }}
                 />
               </div>
             ) : null}
@@ -738,7 +741,7 @@ export function KioskApp() {
         <div className="mx-auto flex w-full max-w-[1120px] flex-col gap-2.5">
           {state.withdrawalUnitUnavailable ? (
             <SetupRequiredNotice onBack={() => dispatch({ type: "BACK_TO_ITEMS" })} />
-          ) : state.withdrawalUnit === null || state.availableLocations === null ? (
+          ) : state.usageUnits === null || state.availableLocations === null ? (
             state.errorBanner ? null : <QuantityEntrySkeleton />
           ) : outOfStock ? (
             <div className="flex flex-col items-center gap-3 py-10 text-center">
@@ -809,7 +812,22 @@ export function KioskApp() {
                   <StockAvailabilityCard
                     location={effectiveLocations!.find((l) => l.locationId === state.selectedSourceLocationId) ?? effectiveLocations![0]}
                   />
-                  <WithdrawalQuantityDisplay value={state.enteredQuantity} unit={state.withdrawalUnit.baseUnitCode} />
+                  {state.usageUnits.needsSelector ? (
+                    <UsageUnitSelector
+                      primary={state.usageUnits.primary}
+                      secondary={state.usageUnits.secondary!}
+                      selectedUnitId={state.selectedUsageUnitId ?? state.usageUnits.primary.unitId}
+                      onSelect={(unitId) => dispatch({ type: "USAGE_UNIT_SELECTED", unitId })}
+                    />
+                  ) : null}
+                  <WithdrawalQuantityDisplay
+                    value={state.enteredQuantity}
+                    unit={
+                      state.usageUnits.secondary && state.selectedUsageUnitId === state.usageUnits.secondary.unitId
+                        ? state.usageUnits.secondary.unitCode
+                        : state.usageUnits.primary.unitCode
+                    }
+                  />
                   {overAvailable && selectedLocationAvailability !== null ? (
                     <p role="alert" className="text-sm font-medium text-kiosk-coral-strong">
                       Only {formatKioskQuantity(selectedLocationAvailability.balance)} {selectedLocationAvailability.baseUnitCode} are currently available.

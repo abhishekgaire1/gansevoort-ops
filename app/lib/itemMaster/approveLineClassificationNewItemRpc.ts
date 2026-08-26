@@ -17,6 +17,12 @@ export interface ApproveLineClassificationNewItemInput {
   purchaseUnitCode?: string | null;
   receivingBehavior?: "SAME_UNIT" | "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY" | null;
   fixedConversionFactor?: number | null;
+  /** Optional second kiosk usage unit -- the primary is always the
+   * item's base unit and is configured server-side automatically; this is
+   * ONLY ever a manager-confirmed value, never AI-proposed (approved-plan
+   * §6/§11). Null/omitted means the item has no secondary usage unit. */
+  secondaryUsageUnitCode?: string | null;
+  secondaryConversionFactor?: number | null;
 }
 
 export interface ApproveLineClassificationNewItemResult {
@@ -52,6 +58,8 @@ export async function approveLineClassificationNewItemRpc(
     p_purchase_unit_code: input.purchaseUnitCode ?? null,
     p_receiving_behavior: input.receivingBehavior ?? null,
     p_fixed_conversion_factor: input.fixedConversionFactor ?? null,
+    p_secondary_usage_unit_code: input.secondaryUsageUnitCode ?? null,
+    p_secondary_conversion_factor: input.secondaryConversionFactor ?? null,
   });
 
   if (error) {

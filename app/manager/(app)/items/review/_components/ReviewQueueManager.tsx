@@ -10,7 +10,12 @@ import {
 import type { UnresolvedClassificationRow } from "@/app/lib/itemMaster/listUnresolvedClassifications";
 import { listInventoryCategories, listSpendCategories } from "@/app/actions/itemMaster";
 import type { InventoryItemSummary, CategorySummary, SpendCategorySummary, UnitSummary } from "@/app/actions/itemMaster";
-import { CLASSIFICATION_STATUS_LABEL, CLASSIFICATION_STATUS_COLOR, ExistingItemOverrideForm } from "@/app/manager/(app)/_components/ItemClassificationForms";
+import {
+  CLASSIFICATION_STATUS_LABEL,
+  CLASSIFICATION_STATUS_COLOR,
+  ExistingItemOverrideForm,
+  type ExistingItemVendorPackageInput,
+} from "@/app/manager/(app)/_components/ItemClassificationForms";
 import { NewItemReviewModal, type NewItemReviewCandidate } from "@/app/manager/(app)/_components/NewItemReviewModal";
 
 function lineToCandidate(line: UnresolvedClassificationRow): NewItemReviewCandidate | null {
@@ -75,8 +80,15 @@ export function ReviewQueueManager({
     return `${line.purchaseDocumentId}:${line.lineKey}`;
   }
 
-  async function handleApproveExisting(line: UnresolvedClassificationRow, inventoryItemId: string) {
-    const result = await approveExistingItemClassification({ purchaseDocumentId: line.purchaseDocumentId, lineKey: line.lineKey, inventoryItemId });
+  async function handleApproveExisting(line: UnresolvedClassificationRow, inventoryItemId: string, vendorPackage?: ExistingItemVendorPackageInput | null) {
+    const result = await approveExistingItemClassification({
+      purchaseDocumentId: line.purchaseDocumentId,
+      lineKey: line.lineKey,
+      inventoryItemId,
+      purchaseUnitCode: vendorPackage?.purchaseUnitCode ?? null,
+      receivingBehavior: vendorPackage?.receivingBehavior ?? null,
+      fixedConversionFactor: vendorPackage?.fixedConversionFactor ?? null,
+    });
     if (!result.ok) {
       setError(result.message);
       return;
@@ -169,7 +181,12 @@ export function ReviewQueueManager({
               ) : null}
 
               {overrideFormKey === key ? (
-                <ExistingItemOverrideForm items={items} onCancel={() => setOverrideFormKey(null)} onConfirm={(itemId) => handleApproveExisting(line, itemId)} />
+                <ExistingItemOverrideForm
+                  items={items}
+                  units={units}
+                  onCancel={() => setOverrideFormKey(null)}
+                  onConfirm={(itemId, vendorPackage) => handleApproveExisting(line, itemId, vendorPackage)}
+                />
               ) : null}
             </div>
           );

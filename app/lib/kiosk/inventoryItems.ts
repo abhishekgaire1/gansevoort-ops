@@ -23,10 +23,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * itemFilter.ts).
  *
  * Also still excludes any item that isn't actually withdrawable: the
- * withdrawal-unit simplification requires an ACTIVE, self-referencing
- * inventory_item_units row for the item's own base_unit_id (see
- * app/lib/kiosk/withdrawalUnit.ts) -- an item missing that row would only
- * fail once selected. This safety net is unchanged from before 2A.5.
+ * purchase-versus-usage unit model requires an ACTIVE primary kiosk usage
+ * unit (inventory_item_usage_units, usage_slot 1, joined to an active
+ * inventory_item_units row -- see app/lib/kiosk/withdrawalUnit.ts) -- an
+ * item missing that row would only fail once selected. Deliberately
+ * checks the usage-unit relationship itself, never `unit_id =
+ * base_unit_id`: a confirmed primary usage unit need not be the item's
+ * own base unit.
  */
 
 export interface KioskInventoryItem {
@@ -79,23 +82,23 @@ export async function listActiveInventoryItemsForOrganization(
     return [];
   }
 
-  const { data: entryUnits, error: entryUnitsError } = await supabase
-    .from("inventory_items")
-    .select("id, base_unit_id, inventory_item_units!inner(unit_id, is_active)")
+  const { data: primaryUsageUnits, error: primaryUsageUnitsError } = await supabase
+    .from("inventory_item_usage_units")
+    .select("inventory_item_id, inventory_item_units!inner(is_active)")
     .in(
-      "id",
+      "inventory_item_id",
       rows.map((row) => row.out_inventory_item_id)
     )
+    .eq("usage_slot", 1)
+    .eq("is_active", true)
     .eq("inventory_item_units.is_active", true);
 
-  if (entryUnitsError) {
-    throw new Error(`listActiveInventoryItemsForOrganization entry-unit lookup failed: ${entryUnitsError.message}`);
+  if (primaryUsageUnitsError) {
+    throw new Error(`listActiveInventoryItemsForOrganization primary-usage-unit lookup failed: ${primaryUsageUnitsError.message}`);
   }
 
   const withdrawableItemIds = new Set(
-    ((entryUnits ?? []) as { id: string; base_unit_id: string; inventory_item_units: { unit_id: string }[] }[])
-      .filter((row) => row.inventory_item_units.some((u) => u.unit_id === row.base_unit_id))
-      .map((row) => row.id)
+    ((primaryUsageUnits ?? []) as { inventory_item_id: string }[]).map((row) => row.inventory_item_id)
   );
 
   return rows

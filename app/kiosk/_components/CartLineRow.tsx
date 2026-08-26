@@ -47,7 +47,7 @@ export function CartLineRow({ line, onEdit, onRemove }: CartLineRowProps) {
         </div>
       </div>
       <p className="shrink-0 whitespace-nowrap text-lg font-semibold text-kiosk-amber-strong">
-        {formatQuantity(line.enteredQuantity)} {line.baseUnitCode}
+        {formatQuantity(line.enteredQuantity)} {line.unitCode}
       </p>
     </div>
   );

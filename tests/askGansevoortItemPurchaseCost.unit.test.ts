@@ -64,6 +64,20 @@ interface FakeConfig {
   itemUnits?: { code: string; conversion_factor: number | null; requires_actual_measurement: boolean }[];
   rpcByVendor?: Record<string, PriceHistoryRowLike[]>;
   documentRevisions?: DocumentRevisionRow[];
+  /** Vendor-specific purchase-package VERSIONS (purchase-versus-usage
+   * unit model, 20260811100119) -- deliberately a SEPARATE dataset from
+   * itemUnits (the legacy shared per-item table), so a test can prove two
+   * vendors sharing a unit code never collide, and that an outdated
+   * historical purchase resolves against the version that was actually in
+   * effect on ITS OWN document date, never today's current version. */
+  vendorPackages?: {
+    vendor_id: string;
+    unit_code: string;
+    conversion_factor: number | null;
+    requires_actual_measurement: boolean;
+    effective_from: string;
+    effective_to: string | null;
+  }[];
 }
 
 function defaultRevisionRows(config: FakeConfig): DocumentRevisionRow[] {
@@ -114,6 +128,35 @@ function fakeSupabase(config: FakeConfig) {
           const sliceStart = gtId === null ? 0 : startIdx === -1 ? all.length : startIdx;
           const page = all.slice(sliceStart, sliceStart + limitN);
           resolve({ data: page, error: null });
+        },
+      };
+      return chain;
+    }
+
+    if (table === "vendor_item_purchase_units") {
+      // A dedicated chain (unlike the generic fallback below) because this
+      // one genuinely needs real vendor_id filtering to prove two vendors
+      // sharing a unit code never collide -- the generic fallback's `.eq()`
+      // is deliberately a no-op everywhere else in this fake.
+      let vendorIdFilter: string | null = null;
+      const chain: Record<string, unknown> = {
+        select: () => chain,
+        eq: (col: string, val: string) => {
+          if (col === "vendor_id") vendorIdFilter = val;
+          return chain;
+        },
+        then: (resolve: (value: { data: unknown; error: null }) => void) => {
+          const rows = (config.vendorPackages ?? []).filter((p) => vendorIdFilter === null || p.vendor_id === vendorIdFilter);
+          resolve({
+            data: rows.map((p) => ({
+              conversion_factor: p.conversion_factor,
+              requires_actual_measurement: p.requires_actual_measurement,
+              effective_from: p.effective_from,
+              effective_to: p.effective_to,
+              units: { code: p.unit_code },
+            })),
+            error: null,
+          });
         },
       };
       return chain;
@@ -823,5 +866,128 @@ describe("General Report Builder -- listVerifiedPurchaseHistoryForItem (Item Cos
     });
     const result = await listVerifiedPurchaseHistoryForItem({ supabase: supabase as never, organizationId: ORG_ID }, ITEM_ID, "PIECE");
     expect(result.status).toBe("incomplete");
+  });
+});
+
+// Purchase-versus-usage unit model (approved-plan §14): historical cost
+// resolution must use the SPECIFIC vendor's/SKU's own confirmed package
+// (vendor_item_purchase_units), never the shared, mutable legacy table
+// (inventory_item_units) once a vendor-scoped version exists for that
+// purchase's own document date -- and never today's CURRENT package
+// repricing an OLDER purchase from before it changed.
+describe("Vendor-scoped purchase-package resolution (purchase-versus-usage unit model, approved-plan §14)", () => {
+  it("resolves each vendor's OWN conversion factor for a shared unit code -- never the other vendor's factor, and never the legacy shared table's factor", async () => {
+    const supabase = fakeSupabase({
+      inventoryItems: [{ id: ITEM_ID, name: "Whole Milk Quart", base_unit_id: UNIT_ID }],
+      unitCode: "PIECE",
+      postingLines: [
+        { id: plId(0), posting_id: "posting-a" },
+        { id: plId(1), posting_id: "posting-b" },
+      ],
+      postings: [
+        { id: "posting-a", purchase_document_id: "doc-a" },
+        { id: "posting-b", purchase_document_id: "doc-b" },
+      ],
+      documents: [
+        { id: "doc-a", vendor_id: "vendor-a" },
+        { id: "doc-b", vendor_id: "vendor-b" },
+      ],
+      // Deliberately a WRONG legacy factor (99) -- proves the vendor-
+      // scoped path is consulted FIRST, never merely as a tie-break, and
+      // that a stale/foreign factor sitting in the shared table can never
+      // leak into either vendor's own history.
+      itemUnits: [{ code: "CASE", conversion_factor: 99, requires_actual_measurement: false }],
+      vendorPackages: [
+        { vendor_id: "vendor-a", unit_code: "CASE", conversion_factor: 12, requires_actual_measurement: false, effective_from: "2020-01-01T00:00:00Z", effective_to: null },
+        { vendor_id: "vendor-b", unit_code: "CASE", conversion_factor: 24, requires_actual_measurement: false, effective_from: "2020-01-01T00:00:00Z", effective_to: null },
+      ],
+      rpcByVendor: {
+        "vendor-a": [
+          row({
+            out_purchase_document_id: "doc-a",
+            out_vendor_id: "vendor-a",
+            out_document_date: "2026-08-10",
+            out_package_quantity: 10,
+            out_base_quantity: 120, // 10 cases * vendor-a's OWN factor (12) -- fully posted
+            out_line_total: 500,
+            out_unit_cost: 500 / 120,
+          }),
+        ],
+        "vendor-b": [
+          row({
+            out_purchase_document_id: "doc-b",
+            out_vendor_id: "vendor-b",
+            out_document_date: "2026-08-12",
+            out_package_quantity: 10,
+            out_base_quantity: 240, // 10 cases * vendor-b's OWN factor (24) -- fully posted
+            out_line_total: 1000,
+            out_unit_cost: 1000 / 240,
+          }),
+        ],
+      },
+    });
+
+    const result = await lookupItemPurchaseCost({ supabase: supabase as never, organizationId: ORG_ID, now: NOW }, "Whole Milk Quart");
+    expect(result.status).toBe("exact");
+    if (result.status !== "exact") return;
+    // Neither vendor's purchase is wrongly excluded as "partial" -- each
+    // was fully posted under its OWN vendor-scoped factor. Under the old,
+    // single-shared-table resolution, at least one of these would have
+    // been evaluated against the WRONG factor and misclassified.
+    expect(result.excludedPartialCount).toBe(0);
+    expect(result.weightedAverage?.recordCount).toBe(2);
+  });
+
+  it("resolves a historical purchase against the package version that was in effect on ITS OWN document date, never the vendor's CURRENT (later-superseded) package", async () => {
+    const supabase = fakeSupabase({
+      inventoryItems: [{ id: ITEM_ID, name: "Whole Milk Quart", base_unit_id: UNIT_ID }],
+      unitCode: "PIECE",
+      postingLines: [{ id: plId(0), posting_id: "posting-1" }],
+      postings: [{ id: "posting-1", purchase_document_id: "doc-old" }],
+      documents: [{ id: "doc-old", vendor_id: "vendor-1" }],
+      vendorPackages: [
+        // The OLD version this vendor's package was under when doc-old was
+        // purchased -- superseded (effective_to set) before "now".
+        { vendor_id: "vendor-1", unit_code: "CASE", conversion_factor: 12, requires_actual_measurement: false, effective_from: "2020-01-01T00:00:00Z", effective_to: "2026-01-01T00:00:00Z" },
+        // The vendor's CURRENT package -- effective after doc-old's own
+        // document date. Must never be used to reprice doc-old.
+        { vendor_id: "vendor-1", unit_code: "CASE", conversion_factor: 24, requires_actual_measurement: false, effective_from: "2026-01-01T00:00:00Z", effective_to: null },
+      ],
+      rpcByVendor: {
+        "vendor-1": [
+          row({
+            out_purchase_document_id: "doc-old",
+            out_vendor_id: "vendor-1",
+            out_document_date: "2025-06-01", // BEFORE the 2026-01-01 supersession
+            out_package_quantity: 10,
+            out_base_quantity: 120, // fully posted under the OLD factor (12), not the current one (24)
+            out_line_total: 500,
+            out_unit_cost: 500 / 120,
+          }),
+        ],
+      },
+      documentRevisions: [{ id: "doc-old", revision_group_id: "doc-old", revision_number: 1, status: "VERIFIED" }],
+    });
+
+    const result = await lookupItemPurchaseCost({ supabase: supabase as never, organizationId: ORG_ID, now: NOW }, "Whole Milk Quart");
+    expect(result.status).toBe("exact");
+    if (result.status !== "exact") return;
+    // Evaluated against the OLD (12) factor, correctly proven complete --
+    // if the CURRENT (24) factor had been used instead, 120 posted units
+    // would look like only half of an expected 240, and this purchase
+    // would have been wrongly excluded as partial.
+    expect(result.excludedPartialCount).toBe(0);
+    expect(result.latest.baseQuantity).toBe(120);
+  });
+
+  it("falls back to the legacy shared table when no vendor-specific package version exists for a purchase (pre-model / un-migrated data)", async () => {
+    const supabase = fakeSupabase({
+      ...CASE_PACK_CONFIG, // itemUnits: CASE -> factor 12, no vendorPackages configured at all
+      rpcByVendor: { "vendor-1": [row({ out_package_quantity: 10, out_base_quantity: 120, out_line_total: 500, out_unit_cost: 500 / 120 })] },
+    });
+    const result = await lookupItemPurchaseCost({ supabase: supabase as never, organizationId: ORG_ID, now: NOW }, "Whole Milk Quart");
+    expect(result.status).toBe("exact");
+    if (result.status !== "exact") return;
+    expect(result.excludedPartialCount).toBe(0);
   });
 });

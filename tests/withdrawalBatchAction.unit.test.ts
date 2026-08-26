@@ -13,7 +13,7 @@ const { recordInventoryWithdrawalBatchMock } = vi.hoisted(() => ({ recordInvento
 vi.mock("@/app/lib/inventory/withdrawalBatch", () => ({ recordInventoryWithdrawalBatch: recordInventoryWithdrawalBatchMock }));
 
 import { recordWithdrawalBatch, type RecordWithdrawalBatchInput } from "@/app/actions/withdrawalBatch";
-import { BatchInsufficientInventoryError, InvalidStorageLocationError } from "@/app/lib/inventory/errors";
+import { BatchInsufficientInventoryError, InvalidStorageLocationError, KioskUsageUnitNotAuthorizedError } from "@/app/lib/inventory/errors";
 
 const SENSITIVE_TEXT = "postgres internal relation inventory_secret_table";
 
@@ -84,6 +84,13 @@ describe("recordWithdrawalBatch -- unexpected-error handling", () => {
     recordInventoryWithdrawalBatchMock.mockRejectedValue(new InvalidStorageLocationError("bad location"));
     const result = await recordWithdrawalBatch("token", INPUT);
     expect(result).toEqual({ ok: false, reason: "invalid_location", message: "One of the selected locations is no longer available. Reload and choose again." });
+  });
+
+  it("5d. KioskUsageUnitNotAuthorizedError (server-side kiosk-unit authorization, 20260811100121) maps to unit_not_authorized without logging", async () => {
+    recordInventoryWithdrawalBatchMock.mockRejectedValue(new KioskUsageUnitNotAuthorizedError("entered_unit_id is not an authorized active kiosk usage unit"));
+    const result = await recordWithdrawalBatch("token", INPUT);
+    expect(result).toEqual({ ok: false, reason: "unit_not_authorized", message: "One item's withdrawal unit changed. Reload and choose again." });
+    expect(console.error).not.toHaveBeenCalled();
   });
 
   it("5c. invalid/expired kiosk token mapping is unchanged", async () => {

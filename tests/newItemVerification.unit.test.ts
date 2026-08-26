@@ -17,6 +17,8 @@ const inventoryDefaults: NewItemVerificationFields = {
   purchaseUnitCode: "",
   receivingBehavior: "SAME_UNIT",
   fixedConversionFactor: "",
+  secondaryUsageUnitCode: "",
+  secondaryConversionFactor: "",
 };
 
 describe("computeNewItemVerificationStatus", () => {
@@ -63,6 +65,8 @@ describe("computeNewItemVerificationStatus", () => {
       purchaseUnitCode: "",
       receivingBehavior: "SAME_UNIT",
       fixedConversionFactor: "",
+      secondaryUsageUnitCode: "",
+      secondaryConversionFactor: "",
     });
     expect(withoutSpendCategory.canVerify).toBe(false);
     expect(withoutSpendCategory.missing).toEqual(["Spend category"]);
@@ -76,6 +80,8 @@ describe("computeNewItemVerificationStatus", () => {
       purchaseUnitCode: "",
       receivingBehavior: "SAME_UNIT",
       fixedConversionFactor: "",
+      secondaryUsageUnitCode: "",
+      secondaryConversionFactor: "",
     });
     expect(withSpendCategory.canVerify).toBe(true);
     expect(withSpendCategory.missing).toEqual([]);
@@ -139,5 +145,88 @@ describe("computeNewItemVerificationStatus", () => {
     });
     expect(counted.needsConversionFactor).toBe(false);
     expect(counted.canVerify).toBe(true);
+  });
+
+  // ---- Purchase-versus-usage unit model additions (approved-plan §7) ----
+
+  it("treats a one-unit item (no secondary) as fully valid -- a secondary usage unit is never required", () => {
+    const status = computeNewItemVerificationStatus(inventoryDefaults);
+    expect(status.hasSecondaryUsageUnit).toBe(false);
+    expect(status.canVerify).toBe(true);
+  });
+
+  it("blocks verification when the secondary usage unit is the same as the base unit", () => {
+    const status = computeNewItemVerificationStatus({ ...inventoryDefaults, secondaryUsageUnitCode: "LB", secondaryConversionFactor: "10" });
+    expect(status.hasSecondaryUsageUnit).toBe(true);
+    expect(status.canVerify).toBe(false);
+    expect(status.missing).toContain("Secondary usage unit (must differ from the base unit)");
+  });
+
+  it("requires a positive secondary conversion factor once a distinct secondary usage unit is chosen", () => {
+    const noFactor = computeNewItemVerificationStatus({ ...inventoryDefaults, secondaryUsageUnitCode: "EACH", secondaryConversionFactor: "" });
+    expect(noFactor.canVerify).toBe(false);
+    expect(noFactor.missing).toContain("Secondary usage unit conversion factor");
+
+    const zeroFactor = computeNewItemVerificationStatus({ ...inventoryDefaults, secondaryUsageUnitCode: "EACH", secondaryConversionFactor: "0" });
+    expect(zeroFactor.canVerify).toBe(false);
+
+    const withFactor = computeNewItemVerificationStatus({ ...inventoryDefaults, secondaryUsageUnitCode: "EACH", secondaryConversionFactor: "8" });
+    expect(withFactor.canVerify).toBe(true);
+    expect(withFactor.missing).toEqual([]);
+  });
+
+  it("never requires a secondary usage unit configuration for a NON_INVENTORY item", () => {
+    const status = computeNewItemVerificationStatus({
+      name: "Paper Napkins",
+      disposition: "NON_INVENTORY",
+      categoryId: "",
+      spendCategoryId: "spend-1",
+      baseUnitCode: "",
+      purchaseUnitCode: "",
+      receivingBehavior: "SAME_UNIT",
+      fixedConversionFactor: "",
+      secondaryUsageUnitCode: "CASE",
+      secondaryConversionFactor: "",
+    });
+    expect(status.hasSecondaryUsageUnit).toBe(false);
+    expect(status.canVerify).toBe(true);
+  });
+
+  it("warns when the vendor purchase unit and the secondary kiosk usage unit share a unit code but were confirmed with different factors", () => {
+    const status = computeNewItemVerificationStatus({
+      ...inventoryDefaults,
+      purchaseUnitCode: "CASE",
+      receivingBehavior: "FIXED_CONVERSION",
+      fixedConversionFactor: "24",
+      secondaryUsageUnitCode: "CASE",
+      secondaryConversionFactor: "12",
+    });
+    expect(status.sameCodeDifferentFactorWarning).toBe(true);
+    // A warning is advisory, never blocking -- both sides are otherwise valid.
+    expect(status.canVerify).toBe(true);
+  });
+
+  it("does not warn when the vendor purchase unit and the secondary kiosk usage unit share the same code AND the same confirmed factor", () => {
+    const status = computeNewItemVerificationStatus({
+      ...inventoryDefaults,
+      purchaseUnitCode: "CASE",
+      receivingBehavior: "FIXED_CONVERSION",
+      fixedConversionFactor: "24",
+      secondaryUsageUnitCode: "CASE",
+      secondaryConversionFactor: "24",
+    });
+    expect(status.sameCodeDifferentFactorWarning).toBe(false);
+  });
+
+  it("does not warn when the vendor purchase unit and the secondary usage unit use different codes", () => {
+    const status = computeNewItemVerificationStatus({
+      ...inventoryDefaults,
+      purchaseUnitCode: "CASE",
+      receivingBehavior: "FIXED_CONVERSION",
+      fixedConversionFactor: "24",
+      secondaryUsageUnitCode: "EACH",
+      secondaryConversionFactor: "1",
+    });
+    expect(status.sameCodeDifferentFactorWarning).toBe(false);
   });
 });
