@@ -43,7 +43,13 @@ beforeAll(async () => {
 });
 
 function uniquePin(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  // 4 digits (the current kiosk PIN format) -- collisions across parallel
+  // test runs are far more likely than the old 6-digit space, but this is
+  // an isolation convenience for test fixtures, not a security property;
+  // a collision here just means the RPC's own org-scoped uniqueness
+  // constraint rejects the second insert, which these tests already
+  // handle as a genuine, distinguishable failure mode elsewhere.
+  return String(Math.floor(1000 + Math.random() * 9000));
 }
 
 async function newEmployee(organizationId: string, actorAppUserId: string, label: string): Promise<string> {
