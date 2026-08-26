@@ -6,7 +6,7 @@ import { listActiveInventoryItemsForOrganization } from "@/app/lib/kiosk/invento
 // list_kiosk_available_inventory RPC (20260811100077 -- ONLY items with a
 // positive available balance somewhere, per Milestone 2A.5's kiosk-grid
 // correction), then (2) which of those items have an active PRIMARY kiosk
-// usage unit (purchase-versus-usage unit model, 20260811100113/100114) --
+// usage unit (purchase-versus-usage unit model, 20260811100119/100120) --
 // the "is this item withdrawable" catalog-level filter that keeps a
 // misconfigured item off the employee withdrawal screen entirely, instead
 // of surfacing a configuration error after it's been selected. Deliberately

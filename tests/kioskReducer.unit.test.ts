@@ -13,7 +13,7 @@ const STATION_CONFIG = {
 
 // A one-unit item's usage units (primary only, no selector needed) --
 // stands in for the loader's result under the purchase-versus-usage unit
-// model (20260811100113/100114).
+// model (20260811100119/100120).
 const USAGE_UNITS: KioskUsageUnits = {
   primary: { usageUnitId: "usage-1", unitId: "unit-lb", unitCode: "LB", unitName: "Pound", slot: 1 },
   secondary: null,

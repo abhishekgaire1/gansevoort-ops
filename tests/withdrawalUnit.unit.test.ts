@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getKioskUsageUnitsForItem } from "@/app/lib/kiosk/withdrawalUnit";
 
 // CI-safe: no network, no database -- fakes the two-query Supabase chain
-// under the purchase-versus-usage unit model (20260811100113): an item
+// under the purchase-versus-usage unit model (20260811100119): an item
 // lookup (org-scoped existence check), then the item's confirmed kiosk
 // usage units (inventory_item_usage_units joined to inventory_item_units/
 // units) -- one required primary (usage_slot 1), one optional secondary

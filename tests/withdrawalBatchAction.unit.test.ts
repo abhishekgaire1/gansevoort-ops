@@ -86,7 +86,7 @@ describe("recordWithdrawalBatch -- unexpected-error handling", () => {
     expect(result).toEqual({ ok: false, reason: "invalid_location", message: "One of the selected locations is no longer available. Reload and choose again." });
   });
 
-  it("5d. KioskUsageUnitNotAuthorizedError (server-side kiosk-unit authorization, 20260811100115) maps to unit_not_authorized without logging", async () => {
+  it("5d. KioskUsageUnitNotAuthorizedError (server-side kiosk-unit authorization, 20260811100121) maps to unit_not_authorized without logging", async () => {
     recordInventoryWithdrawalBatchMock.mockRejectedValue(new KioskUsageUnitNotAuthorizedError("entered_unit_id is not an authorized active kiosk usage unit"));
     const result = await recordWithdrawalBatch("token", INPUT);
     expect(result).toEqual({ ok: false, reason: "unit_not_authorized", message: "One item's withdrawal unit changed. Reload and choose again." });

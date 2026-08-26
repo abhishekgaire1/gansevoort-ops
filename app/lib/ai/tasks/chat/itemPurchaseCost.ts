@@ -338,7 +338,7 @@ interface ItemUnitConfig {
 
 /** Fetched ONCE per lookup (not per row, not per vendor) -- LEGACY
  * fallback only. inventory_item_units is the shared, per-item table the
- * purchase-versus-usage unit model (20260811100113/100114) now treats as
+ * purchase-versus-usage unit model (20260811100119/100120) now treats as
  * "vestigial" the moment a vendor-specific vendor_item_purchase_units row
  * exists for a unit code -- it can hold only ONE factor per (item, unit)
  * at a time, so trusting it here would let a second vendor's (or SKU's)

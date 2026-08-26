@@ -20,7 +20,7 @@
  * (the always-present primary), with its own positive conversion factor.
  * Never required -- an empty secondaryUsageUnitCode is a fully valid,
  * one-unit item. Server-side, upsert_secondary_usage_unit
- * (20260811100114) re-checks the exact same distinctness/positivity rule
+ * (20260811100120) re-checks the exact same distinctness/positivity rule
  * -- this is the client-side half only.
  */
 

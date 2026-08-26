@@ -193,7 +193,7 @@ begin
       -- item's base unit for SAME_UNIT) -- never the shared
       -- inventory_item_units row. resolved_base_quantity is computed HERE,
       -- once, and passed through as measured_base_quantity below; the
-      -- movement-line trigger (20260811100115) trusts it directly for
+      -- movement-line trigger (20260811100121) trusts it directly for
       -- PURCHASE_RECEIPT rather than recomputing anything itself.
       for v_candidate in
         select rl.id as receipt_line_id,

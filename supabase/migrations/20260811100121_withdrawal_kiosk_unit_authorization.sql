@@ -16,11 +16,11 @@
 -- base-unit-only in this task" requirement. record_inventory_waste
 -- already hardcodes entered_unit_id to the item's base_unit_id directly,
 -- and the base unit always has an active primary usage slot (backfilled
--- in 20260811100113), so this change is a no-op for waste even though the
+-- in 20260811100119), so this change is a no-op for waste even though the
 -- trigger technically covers it.
 --
 -- New app-defined SQLSTATE: GA066 KIOSK_USAGE_UNIT_NOT_AUTHORIZED (highest
--- in use before this migration: GA065, allocated in 20260811100114).
+-- in use before this migration: GA065, allocated in 20260811100120).
 -- GA034 was considered and rejected -- app/lib/admin/errors.ts already
 -- claims it for NOT_FOUND.
 
@@ -98,7 +98,7 @@ begin
     -- upsert_vendor_item_purchase_unit's own comment), so trusting it
     -- here would let a second vendor's (or SKU's) later approval silently
     -- reprice an EARLIER, not-yet-posted document. post_purchase_document_
-    -- inventory (20260811100117) resolves the correct vendor-scoped
+    -- inventory (20260811100123) resolves the correct vendor-scoped
     -- factor itself -- from vendor_item_purchase_units, or from the
     -- receiving manager's own verified actual measurement -- and always
     -- supplies the final, authoritative base quantity here directly. This

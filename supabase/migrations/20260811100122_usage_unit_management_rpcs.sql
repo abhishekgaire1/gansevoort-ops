@@ -9,7 +9,7 @@
 --
 -- New app-defined SQLSTATEs: GA067 NO_ACTIVE_PRIMARY_USAGE_UNIT, GA068
 -- USAGE_UNIT_NOT_ACTIVE_FOR_ITEM (highest in use before this migration:
--- GA066, allocated in 20260811100115). GA035/GA036 were considered and
+-- GA066, allocated in 20260811100121). GA035/GA036 were considered and
 -- rejected -- app/lib/admin/errors.ts already claims both.
 
 -- ============================================================
@@ -74,7 +74,7 @@ grant execute on function public.manager_add_secondary_usage_unit(uuid, uuid, uu
 -- movement lines already reference inventory_item_units directly (never
 -- this table), so deactivating a slot can never reinterpret a historical
 -- withdrawal; it only stops NEW withdrawals from using that unit going
--- forward (enforced by 20260811100115's trigger check).
+-- forward (enforced by 20260811100121's trigger check).
 create or replace function public.manager_deactivate_secondary_usage_unit(
   p_organization_id uuid,
   p_app_user_id uuid,

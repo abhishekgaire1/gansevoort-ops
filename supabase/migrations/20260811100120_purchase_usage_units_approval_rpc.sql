@@ -111,7 +111,7 @@ grant execute on function public.upsert_vendor_item_mapping(uuid, uuid, text, te
 -- package is configured -- present ONLY to satisfy that FK). Its
 -- conversion_factor is NEVER authoritative for posting arithmetic once a
 -- vendor_item_purchase_units row exists: post_purchase_document_inventory
--- (20260811100117) resolves the REAL, vendor-scoped factor itself and
+-- (20260811100123) resolves the REAL, vendor-scoped factor itself and
 -- passes an already-computed base quantity through, so two vendors (or
 -- two SKUs) sharing a unit code can never collide on the number that
 -- actually matters, even though they necessarily share this one

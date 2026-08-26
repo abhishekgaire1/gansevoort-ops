@@ -59,7 +59,7 @@ export const INVENTORY_SQLSTATE = {
    * (Part 31) -- "Known waste must be recorded before this cycle count
    * can be completed." */
   CYCLE_COUNT_KNOWN_WASTE_UNRESOLVED: "GA032",
-  /** Purchase-versus-usage unit model (20260811100115) --
+  /** Purchase-versus-usage unit model (20260811100121) --
    * enforce_movement_line_measurement rejected an ISSUE_TO_STATION line
    * whose entered_unit_id is not an active, fixed-conversion kiosk usage
    * unit (primary or secondary) for the item -- e.g. a vendor

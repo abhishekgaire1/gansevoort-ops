@@ -65,7 +65,7 @@ interface FakeConfig {
   rpcByVendor?: Record<string, PriceHistoryRowLike[]>;
   documentRevisions?: DocumentRevisionRow[];
   /** Vendor-specific purchase-package VERSIONS (purchase-versus-usage
-   * unit model, 20260811100113) -- deliberately a SEPARATE dataset from
+   * unit model, 20260811100119) -- deliberately a SEPARATE dataset from
    * itemUnits (the legacy shared per-item table), so a test can prove two
    * vendors sharing a unit code never collide, and that an outdated
    * historical purchase resolves against the version that was actually in

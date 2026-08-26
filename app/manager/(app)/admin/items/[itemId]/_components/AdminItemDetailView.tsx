@@ -249,7 +249,7 @@ export function AdminItemDetailView({
  * this section only ever touches the OPTIONAL secondary slot and which
  * of the two active slots is currently primary. Nothing here deletes a
  * historical row -- add/deactivate/reprioritize all soft-transition
- * inventory_item_usage_units rows server-side (20260811100116).
+ * inventory_item_usage_units rows server-side (20260811100122).
  */
 function UsageUnitsSection({ itemId, units, usageUnits }: { itemId: string; units: { id: string; code: string; name: string }[]; usageUnits: ItemUsageUnitSummary[] }) {
   const router = useRouter();

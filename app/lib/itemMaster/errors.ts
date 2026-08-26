@@ -32,7 +32,7 @@ export const ITEM_MASTER_SQLSTATE = {
    * Inventory Category, child categories for a Spend Category). */
   INVENTORY_CATEGORY_HAS_ACTIVE_ITEMS: "GA055",
   SPEND_CATEGORY_HAS_ACTIVE_CHILDREN: "GA056",
-  /** Purchase-versus-usage unit model (20260811100114) -- a line was
+  /** Purchase-versus-usage unit model (20260811100120) -- a line was
    * already CONFIRMED against a different item than this call would
    * resolve to; a genuine retry of the SAME resolution is unaffected. */
   SAME_LINE_DIFFERENT_ITEM_CONFLICT: "GA062",
@@ -43,10 +43,10 @@ export const ITEM_MASTER_SQLSTATE = {
   SECONDARY_USAGE_UNIT_INVALID_FACTOR: "GA064",
   /** A NON_INVENTORY item cannot carry a kiosk usage-unit configuration. */
   NON_INVENTORY_ITEM_CANNOT_HAVE_USAGE_UNIT: "GA065",
-  /** manager_add_secondary_usage_unit (20260811100116): the item has no
+  /** manager_add_secondary_usage_unit (20260811100122): the item has no
    * active primary usage unit to add a secondary alongside. */
   NO_ACTIVE_PRIMARY_USAGE_UNIT: "GA067",
-  /** manager_set_primary_usage_unit (20260811100116): the target unit is
+  /** manager_set_primary_usage_unit (20260811100122): the target unit is
    * not an active usage unit for this item. */
   USAGE_UNIT_NOT_ACTIVE_FOR_ITEM: "GA068",
 } as const;
@@ -151,7 +151,7 @@ export class DuplicateItemNameError extends Error {
 }
 
 /** A line's classification was already CONFIRMED against a different item
- * than this same-key resubmission would resolve to (20260811100114) --
+ * than this same-key resubmission would resolve to (20260811100120) --
  * fails closed rather than silently reassigning a completed approval. */
 export class LineAlreadyConfirmedAgainstDifferentItemError extends Error {
   constructor(message: string) {
@@ -162,7 +162,7 @@ export class LineAlreadyConfirmedAgainstDifferentItemError extends Error {
 
 /** A proposed kiosk usage-unit configuration was invalid -- the secondary
  * unit matched the base/primary unit, or its conversion factor wasn't a
- * positive number (20260811100114). */
+ * positive number (20260811100120). */
 export class InvalidUsageUnitConfigurationError extends Error {
   constructor(message: string) {
     super(message);
@@ -171,7 +171,7 @@ export class InvalidUsageUnitConfigurationError extends Error {
 }
 
 /** A NON_INVENTORY item cannot carry a kiosk usage-unit configuration
- * (20260811100114). */
+ * (20260811100120). */
 export class NonInventoryItemUsageUnitError extends Error {
   constructor(message: string) {
     super(message);
@@ -180,7 +180,7 @@ export class NonInventoryItemUsageUnitError extends Error {
 }
 
 /** manager_add_secondary_usage_unit/manager_set_primary_usage_unit
- * (20260811100116) rejected the request: no active primary to add a
+ * (20260811100122) rejected the request: no active primary to add a
  * secondary alongside, or the target unit isn't an active usage unit for
  * this item. */
 export class UsageUnitStateError extends Error {

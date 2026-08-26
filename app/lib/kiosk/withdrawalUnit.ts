@@ -3,8 +3,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 /**
  * Framework-agnostic core for the kiosk's quantity-entry screen under the
  * purchase-versus-usage unit model (see supabase/migrations/
- * 20260811100113_purchase_usage_units_schema.sql and
- * 20260811100115_withdrawal_kiosk_unit_authorization.sql): an employee
+ * 20260811100119_purchase_usage_units_schema.sql and
+ * 20260811100121_withdrawal_kiosk_unit_authorization.sql): an employee
  * withdraws in whichever unit(s) a manager has explicitly confirmed as a
  * kiosk USAGE unit for the item -- one required primary, one optional
  * secondary -- never any vendor purchase-only unit (BOX/CASE as sold),

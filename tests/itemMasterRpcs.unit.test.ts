@@ -48,7 +48,7 @@ describe("mapItemMasterRpcError", () => {
     expect(err.message).toBe("boom");
   });
 
-  // Purchase-versus-usage unit model (20260811100114/100116) -- freshly
+  // Purchase-versus-usage unit model (20260811100120/100122) -- freshly
   // allocated GA062-GA068, never GA020/GA031-GA036 (see the migrations'
   // own comments for why those were already claimed elsewhere).
   it("maps GA062 to LineAlreadyConfirmedAgainstDifferentItemError", () => {
