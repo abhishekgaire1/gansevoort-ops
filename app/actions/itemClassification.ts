@@ -8,7 +8,14 @@ import { listUnresolvedClassifications, type UnresolvedClassificationRow } from 
 import { approveLineClassificationNewItemRpc } from "@/app/lib/itemMaster/approveLineClassificationNewItemRpc";
 import { approveLineClassificationExistingItemRpc } from "@/app/lib/itemMaster/approveLineClassificationExistingItemRpc";
 import { bulkConfirmLineClassificationsRpc } from "@/app/lib/itemMaster/bulkConfirmLineClassificationsRpc";
-import { LineNotFoundInCurrentRevisionError, ItemNotPendingReviewError, DuplicateItemNameError } from "@/app/lib/itemMaster/errors";
+import {
+  LineNotFoundInCurrentRevisionError,
+  ItemNotPendingReviewError,
+  DuplicateItemNameError,
+  LineAlreadyConfirmedAgainstDifferentItemError,
+  InvalidUsageUnitConfigurationError,
+  NonInventoryItemUsageUnitError,
+} from "@/app/lib/itemMaster/errors";
 import { NotPreparerError } from "@/app/lib/purchaseDocuments/errors";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
@@ -265,6 +272,8 @@ export interface ApproveNewItemClassificationInput {
   purchaseUnitCode?: string | null;
   receivingBehavior?: "SAME_UNIT" | "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY" | null;
   fixedConversionFactor?: number | null;
+  secondaryUsageUnitCode?: string | null;
+  secondaryConversionFactor?: number | null;
 }
 
 export type ApproveClassificationResult =
@@ -272,7 +281,7 @@ export type ApproveClassificationResult =
   | AuthFailure
   | {
       ok: false;
-      reason: "line_not_found" | "not_pending" | "not_preparer" | "duplicate_item_name" | "misconfigured";
+      reason: "line_not_found" | "not_pending" | "not_preparer" | "duplicate_item_name" | "line_conflict" | "invalid_usage_unit" | "misconfigured";
       message: string;
       existingItemId?: string | null;
       existingItemName?: string | null;
@@ -298,6 +307,8 @@ export async function approveNewItemClassification(input: ApproveNewItemClassifi
       purchaseUnitCode: input.purchaseUnitCode,
       receivingBehavior: input.receivingBehavior,
       fixedConversionFactor: input.fixedConversionFactor,
+      secondaryUsageUnitCode: input.secondaryUsageUnitCode,
+      secondaryConversionFactor: input.secondaryConversionFactor,
     });
     return { ok: true, inventoryItemId: result.inventoryItemId };
   } catch (err) {
@@ -310,6 +321,9 @@ export interface ApproveExistingItemClassificationInput {
   lineKey: string;
   inventoryItemId: string;
   rememberVendorMapping?: boolean;
+  purchaseUnitCode?: string | null;
+  receivingBehavior?: "SAME_UNIT" | "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY" | null;
+  fixedConversionFactor?: number | null;
 }
 
 export async function approveExistingItemClassification(input: ApproveExistingItemClassificationInput): Promise<ApproveClassificationResult> {
@@ -324,6 +338,9 @@ export async function approveExistingItemClassification(input: ApproveExistingIt
       appUserId: auth.manager.appUserId,
       inventoryItemId: input.inventoryItemId,
       rememberVendorMapping: input.rememberVendorMapping,
+      purchaseUnitCode: input.purchaseUnitCode,
+      receivingBehavior: input.receivingBehavior,
+      fixedConversionFactor: input.fixedConversionFactor,
     });
     return { ok: true, inventoryItemId: input.inventoryItemId };
   } catch (err) {
@@ -408,6 +425,12 @@ function mapClassificationApprovalError(err: unknown): ApproveClassificationResu
       existingItemId: err.existingItemId,
       existingItemName: err.existingItemName,
     };
+  }
+  if (err instanceof LineAlreadyConfirmedAgainstDifferentItemError) {
+    return { ok: false, reason: "line_conflict", message: "This line was already confirmed against a different item. Reload the page and try again." };
+  }
+  if (err instanceof InvalidUsageUnitConfigurationError || err instanceof NonInventoryItemUsageUnitError) {
+    return { ok: false, reason: "invalid_usage_unit", message: err.message };
   }
   return { ok: false, reason: "misconfigured", message: "Could not approve this classification. Try again." };
 }

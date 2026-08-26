@@ -7,7 +7,7 @@ import {
   type RecordInventoryWithdrawalBatchResult,
   type WithdrawalBatchCartLine,
 } from "@/app/lib/inventory/withdrawalBatch";
-import { BatchInsufficientInventoryError, InvalidStorageLocationError, type InsufficientBatchLine } from "@/app/lib/inventory/errors";
+import { BatchInsufficientInventoryError, InvalidStorageLocationError, KioskUsageUnitNotAuthorizedError, type InsufficientBatchLine } from "@/app/lib/inventory/errors";
 
 /** Generic client-facing message for a genuinely unexpected failure --
  * same wording app/actions/purchaseDocuments.ts already established for
@@ -15,7 +15,7 @@ import { BatchInsufficientInventoryError, InvalidStorageLocationError, type Insu
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Try again.";
 
 function isKnownWithdrawalBatchError(err: unknown): boolean {
-  return err instanceof BatchInsufficientInventoryError || err instanceof InvalidStorageLocationError;
+  return err instanceof BatchInsufficientInventoryError || err instanceof InvalidStorageLocationError || err instanceof KioskUsageUnitNotAuthorizedError;
 }
 
 /** The employee-facing message can stay friendly, but an UNEXPECTED error
@@ -38,7 +38,7 @@ export type RecordWithdrawalBatchResult =
   | { ok: true; result: RecordInventoryWithdrawalBatchResult }
   | {
       ok: false;
-      reason: "invalid_token" | "insufficient_inventory" | "invalid_location" | "rpc_error";
+      reason: "invalid_token" | "insufficient_inventory" | "invalid_location" | "unit_not_authorized" | "rpc_error";
       message: string;
       insufficientLines?: InsufficientBatchLine[];
     };
@@ -82,6 +82,9 @@ export async function recordWithdrawalBatch(kioskToken: string, input: RecordWit
     }
     if (err instanceof InvalidStorageLocationError) {
       return { ok: false, reason: "invalid_location", message: "One of the selected locations is no longer available. Reload and choose again." };
+    }
+    if (err instanceof KioskUsageUnitNotAuthorizedError) {
+      return { ok: false, reason: "unit_not_authorized", message: "One item's withdrawal unit changed. Reload and choose again." };
     }
     logIfUnexpected("recordWithdrawalBatch", err, { stationId: input.stationId, lineCount: input.cartLines.length });
     return { ok: false, reason: "rpc_error", message: GENERIC_ERROR_MESSAGE };

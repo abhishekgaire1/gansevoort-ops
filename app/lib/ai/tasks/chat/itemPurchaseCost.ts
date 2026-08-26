@@ -336,11 +336,18 @@ interface ItemUnitConfig {
   requiresActualMeasurement: boolean;
 }
 
-/** Fetched ONCE per lookup (not per row, not per vendor) -- the item's
- * own purchase-unit-to-base-unit conversion configuration, keyed by unit
- * code, used only to independently verify whether a purchase line's
- * FULL invoiced quantity has actually been posted. */
-async function fetchItemUnitConfigByCode(supabase: SupabaseClient, inventoryItemId: string): Promise<Map<string, ItemUnitConfig>> {
+/** Fetched ONCE per lookup (not per row, not per vendor) -- LEGACY
+ * fallback only. inventory_item_units is the shared, per-item table the
+ * purchase-versus-usage unit model (20260811100113/100114) now treats as
+ * "vestigial" the moment a vendor-specific vendor_item_purchase_units row
+ * exists for a unit code -- it can hold only ONE factor per (item, unit)
+ * at a time, so trusting it here would let a second vendor's (or SKU's)
+ * later-configured factor silently reprice an EARLIER purchase that used
+ * the SAME unit code from a DIFFERENT vendor/SKU. Used ONLY when no
+ * vendor-specific package version exists for a given row (pre-model data,
+ * or a genuinely un-migrated item) -- see fetchVendorPackageVersions/
+ * resolveVendorPackageAsOf for the authoritative, vendor-scoped path. */
+async function fetchLegacyItemUnitConfigByCode(supabase: SupabaseClient, inventoryItemId: string): Promise<Map<string, ItemUnitConfig>> {
   const { data } = await supabase
     .from("inventory_item_units")
     .select("conversion_factor, requires_actual_measurement, units(code)")
@@ -355,17 +362,84 @@ async function fetchItemUnitConfigByCode(supabase: SupabaseClient, inventoryItem
   return map;
 }
 
+interface VendorPackageVersion extends ItemUnitConfig {
+  purchaseUnitCode: string;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+}
+
+/** EVERY confirmed purchase-package VERSION (not only the currently
+ * active one) this vendor has ever had for this item -- fetched once per
+ * vendor per lookup, never per row. Superseded versions are deliberately
+ * included: resolveVendorPackageAsOf below is what lets a historical
+ * purchase be evaluated against the package that was ACTUALLY in effect
+ * on its own document date, never today's current package (approved-plan
+ * §14 -- "never use a current vendor package to reprice history"). */
+async function fetchVendorPackageVersions(
+  supabase: SupabaseClient,
+  organizationId: string,
+  inventoryItemId: string,
+  vendorId: string
+): Promise<VendorPackageVersion[]> {
+  const { data } = await supabase
+    .from("vendor_item_purchase_units")
+    .select("conversion_factor, requires_actual_measurement, effective_from, effective_to, units(code)")
+    .eq("organization_id", organizationId)
+    .eq("inventory_item_id", inventoryItemId)
+    .eq("vendor_id", vendorId);
+
+  const versions: VendorPackageVersion[] = [];
+  for (const row of (data ?? []) as {
+    conversion_factor: number | null;
+    requires_actual_measurement: boolean;
+    effective_from: string;
+    effective_to: string | null;
+    units: { code?: string } | { code?: string }[] | null;
+  }[]) {
+    const unit = Array.isArray(row.units) ? row.units[0] : row.units;
+    const code = unit?.code;
+    if (!code) continue;
+    versions.push({
+      purchaseUnitCode: code.toUpperCase(),
+      conversionFactor: row.conversion_factor,
+      requiresActualMeasurement: row.requires_actual_measurement,
+      effectiveFrom: row.effective_from,
+      effectiveTo: row.effective_to,
+    });
+  }
+  return versions;
+}
+
+/** Picks whichever version's effective range covers documentDate,
+ * compared at end-of-day so a purchase dated the SAME calendar day as a
+ * package's effective_from still counts (mirrors this module's existing
+ * "on or before" asOf convention elsewhere). Returns null when no version
+ * claims this unit code as of that date -- the caller falls back to the
+ * legacy shared table, never guesses. */
+function resolveVendorPackageAsOf(versions: VendorPackageVersion[], unitCode: string, documentDate: string): ItemUnitConfig | null {
+  const asOf = `${documentDate}T23:59:59.999Z`;
+  const candidates = versions.filter((v) => v.purchaseUnitCode === unitCode && v.effectiveFrom <= asOf && (v.effectiveTo === null || v.effectiveTo > asOf));
+  if (candidates.length === 0) return null;
+  const best = candidates.reduce((a, b) => (a.effectiveFrom > b.effectiveFrom ? a : b));
+  return { conversionFactor: best.conversionFactor, requiresActualMeasurement: best.requiresActualMeasurement };
+}
+
 /** The line's EXPECTED FULL base-unit quantity, independent of how much
  * has posted so far -- null when it cannot be determined deterministically
  * (missing package info, or an item purchased in a unit requiring actual
- * per-delivery measurement, which has no fixed conversion by design). */
-function expectedFullBaseQuantity(row: PriceHistoryRow, baseUnitCode: string, unitConfigByCode: Map<string, ItemUnitConfig>): number | null {
+ * per-delivery measurement, which has no fixed conversion by design).
+ * Resolves the conversion via THIS vendor's own package version as of the
+ * row's document date first; only consults the legacy shared per-item
+ * table when no vendor-specific version claims that unit code at all
+ * (approved-plan §14). */
+function expectedFullBaseQuantity(row: PriceHistoryRow, baseUnitCode: string, legacyUnitConfigByCode: Map<string, ItemUnitConfig>, vendorPackageVersions: VendorPackageVersion[]): number | null {
   if (row.out_package_quantity === null || row.out_package_quantity <= 0 || !row.out_package_unit) return null;
   const packageUnitCode = row.out_package_unit.toUpperCase();
   if (packageUnitCode === baseUnitCode.toUpperCase()) {
     return row.out_package_quantity; // SAME_UNIT -- package IS the base unit, no conversion needed
   }
-  const config = unitConfigByCode.get(packageUnitCode);
+  const vendorConfig = row.out_document_date ? resolveVendorPackageAsOf(vendorPackageVersions, packageUnitCode, row.out_document_date) : null;
+  const config = vendorConfig ?? legacyUnitConfigByCode.get(packageUnitCode) ?? null;
   if (!config || config.requiresActualMeasurement || config.conversionFactor === null || config.conversionFactor <= 0) {
     return null; // MEASURE_EACH_DELIVERY/COUNT_EACH_DELIVERY, or no known fixed conversion
   }
@@ -490,7 +564,7 @@ export async function lookupItemPurchaseCost(
   const vendorIdsAll = discovery.vendorIds;
   if (vendorIdsAll.length === 0) return { status: "no_verified_cost", item };
 
-  const unitConfigByCode = await fetchItemUnitConfigByCode(ctx.supabase, resolved.id);
+  const legacyUnitConfigByCode = await fetchLegacyItemUnitConfigByCode(ctx.supabase, resolved.id);
 
   const windowStart = new Date(ctx.now);
   windowStart.setUTCDate(windowStart.getUTCDate() - windowDays);
@@ -498,14 +572,19 @@ export async function lookupItemPurchaseCost(
   const windowEndStr = ctx.now.toISOString().slice(0, 10);
 
   const allRows: PriceHistoryRow[] = [];
+  const vendorPackageVersionsByVendorId = new Map<string, VendorPackageVersion[]>();
   let anyVendorPoolTruncated = false;
   for (const vendorId of vendorIdsAll) {
-    const { data } = await ctx.supabase.rpc("get_inventory_item_price_history", {
-      p_organization_id: ctx.organizationId,
-      p_vendor_id: vendorId,
-      p_inventory_item_ids: [resolved.id],
-      p_limit_per_item: AGGREGATE_HISTORY_LIMIT_PER_VENDOR,
-    });
+    const [{ data }, versions] = await Promise.all([
+      ctx.supabase.rpc("get_inventory_item_price_history", {
+        p_organization_id: ctx.organizationId,
+        p_vendor_id: vendorId,
+        p_inventory_item_ids: [resolved.id],
+        p_limit_per_item: AGGREGATE_HISTORY_LIMIT_PER_VENDOR,
+      }),
+      fetchVendorPackageVersions(ctx.supabase, ctx.organizationId, resolved.id, vendorId),
+    ]);
+    vendorPackageVersionsByVendorId.set(vendorId, versions);
     const vendorRows = (data ?? []) as PriceHistoryRow[];
     allRows.push(...vendorRows);
     if (vendorRows.length >= AGGREGATE_HISTORY_LIMIT_PER_VENDOR) {
@@ -526,7 +605,7 @@ export async function lookupItemPurchaseCost(
   }
   const usableRows: UsableRow[] = [];
   for (const row of currentRevisionRows) {
-    const expected = expectedFullBaseQuantity(row, baseUnitCode, unitConfigByCode);
+    const expected = expectedFullBaseQuantity(row, baseUnitCode, legacyUnitConfigByCode, vendorPackageVersionsByVendorId.get(row.out_vendor_id) ?? []);
     if (expected === null) {
       excludedUnverifiableMeasurementCount += 1;
       continue;
@@ -676,16 +755,21 @@ export async function resolveHistoricalUnitCostsForItem(
     return results;
   }
 
-  const unitConfigByCode = await fetchItemUnitConfigByCode(ctx.supabase, inventoryItemId);
+  const legacyUnitConfigByCode = await fetchLegacyItemUnitConfigByCode(ctx.supabase, inventoryItemId);
 
   const allRows: PriceHistoryRow[] = [];
+  const vendorPackageVersionsByVendorId = new Map<string, VendorPackageVersion[]>();
   for (const vendorId of vendorIds) {
-    const { data } = await ctx.supabase.rpc("get_inventory_item_price_history", {
-      p_organization_id: ctx.organizationId,
-      p_vendor_id: vendorId,
-      p_inventory_item_ids: [inventoryItemId],
-      p_limit_per_item: AGGREGATE_HISTORY_LIMIT_PER_VENDOR,
-    });
+    const [{ data }, versions] = await Promise.all([
+      ctx.supabase.rpc("get_inventory_item_price_history", {
+        p_organization_id: ctx.organizationId,
+        p_vendor_id: vendorId,
+        p_inventory_item_ids: [inventoryItemId],
+        p_limit_per_item: AGGREGATE_HISTORY_LIMIT_PER_VENDOR,
+      }),
+      fetchVendorPackageVersions(ctx.supabase, ctx.organizationId, inventoryItemId, vendorId),
+    ]);
+    vendorPackageVersionsByVendorId.set(vendorId, versions);
     allRows.push(...((data ?? []) as PriceHistoryRow[]));
   }
   if (allRows.length === 0) {
@@ -697,7 +781,7 @@ export async function resolveHistoricalUnitCostsForItem(
 
   const usableRows: { row: PriceHistoryRow; expectedBaseQuantity: number }[] = [];
   for (const row of currentRevisionRows) {
-    const expected = expectedFullBaseQuantity(row, baseUnitCode, unitConfigByCode);
+    const expected = expectedFullBaseQuantity(row, baseUnitCode, legacyUnitConfigByCode, vendorPackageVersionsByVendorId.get(row.out_vendor_id) ?? []);
     if (expected === null) continue; // unverifiable -- never used as a historical cost basis
     if (isProvenComplete(row, expected)) usableRows.push({ row, expectedBaseQuantity: expected });
   }
@@ -786,16 +870,21 @@ export async function listVerifiedPurchaseHistoryForItem(
   const vendorIds = options.vendorId ? discovery.vendorIds.filter((id) => id === options.vendorId) : discovery.vendorIds;
   if (vendorIds.length === 0) return { status: "resolved", rows: [] };
 
-  const unitConfigByCode = await fetchItemUnitConfigByCode(ctx.supabase, inventoryItemId);
+  const legacyUnitConfigByCode = await fetchLegacyItemUnitConfigByCode(ctx.supabase, inventoryItemId);
 
   const allRows: PriceHistoryRow[] = [];
+  const vendorPackageVersionsByVendorId = new Map<string, VendorPackageVersion[]>();
   for (const vendorId of vendorIds) {
-    const { data } = await ctx.supabase.rpc("get_inventory_item_price_history", {
-      p_organization_id: ctx.organizationId,
-      p_vendor_id: vendorId,
-      p_inventory_item_ids: [inventoryItemId],
-      p_limit_per_item: AGGREGATE_HISTORY_LIMIT_PER_VENDOR,
-    });
+    const [{ data }, versions] = await Promise.all([
+      ctx.supabase.rpc("get_inventory_item_price_history", {
+        p_organization_id: ctx.organizationId,
+        p_vendor_id: vendorId,
+        p_inventory_item_ids: [inventoryItemId],
+        p_limit_per_item: AGGREGATE_HISTORY_LIMIT_PER_VENDOR,
+      }),
+      fetchVendorPackageVersions(ctx.supabase, ctx.organizationId, inventoryItemId, vendorId),
+    ]);
+    vendorPackageVersionsByVendorId.set(vendorId, versions);
     allRows.push(...((data ?? []) as PriceHistoryRow[]));
   }
   if (allRows.length === 0) return { status: "resolved", rows: [] };
@@ -804,7 +893,7 @@ export async function listVerifiedPurchaseHistoryForItem(
 
   const usableRows: { row: PriceHistoryRow; expectedBaseQuantity: number }[] = [];
   for (const row of currentRevisionRows) {
-    const expected = expectedFullBaseQuantity(row, baseUnitCode, unitConfigByCode);
+    const expected = expectedFullBaseQuantity(row, baseUnitCode, legacyUnitConfigByCode, vendorPackageVersionsByVendorId.get(row.out_vendor_id) ?? []);
     if (expected === null) continue;
     if (isProvenComplete(row, expected)) usableRows.push({ row, expectedBaseQuantity: expected });
   }

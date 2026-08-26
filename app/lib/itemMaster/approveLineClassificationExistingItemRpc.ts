@@ -9,6 +9,16 @@ export interface ApproveLineClassificationExistingItemInput {
   appUserId: string;
   inventoryItemId: string;
   rememberVendorMapping?: boolean;
+  /** Registers/versions THIS vendor's (or SKU's) own purchase package for
+   * an already-confirmed item -- e.g. a known canonical item being
+   * invoiced by a new vendor for the first time. Never overwrites another
+   * vendor's or SKU's package (approved-plan §8): the underlying RPC keys
+   * the package to this specific vendor_item_mappings row, not the bare
+   * item. Null/omitted purchaseUnitCode leaves any existing package
+   * configuration for this vendor/SKU untouched. */
+  purchaseUnitCode?: string | null;
+  receivingBehavior?: "SAME_UNIT" | "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY" | null;
+  fixedConversionFactor?: number | null;
 }
 
 export interface ApproveLineClassificationExistingItemResult {
@@ -30,6 +40,9 @@ export async function approveLineClassificationExistingItemRpc(
     p_app_user_id: input.appUserId,
     p_inventory_item_id: input.inventoryItemId,
     p_remember_vendor_mapping: input.rememberVendorMapping ?? true,
+    p_purchase_unit_code: input.purchaseUnitCode ?? null,
+    p_receiving_behavior: input.receivingBehavior ?? null,
+    p_fixed_conversion_factor: input.fixedConversionFactor ?? null,
   });
 
   if (error) {

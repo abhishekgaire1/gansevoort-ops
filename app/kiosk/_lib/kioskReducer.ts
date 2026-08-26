@@ -1,6 +1,6 @@
 import type { KioskStation } from "@/app/actions/stations";
 import type { KioskInventoryItem } from "@/app/actions/inventoryItems";
-import type { WithdrawalUnit } from "@/app/actions/withdrawalUnit";
+import type { KioskUsageUnits } from "@/app/actions/withdrawalUnit";
 import type { KioskLocationAvailability } from "@/app/actions/inventoryAvailability";
 import type { StationConfig } from "./stationBranch";
 
@@ -42,7 +42,10 @@ export interface CartLine {
   sourceLocationName: string;
   enteredQuantity: string;
   enteredUnitId: string;
-  baseUnitCode: string;
+  /** Code of whichever kiosk usage unit (primary or secondary) was
+   * selected when this line was added/last saved -- NOT necessarily the
+   * item's base unit under the purchase-versus-usage unit model. */
+  unitCode: string;
 }
 
 export function cartLineKey(inventoryItemId: string, sourceLocationId: string): string {
@@ -114,12 +117,17 @@ export interface KioskState {
    * therefore what its id would be) before saving. */
   editingCartLineId: string | null;
   selectedItem: KioskInventoryItem | null;
-  /** The item's single canonical withdrawal unit (its own base unit) --
-   * see app/lib/kiosk/withdrawalUnit.ts. There is no separate entry-unit
-   * selection under the withdrawal-unit simplification. */
-  withdrawalUnit: WithdrawalUnit | null;
-  /** Set when a selected item turns out not to have its base-unit identity
-   * mapping configured -- a master-data problem, not something the
+  /** The item's confirmed kiosk usage units -- one required primary, one
+   * optional secondary -- see app/lib/kiosk/withdrawalUnit.ts. Null while
+   * loading or when nothing is selected yet. */
+  usageUnits: KioskUsageUnits | null;
+  /** Which of usageUnits.primary/secondary is currently chosen for entry
+   * -- always a unitId that matches one of them once usageUnits is
+   * loaded. Defaults to primary the moment usageUnits loads unless a
+   * pending edit (see EDIT_CART_LINE) asks to preserve a specific unit. */
+  selectedUsageUnitId: string | null;
+  /** Set when a selected item turns out not to have a confirmed primary
+   * usage unit configured -- a master-data problem, not something the
    * employee caused. The item catalog already excludes items in this state
    * (see app/lib/kiosk/inventoryItems.ts), so reaching this is a rare
    * residual/race case; it renders a small inline "Setup required" notice
@@ -169,7 +177,8 @@ export function createInitialKioskState(): KioskState {
     cart: [],
     editingCartLineId: null,
     selectedItem: null,
-    withdrawalUnit: null,
+    usageUnits: null,
+    selectedUsageUnitId: null,
     withdrawalUnitUnavailable: false,
     availableLocations: null,
     selectedSourceLocationId: null,
@@ -204,8 +213,9 @@ export type KioskAction =
   | { type: "RECENT_ITEMS_LOADED"; itemIds: string[] }
   | { type: "SEARCH_SIGNALS_LOADED"; signals: Record<string, { vendorSkus: string[]; vendorDescriptions: string[] }> }
   | { type: "ITEM_SELECTED"; item: KioskInventoryItem }
-  | { type: "WITHDRAWAL_UNIT_LOADED"; unit: WithdrawalUnit }
+  | { type: "USAGE_UNITS_LOADED"; units: KioskUsageUnits }
   | { type: "WITHDRAWAL_UNIT_UNAVAILABLE" }
+  | { type: "USAGE_UNIT_SELECTED"; unitId: string }
   | { type: "AVAILABILITY_LOADED"; locations: KioskLocationAvailability[] }
   | { type: "SOURCE_LOCATION_SELECTED"; locationId: string }
   | { type: "QUANTITY_CHANGED"; value: string }
@@ -284,7 +294,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         cart: [],
         editingCartLineId: null,
         selectedItem: null,
-        withdrawalUnit: null,
+        usageUnits: null,
+        selectedUsageUnitId: null,
         withdrawalUnitUnavailable: false,
         availableLocations: null,
         selectedSourceLocationId: null,
@@ -319,7 +330,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         ...state,
         selectedItem: action.item,
         editingCartLineId: null,
-        withdrawalUnit: null,
+        usageUnits: null,
+        selectedUsageUnitId: null,
         withdrawalUnitUnavailable: false,
         availableLocations: null,
         selectedSourceLocationId: null,
@@ -327,16 +339,36 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         step: "quantity_entry",
       };
 
-    case "WITHDRAWAL_UNIT_LOADED":
+    case "USAGE_UNITS_LOADED": {
       // Deliberately does NOT reset enteredQuantity: ITEM_SELECTED already
       // clears it for a fresh add, and EDIT_CART_LINE deliberately
       // pre-populates it with the cart line's existing quantity before
       // this fires -- resetting it here would wipe that back out as soon
       // as the fresh unit/availability reload completes.
-      return { ...state, withdrawalUnit: action.unit, withdrawalUnitUnavailable: false };
+      //
+      // Preserves a pending selection the same way AVAILABILITY_LOADED
+      // preserves a pending source location: EDIT_CART_LINE stashes the
+      // cart line's own entered unit into selectedUsageUnitId BEFORE this
+      // fires (usageUnits is still null then); once the authoritative
+      // options arrive, keep that choice only if it's still a genuine
+      // option, otherwise fall back to primary. A fresh add (ITEM_SELECTED
+      // nulled selectedUsageUnitId) always lands on primary here.
+      const candidateIds = [action.units.primary.unitId, action.units.secondary?.unitId ?? null];
+      const preserved = state.selectedUsageUnitId !== null && candidateIds.includes(state.selectedUsageUnitId) ? state.selectedUsageUnitId : action.units.primary.unitId;
+      return { ...state, usageUnits: action.units, withdrawalUnitUnavailable: false, selectedUsageUnitId: preserved };
+    }
 
     case "WITHDRAWAL_UNIT_UNAVAILABLE":
       return { ...state, withdrawalUnitUnavailable: true };
+
+    case "USAGE_UNIT_SELECTED":
+      // Changing the selected unit must never silently reuse an
+      // incompatible quantity (approved-plan §11) -- "5" typed against a
+      // primary CASE means something different against a secondary EACH.
+      // Chosen behavior: RESET, never preserve-with-relabel. A no-op
+      // reselect of the already-active unit leaves the quantity alone.
+      if (action.unitId === state.selectedUsageUnitId) return state;
+      return { ...state, selectedUsageUnitId: action.unitId, enteredQuantity: "" };
 
     case "AVAILABILITY_LOADED": {
       // Auto-select only when there is EXACTLY one candidate location --
@@ -372,9 +404,11 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
       // this exact same cart mutation -- only the destination differs.
       // Combines into an existing line for the same item+source
       // (quantities add); a different source stays a separate line.
-      if (!state.selectedItem || !state.withdrawalUnit || !state.selectedSourceLocationId || !state.availableLocations) return state;
+      if (!state.selectedItem || !state.usageUnits || !state.selectedSourceLocationId || !state.availableLocations) return state;
       const location = state.availableLocations.find((l) => l.locationId === state.selectedSourceLocationId);
       if (!location) return state;
+      const chosenUnit =
+        state.usageUnits.secondary && state.selectedUsageUnitId === state.usageUnits.secondary.unitId ? state.usageUnits.secondary : state.usageUnits.primary;
 
       const line: CartLine = {
         id: cartLineKey(state.selectedItem.id, state.selectedSourceLocationId),
@@ -384,8 +418,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         sourceLocationId: state.selectedSourceLocationId,
         sourceLocationName: location.locationName,
         enteredQuantity: state.enteredQuantity,
-        enteredUnitId: state.withdrawalUnit.baseUnitId,
-        baseUnitCode: state.withdrawalUnit.baseUnitCode,
+        enteredUnitId: chosenUnit.unitId,
+        unitCode: chosenUnit.unitCode,
       };
 
       return {
@@ -393,7 +427,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         cart: applyCartLine(state.cart, null, line),
         step: action.nextStep,
         selectedItem: null,
-        withdrawalUnit: null,
+        usageUnits: null,
+        selectedUsageUnitId: null,
         withdrawalUnitUnavailable: false,
         availableLocations: null,
         selectedSourceLocationId: null,
@@ -408,7 +443,7 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
       // the quantity_entry screen -- editingCartLineId is what makes it
       // present as "Editing withdrawal item" / "Save Changes" and
       // return to Review (not browsing) on Back/Save. Re-fetches
-      // withdrawalUnit/availableLocations fresh (nulled below) so the
+      // usageUnits/availableLocations fresh (nulled below) so the
       // employee edits against current live stock, not a stale snapshot
       // from whenever the line was originally added; the line's ORIGINAL
       // source is pre-selected and preserved across that reload (see
@@ -422,7 +457,11 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         step: "quantity_entry",
         editingCartLineId: line.id,
         selectedItem: item,
-        withdrawalUnit: null,
+        usageUnits: null,
+        // Tentative -- confirmed/overridden by USAGE_UNITS_LOADED once the
+        // authoritative options for this item are back (see its own
+        // comment for why this mirrors AVAILABILITY_LOADED's pattern).
+        selectedUsageUnitId: line.enteredUnitId,
         withdrawalUnitUnavailable: false,
         availableLocations: null,
         selectedSourceLocationId: line.sourceLocationId,
@@ -432,11 +471,13 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
     }
 
     case "SAVE_CART_LINE_EDIT": {
-      if (!state.editingCartLineId || !state.selectedItem || !state.withdrawalUnit || !state.selectedSourceLocationId || !state.availableLocations) {
+      if (!state.editingCartLineId || !state.selectedItem || !state.usageUnits || !state.selectedSourceLocationId || !state.availableLocations) {
         return state;
       }
       const location = state.availableLocations.find((l) => l.locationId === state.selectedSourceLocationId);
       if (!location) return state;
+      const chosenUnit =
+        state.usageUnits.secondary && state.selectedUsageUnitId === state.usageUnits.secondary.unitId ? state.usageUnits.secondary : state.usageUnits.primary;
 
       const line: CartLine = {
         id: cartLineKey(state.selectedItem.id, state.selectedSourceLocationId),
@@ -446,8 +487,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         sourceLocationId: state.selectedSourceLocationId,
         sourceLocationName: location.locationName,
         enteredQuantity: state.enteredQuantity,
-        enteredUnitId: state.withdrawalUnit.baseUnitId,
-        baseUnitCode: state.withdrawalUnit.baseUnitCode,
+        enteredUnitId: chosenUnit.unitId,
+        unitCode: chosenUnit.unitCode,
       };
 
       return {
@@ -456,7 +497,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         step: action.nextStep,
         editingCartLineId: null,
         selectedItem: null,
-        withdrawalUnit: null,
+        usageUnits: null,
+        selectedUsageUnitId: null,
         withdrawalUnitUnavailable: false,
         availableLocations: null,
         selectedSourceLocationId: null,
@@ -476,7 +518,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         step: "review",
         editingCartLineId: null,
         selectedItem: null,
-        withdrawalUnit: null,
+        usageUnits: null,
+        selectedUsageUnitId: null,
         withdrawalUnitUnavailable: false,
         availableLocations: null,
         selectedSourceLocationId: null,
@@ -509,7 +552,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         step: "item_select",
         editingCartLineId: null,
         selectedItem: null,
-        withdrawalUnit: null,
+        usageUnits: null,
+        selectedUsageUnitId: null,
         withdrawalUnitUnavailable: false,
         availableLocations: null,
         selectedSourceLocationId: null,
@@ -547,7 +591,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         cart: [],
         editingCartLineId: null,
         selectedItem: null,
-        withdrawalUnit: null,
+        usageUnits: null,
+        selectedUsageUnitId: null,
         withdrawalUnitUnavailable: false,
         availableLocations: null,
         selectedSourceLocationId: null,

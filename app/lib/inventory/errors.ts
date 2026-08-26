@@ -59,6 +59,13 @@ export const INVENTORY_SQLSTATE = {
    * (Part 31) -- "Known waste must be recorded before this cycle count
    * can be completed." */
   CYCLE_COUNT_KNOWN_WASTE_UNRESOLVED: "GA032",
+  /** Purchase-versus-usage unit model (20260811100115) --
+   * enforce_movement_line_measurement rejected an ISSUE_TO_STATION line
+   * whose entered_unit_id is not an active, fixed-conversion kiosk usage
+   * unit (primary or secondary) for the item -- e.g. a vendor
+   * purchase-only unit, or a unit deactivated as a usage slot since the
+   * kiosk loaded it. Never trust the client's own unit choice alone. */
+  KIOSK_USAGE_UNIT_NOT_AUTHORIZED: "GA066",
 } as const;
 
 export interface InventoryPostingBlocker {
@@ -162,12 +169,27 @@ export class BatchInsufficientInventoryError extends Error {
   }
 }
 
+/** record_inventory_withdrawal(_batch) refused: entered_unit_id is not an
+ * active, fixed-conversion kiosk usage unit for the item. Under normal
+ * operation the kiosk never offers such a unit -- reaching this means the
+ * unit was deactivated as a usage slot after the kiosk loaded its options,
+ * or the request didn't originate from the kiosk's own loader at all. */
+export class KioskUsageUnitNotAuthorizedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "KioskUsageUnitNotAuthorizedError";
+  }
+}
+
 export function mapInventoryBatchRpcError(error: { code?: string; message: string; details?: string | null }): Error {
   if (error.code === INVENTORY_SQLSTATE.INSUFFICIENT_INVENTORY) {
     return new BatchInsufficientInventoryError(error.message, error.details ?? undefined);
   }
   if (error.code === INVENTORY_SQLSTATE.INVALID_STORAGE_LOCATION) {
     return new InvalidStorageLocationError(error.message);
+  }
+  if (error.code === INVENTORY_SQLSTATE.KIOSK_USAGE_UNIT_NOT_AUTHORIZED) {
+    return new KioskUsageUnitNotAuthorizedError(error.message);
   }
   return new Error(error.message);
 }
@@ -181,6 +203,9 @@ export function mapInventoryRpcError(error: { code?: string; message: string; de
   }
   if (error.code === INVENTORY_SQLSTATE.INVALID_STORAGE_LOCATION) {
     return new InvalidStorageLocationError(error.message);
+  }
+  if (error.code === INVENTORY_SQLSTATE.KIOSK_USAGE_UNIT_NOT_AUTHORIZED) {
+    return new KioskUsageUnitNotAuthorizedError(error.message);
   }
   return new Error(error.message);
 }

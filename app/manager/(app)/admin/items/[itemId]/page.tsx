@@ -5,6 +5,7 @@ import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { getAdminItem } from "@/app/lib/admin/items";
 import { listInventoryCategories } from "@/app/actions/itemMaster";
 import { listItemVendorMappingsAction } from "@/app/actions/adminItems";
+import { listItemUsageUnitsAction } from "@/app/actions/itemUsageUnits";
 import { textLinkClass } from "@/app/components/manager/buttonStyles";
 import { AdminItemDetailView } from "./_components/AdminItemDetailView";
 
@@ -18,11 +19,12 @@ export default async function AdminItemDetailPage({ params }: { params: Promise<
 
   const { itemId } = await params;
   const supabase = getServiceRoleClient();
-  const [item, categoriesResult, unitsResult, mappingsResult] = await Promise.all([
+  const [item, categoriesResult, unitsResult, mappingsResult, usageUnitsResult] = await Promise.all([
     getAdminItem(supabase, auth.manager.organizationId, itemId),
     listInventoryCategories(),
     supabase.from("units").select("id, code, name").order("name"),
     listItemVendorMappingsAction(itemId),
+    listItemUsageUnitsAction(itemId),
   ]);
 
   if (!item) {
@@ -41,10 +43,11 @@ export default async function AdminItemDetailPage({ params }: { params: Promise<
   const categories = categoriesResult.ok ? categoriesResult.categories : [];
   const units = (unitsResult.data ?? []).map((u) => ({ id: u.id as string, code: u.code as string, name: u.name as string }));
   const mappings = mappingsResult.ok ? mappingsResult.mappings : [];
+  const usageUnits = usageUnitsResult.ok ? usageUnitsResult.units : [];
 
   return (
     <div className="mx-auto max-w-2xl">
-      <AdminItemDetailView item={item} categories={categories} units={units} mappings={mappings} />
+      <AdminItemDetailView item={item} categories={categories} units={units} mappings={mappings} usageUnits={usageUnits} />
     </div>
   );
 }

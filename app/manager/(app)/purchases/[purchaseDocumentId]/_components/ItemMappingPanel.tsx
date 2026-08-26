@@ -27,6 +27,7 @@ import {
   CLASSIFICATION_STATUS_LABEL as STATUS_LABEL,
   CLASSIFICATION_STATUS_COLOR as STATUS_COLOR,
   ExistingItemOverrideForm,
+  type ExistingItemVendorPackageInput,
 } from "@/app/manager/(app)/_components/ItemClassificationForms";
 import { NewItemReviewModal, type NewItemReviewCandidate } from "@/app/manager/(app)/_components/NewItemReviewModal";
 import { flattenSpendCategoryPaths } from "@/app/lib/itemMaster/spendCategoryPaths";
@@ -336,10 +337,17 @@ export function ItemMappingPanel({
     await load();
   }
 
-  async function handleApproveExisting(lineKey: string, inventoryItemId: string) {
+  async function handleApproveExisting(lineKey: string, inventoryItemId: string, vendorPackage?: ExistingItemVendorPackageInput | null) {
     if (actionPendingLineKey) return;
     setActionPendingLineKey(lineKey);
-    const result = await approveExistingItemClassification({ purchaseDocumentId, lineKey, inventoryItemId });
+    const result = await approveExistingItemClassification({
+      purchaseDocumentId,
+      lineKey,
+      inventoryItemId,
+      purchaseUnitCode: vendorPackage?.purchaseUnitCode ?? null,
+      receivingBehavior: vendorPackage?.receivingBehavior ?? null,
+      fixedConversionFactor: vendorPackage?.fixedConversionFactor ?? null,
+    });
     setActionPendingLineKey(null);
     if (!result.ok) {
       setError(result.message);
@@ -527,9 +535,10 @@ export function ItemMappingPanel({
                 line={line}
                 readOnly={readOnly}
                 items={items}
+                units={units}
                 overrideFormOpen={overrideFormLineKey === line.lineKey}
                 onToggleOverrideForm={() => setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey)}
-                onApproveExisting={(itemId) => handleApproveExisting(line.lineKey, itemId)}
+                onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
                 onMarkNonInventory={() => handleMarkNonInventory(line)}
                 onReviewNewItem={() => setShowNewItemModal(true)}
                 actionPending={actionPendingLineKey === line.lineKey}
@@ -550,6 +559,7 @@ export function ItemMappingPanel({
                 line={line}
                 readOnly={readOnly}
                 items={items}
+                units={units}
                 editing={editingMappingLineKey === line.lineKey}
                 overrideFormOpen={overrideFormLineKey === line.lineKey}
                 onToggleEdit={() => {
@@ -557,7 +567,7 @@ export function ItemMappingPanel({
                   setOverrideFormLineKey(null);
                 }}
                 onToggleOverrideForm={() => setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey)}
-                onApproveExisting={(itemId) => handleApproveExisting(line.lineKey, itemId)}
+                onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
                 onMarkNonInventory={() => handleMarkNonInventory(line)}
                 actionPending={actionPendingLineKey === line.lineKey}
                 priceComparison={priceComparisons[line.lineKey]}
@@ -581,6 +591,7 @@ export function ItemMappingPanel({
                 line={line}
                 readOnly={readOnly}
                 items={items}
+                units={units}
                 editing={editingMappingLineKey === line.lineKey}
                 overrideFormOpen={overrideFormLineKey === line.lineKey}
                 spendCategoryPath={line.spendCategoryId ? spendCategoryPathById.get(line.spendCategoryId) : undefined}
@@ -589,7 +600,7 @@ export function ItemMappingPanel({
                   setOverrideFormLineKey(null);
                 }}
                 onToggleOverrideForm={() => setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey)}
-                onApproveExisting={(itemId) => handleApproveExisting(line.lineKey, itemId)}
+                onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
                 onMarkNonInventory={() => handleMarkNonInventory(line)}
                 actionPending={actionPendingLineKey === line.lineKey}
               />
@@ -651,6 +662,7 @@ function ResolvedLineRow({
   line,
   readOnly,
   items,
+  units,
   editing,
   overrideFormOpen,
   spendCategoryPath,
@@ -668,12 +680,13 @@ function ResolvedLineRow({
   line: LineClassificationRow;
   readOnly?: boolean;
   items: InventoryItemSummary[];
+  units: UnitSummary[];
   editing: boolean;
   overrideFormOpen: boolean;
   spendCategoryPath?: string;
   onToggleEdit: () => void;
   onToggleOverrideForm: () => void;
-  onApproveExisting: (itemId: string) => void;
+  onApproveExisting: (itemId: string, vendorPackage?: ExistingItemVendorPackageInput | null) => void;
   onMarkNonInventory: () => void;
   /** True while THIS line's approve/mark-non-inventory request is in
    * flight -- disables its own buttons so a fast double-tap can't fire
@@ -739,7 +752,7 @@ function ResolvedLineRow({
               </button>
             ) : null}
           </div>
-          {overrideFormOpen ? <ExistingItemOverrideForm items={items} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} /> : null}
+          {overrideFormOpen ? <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} /> : null}
         </div>
       ) : null}
     </div>
@@ -844,6 +857,7 @@ function NeedsReviewLineRow({
   line,
   readOnly,
   items,
+  units,
   overrideFormOpen,
   onToggleOverrideForm,
   onApproveExisting,
@@ -855,9 +869,10 @@ function NeedsReviewLineRow({
   line: LineClassificationRow;
   readOnly?: boolean;
   items: InventoryItemSummary[];
+  units: UnitSummary[];
   overrideFormOpen: boolean;
   onToggleOverrideForm: () => void;
-  onApproveExisting: (itemId: string) => void;
+  onApproveExisting: (itemId: string, vendorPackage?: ExistingItemVendorPackageInput | null) => void;
   onMarkNonInventory: () => void;
   onReviewNewItem: () => void;
   /** True while THIS line's approve/mark-non-inventory request is in
@@ -912,7 +927,7 @@ function NeedsReviewLineRow({
 
       {overrideFormOpen ? (
         <div className="w-full border-t border-zinc-800 pt-3 sm:col-span-2">
-          <ExistingItemOverrideForm items={items} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} />
+          <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} />
         </div>
       ) : null}
     </div>

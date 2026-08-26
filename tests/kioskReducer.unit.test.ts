@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialKioskState, kioskReducer, type KioskState, type CartLine } from "@/app/kiosk/_lib/kioskReducer";
+import type { KioskUsageUnits } from "@/app/actions/withdrawalUnit";
 
 // CI-safe: pure reducer logic, no network, no database.
 
@@ -8,6 +9,22 @@ const STATION_CONFIG = {
   defaultStationName: "Grill",
   autoResolveStation: true,
   canChangeStation: false,
+};
+
+// A one-unit item's usage units (primary only, no selector needed) --
+// stands in for the loader's result under the purchase-versus-usage unit
+// model (20260811100113/100114).
+const USAGE_UNITS: KioskUsageUnits = {
+  primary: { usageUnitId: "usage-1", unitId: "unit-lb", unitCode: "LB", unitName: "Pound", slot: 1 },
+  secondary: null,
+  needsSelector: false,
+};
+
+// A two-unit item's usage units -- primary + secondary, selector required.
+const USAGE_UNITS_WITH_SECONDARY: KioskUsageUnits = {
+  primary: { usageUnitId: "usage-1", unitId: "unit-lb", unitCode: "LB", unitName: "Pound", slot: 1 },
+  secondary: { usageUnitId: "usage-2", unitId: "unit-case", unitCode: "CASE", unitName: "Case", slot: 2 },
+  needsSelector: true,
 };
 
 function makeCartLine(overrides: Partial<CartLine> = {}): CartLine {
@@ -20,7 +37,7 @@ function makeCartLine(overrides: Partial<CartLine> = {}): CartLine {
     sourceLocationName: "Central Walk-In",
     enteredQuantity: "5",
     enteredUnitId: "unit-lb",
-    baseUnitCode: "LB",
+    unitCode: "LB",
     ...overrides,
   };
 }
@@ -50,15 +67,55 @@ describe("kioskReducer", () => {
     expect(state.sessionStartedAtClient).not.toBeNull();
   });
 
-  it("WITHDRAWAL_UNIT_LOADED populates the item's canonical withdrawal unit and resets enteredQuantity", () => {
+  it("USAGE_UNITS_LOADED populates the item's usage units, defaults selection to primary, and resets enteredQuantity", () => {
     let state = pinVerifiedState();
     state = kioskReducer(state, {
       type: "ITEM_SELECTED",
       item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null },
     });
-    state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" } });
-    expect(state.withdrawalUnit).toEqual({ baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" });
+    state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
+    expect(state.usageUnits).toEqual(USAGE_UNITS);
+    expect(state.selectedUsageUnitId).toBe("unit-lb");
     expect(state.enteredQuantity).toBe("");
+  });
+
+  it("USAGE_UNITS_LOADED with a two-unit item still defaults selection to primary", () => {
+    let state = pinVerifiedState();
+    state = kioskReducer(state, {
+      type: "ITEM_SELECTED",
+      item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null },
+    });
+    state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS_WITH_SECONDARY });
+    expect(state.usageUnits?.needsSelector).toBe(true);
+    expect(state.selectedUsageUnitId).toBe("unit-lb");
+  });
+
+  it("USAGE_UNIT_SELECTED switches the selection to the secondary unit and resets enteredQuantity (never silently reuses an incompatible quantity)", () => {
+    let state = pinVerifiedState();
+    state = kioskReducer(state, {
+      type: "ITEM_SELECTED",
+      item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null },
+    });
+    state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS_WITH_SECONDARY });
+    state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "5" });
+
+    state = kioskReducer(state, { type: "USAGE_UNIT_SELECTED", unitId: "unit-case" });
+    expect(state.selectedUsageUnitId).toBe("unit-case");
+    expect(state.enteredQuantity).toBe("");
+  });
+
+  it("USAGE_UNIT_SELECTED is a no-op (keeps the entered quantity) when reselecting the already-active unit", () => {
+    let state = pinVerifiedState();
+    state = kioskReducer(state, {
+      type: "ITEM_SELECTED",
+      item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null },
+    });
+    state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS_WITH_SECONDARY });
+    state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "5" });
+
+    state = kioskReducer(state, { type: "USAGE_UNIT_SELECTED", unitId: "unit-lb" });
+    expect(state.selectedUsageUnitId).toBe("unit-lb");
+    expect(state.enteredQuantity).toBe("5");
   });
 
   it("WITHDRAWAL_UNIT_UNAVAILABLE stays on quantity_entry with a compact inline flag -- it does not bounce back to item_select or set the disruptive errorBanner", () => {
@@ -76,7 +133,7 @@ describe("kioskReducer", () => {
 
     expect(state.step).toBe("quantity_entry");
     expect(state.withdrawalUnitUnavailable).toBe(true);
-    expect(state.withdrawalUnit).toBeNull();
+    expect(state.usageUnits).toBeNull();
     expect(state.errorBanner).toBeNull();
     expect(state.selectedItem).toEqual({ id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null });
   });
@@ -110,10 +167,7 @@ describe("kioskReducer", () => {
       type: "ITEM_SELECTED",
       item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null },
     });
-    state = kioskReducer(state, {
-      type: "WITHDRAWAL_UNIT_LOADED",
-      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
-    });
+    state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
     const before = state;
     const after = kioskReducer(before, { type: "QUANTITY_CHANGED", value: "43.6" });
 
@@ -123,23 +177,21 @@ describe("kioskReducer", () => {
     expect({ ...after, enteredQuantity: before.enteredQuantity }).toEqual(before);
   });
 
-  it("ITEM_SELECTED clears any previously loaded withdrawal unit/quantity for the prior item", () => {
+  it("ITEM_SELECTED clears any previously loaded usage units/quantity for the prior item", () => {
     let state = pinVerifiedState();
     state = kioskReducer(state, {
       type: "ITEM_SELECTED",
       item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null },
     });
-    state = kioskReducer(state, {
-      type: "WITHDRAWAL_UNIT_LOADED",
-      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
-    });
+    state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
     state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "2" });
 
     state = kioskReducer(state, {
       type: "ITEM_SELECTED",
       item: { id: "item-2", name: "Eggs", categoryId: "cat-2", categoryName: "Dairy", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null },
     });
-    expect(state.withdrawalUnit).toBeNull();
+    expect(state.usageUnits).toBeNull();
+    expect(state.selectedUsageUnitId).toBeNull();
     expect(state.enteredQuantity).toBe("");
     expect(state.step).toBe("quantity_entry");
   });
@@ -181,10 +233,7 @@ describe("kioskReducer", () => {
 
   it("START_OVER fully resets every field back to the initial state shape, including a non-empty cart", () => {
     let state = pinVerifiedState({ step: "review", cart: [makeCartLine()] });
-    state = kioskReducer(state, {
-      type: "WITHDRAWAL_UNIT_LOADED",
-      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
-    });
+    state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
     state = kioskReducer(state, { type: "SUBMIT_ATTEMPT_STARTED", clientRequestId: "req-1" });
     state = kioskReducer(state, { type: "START_OVER" });
 
@@ -197,7 +246,8 @@ describe("kioskReducer", () => {
     expect(state.selectedStationId).toBeNull();
     expect(state.selectedStationName).toBeNull();
     expect(state.selectedItem).toBeNull();
-    expect(state.withdrawalUnit).toBeNull();
+    expect(state.usageUnits).toBeNull();
+    expect(state.selectedUsageUnitId).toBeNull();
     expect(state.clientRequestId).toBeNull();
     expect(state.errorBanner).toBeNull();
     expect(state.cart).toEqual([]);
@@ -205,10 +255,7 @@ describe("kioskReducer", () => {
 
   it("SESSION_EXPIRED fully resets state (identity must disappear, not just the visible screen) and sets a banner", () => {
     let state = pinVerifiedState({ step: "quantity_entry" });
-    state = kioskReducer(state, {
-      type: "WITHDRAWAL_UNIT_LOADED",
-      unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" },
-    });
+    state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
     state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "5" });
     state = kioskReducer(state, { type: "SESSION_EXPIRED" });
 
@@ -217,7 +264,7 @@ describe("kioskReducer", () => {
     expect(state.employeeDisplayName).toBeNull();
     expect(state.employeeFirstName).toBeNull();
     expect(state.selectedStationName).toBeNull();
-    expect(state.withdrawalUnit).toBeNull();
+    expect(state.usageUnits).toBeNull();
     expect(state.enteredQuantity).toBe("");
     expect(state.errorBanner?.message).toMatch(/session expired/i);
   });
@@ -310,7 +357,7 @@ describe("kioskReducer", () => {
         type: "ITEM_SELECTED",
         item: { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null },
       });
-      state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" } });
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
       state = kioskReducer(state, {
         type: "AVAILABILITY_LOADED",
         locations: [{ locationId: "loc-a", locationName: "Central Walk-In", baseUnitCode: "LB", balance: 56, fullReferenceQuantity: 72, includesLegacyEstimate: false }],
@@ -321,13 +368,14 @@ describe("kioskReducer", () => {
       return state;
     }
 
-    it("clears the selected item, unit, availability, source location, quantity, idempotency key, AND the cart -- never carries Station A's prepared withdrawal into Station B", () => {
+    it("clears the selected item, usage units, availability, source location, quantity, idempotency key, AND the cart -- never carries Station A's prepared withdrawal into Station B", () => {
       const state = stateWithInProgressWithdrawal();
       const changed = kioskReducer(state, { type: "REQUEST_CHANGE_STATION" });
 
       expect(changed.step).toBe("station_picker");
       expect(changed.selectedItem).toBeNull();
-      expect(changed.withdrawalUnit).toBeNull();
+      expect(changed.usageUnits).toBeNull();
+      expect(changed.selectedUsageUnitId).toBeNull();
       expect(changed.withdrawalUnitUnavailable).toBe(false);
       expect(changed.availableLocations).toBeNull();
       expect(changed.selectedSourceLocationId).toBeNull();
@@ -391,14 +439,13 @@ describe("kioskReducer", () => {
   // Milestone 2A.5 multi-item withdrawal cart.
   describe("multi-item withdrawal cart", () => {
     const ITEM = { id: "item-1", name: "Chicken Thigh", categoryId: "cat-1", categoryName: "Meat", baseUnitCode: "LB", totalAvailableQuantity: 10, positiveLocationCount: 1, singleLocation: null };
-    const UNIT = { baseUnitId: "unit-lb", baseUnitCode: "LB", baseUnitName: "Pound", baseUnitType: "WEIGHT" as const };
     const LOC_A = { locationId: "loc-a", locationName: "Central Walk-In", baseUnitCode: "LB", balance: 56, fullReferenceQuantity: 72, includesLegacyEstimate: false };
     const LOC_B = { locationId: "loc-b", locationName: "Central Freezer", baseUnitCode: "LB", balance: 20, fullReferenceQuantity: 40, includesLegacyEstimate: false };
 
     function stateReadyToAdd(quantity: string, location = LOC_A) {
       let state = pinVerifiedState({ items: [ITEM] });
       state = kioskReducer(state, { type: "ITEM_SELECTED", item: ITEM });
-      state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
       state = kioskReducer(state, { type: "AVAILABILITY_LOADED", locations: [location] });
       state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: quantity });
       return state;
@@ -408,9 +455,23 @@ describe("kioskReducer", () => {
       const state = kioskReducer(stateReadyToAdd("5"), { type: "ADD_TO_CART", nextStep: "item_select" });
       expect(state.step).toBe("item_select");
       expect(state.cart).toEqual([
-        { id: "item-1::loc-a", inventoryItemId: "item-1", itemName: "Chicken Thigh", categoryName: "Meat", sourceLocationId: "loc-a", sourceLocationName: "Central Walk-In", enteredQuantity: "5", enteredUnitId: "unit-lb", baseUnitCode: "LB" },
+        { id: "item-1::loc-a", inventoryItemId: "item-1", itemName: "Chicken Thigh", categoryName: "Meat", sourceLocationId: "loc-a", sourceLocationName: "Central Walk-In", enteredQuantity: "5", enteredUnitId: "unit-lb", unitCode: "LB" },
       ]);
       expect(state.selectedItem).toBeNull();
+    });
+
+    it("ADD_TO_CART uses the SECONDARY unit's id/code when the employee selected it", () => {
+      let state = pinVerifiedState({ items: [ITEM] });
+      state = kioskReducer(state, { type: "ITEM_SELECTED", item: ITEM });
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS_WITH_SECONDARY });
+      state = kioskReducer(state, { type: "USAGE_UNIT_SELECTED", unitId: "unit-case" });
+      state = kioskReducer(state, { type: "AVAILABILITY_LOADED", locations: [LOC_A] });
+      state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "2" });
+      state = kioskReducer(state, { type: "ADD_TO_CART", nextStep: "item_select" });
+
+      expect(state.cart).toEqual([
+        { id: "item-1::loc-a", inventoryItemId: "item-1", itemName: "Chicken Thigh", categoryName: "Meat", sourceLocationId: "loc-a", sourceLocationName: "Central Walk-In", enteredQuantity: "2", enteredUnitId: "unit-case", unitCode: "CASE" },
+      ]);
     });
 
     it("2. ADD_TO_CART adds a second, different item as its own line", () => {
@@ -418,7 +479,7 @@ describe("kioskReducer", () => {
       let state = kioskReducer(stateReadyToAdd("5"), { type: "ADD_TO_CART", nextStep: "item_select" });
       state = { ...state, items: [ITEM, ITEM_2] };
       state = kioskReducer(state, { type: "ITEM_SELECTED", item: ITEM_2 });
-      state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
       state = kioskReducer(state, { type: "AVAILABILITY_LOADED", locations: [LOC_A] });
       state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "10" });
       state = kioskReducer(state, { type: "ADD_TO_CART", nextStep: "item_select" });
@@ -430,7 +491,7 @@ describe("kioskReducer", () => {
     it("3. adding the SAME item + SAME source again combines the quantity (5 + 3 = 8), not a duplicate row", () => {
       let state = kioskReducer(stateReadyToAdd("5"), { type: "ADD_TO_CART", nextStep: "item_select" });
       state = kioskReducer(state, { type: "ITEM_SELECTED", item: ITEM });
-      state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
       state = kioskReducer(state, { type: "AVAILABILITY_LOADED", locations: [LOC_A] });
       state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "3" });
       state = kioskReducer(state, { type: "ADD_TO_CART", nextStep: "item_select" });
@@ -442,7 +503,7 @@ describe("kioskReducer", () => {
     it("4. the SAME item from a DIFFERENT source stays a separate line", () => {
       let state = kioskReducer(stateReadyToAdd("5", LOC_A), { type: "ADD_TO_CART", nextStep: "item_select" });
       state = kioskReducer(state, { type: "ITEM_SELECTED", item: ITEM });
-      state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
       state = kioskReducer(state, { type: "AVAILABILITY_LOADED", locations: [LOC_B] });
       state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "3" });
       state = kioskReducer(state, { type: "ADD_TO_CART", nextStep: "item_select" });
@@ -466,7 +527,7 @@ describe("kioskReducer", () => {
       expect(state.enteredQuantity).toBe("5"); // pre-populated from the existing line
       expect(state.selectedSourceLocationId).toBe("loc-a"); // pre-selected
 
-      state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
       state = kioskReducer(state, { type: "AVAILABILITY_LOADED", locations: [LOC_A] });
       expect(state.selectedSourceLocationId).toBe("loc-a"); // preserved across the fresh reload
       state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "9" });
@@ -476,6 +537,31 @@ describe("kioskReducer", () => {
       expect(state.editingCartLineId).toBeNull();
       expect(state.cart.find((l) => l.id === "item-1::loc-a")?.enteredQuantity).toBe("9");
       expect(state.cart.find((l) => l.id === "item-2::loc-a")?.itemName).toBe("Untouched Item"); // unrelated line unchanged
+    });
+
+    it("EDIT_CART_LINE tentatively preserves the line's own entered unit as the selection once USAGE_UNITS_LOADED confirms it's still a valid option", () => {
+      let state = pinVerifiedState({
+        items: [ITEM],
+        cart: [makeCartLine({ id: "item-1::loc-a", enteredUnitId: "unit-case", unitCode: "CASE" })],
+        step: "review",
+      });
+      state = kioskReducer(state, { type: "EDIT_CART_LINE", lineId: "item-1::loc-a" });
+      // Tentative, before the authoritative options arrive.
+      expect(state.selectedUsageUnitId).toBe("unit-case");
+
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS_WITH_SECONDARY });
+      expect(state.selectedUsageUnitId).toBe("unit-case"); // preserved -- still a genuine option (secondary)
+    });
+
+    it("EDIT_CART_LINE's tentative unit falls back to primary once USAGE_UNITS_LOADED reveals it's no longer a valid option (e.g. the secondary was deactivated)", () => {
+      let state = pinVerifiedState({
+        items: [ITEM],
+        cart: [makeCartLine({ id: "item-1::loc-a", enteredUnitId: "unit-case", unitCode: "CASE" })],
+        step: "review",
+      });
+      state = kioskReducer(state, { type: "EDIT_CART_LINE", lineId: "item-1::loc-a" });
+      state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS }); // one-unit item now -- no secondary
+      expect(state.selectedUsageUnitId).toBe("unit-lb"); // fell back to primary
     });
 
     it("CANCEL_CART_LINE_EDIT returns to review without mutating the cart", () => {
@@ -591,7 +677,7 @@ describe("kioskReducer", () => {
         const state = kioskReducer(stateReadyToAdd("5"), { type: "ADD_TO_CART", nextStep: "review" });
         expect(state.step).toBe("review");
         expect(state.cart).toEqual([
-          { id: "item-1::loc-a", inventoryItemId: "item-1", itemName: "Chicken Thigh", categoryName: "Meat", sourceLocationId: "loc-a", sourceLocationName: "Central Walk-In", enteredQuantity: "5", enteredUnitId: "unit-lb", baseUnitCode: "LB" },
+          { id: "item-1::loc-a", inventoryItemId: "item-1", itemName: "Chicken Thigh", categoryName: "Meat", sourceLocationId: "loc-a", sourceLocationName: "Central Walk-In", enteredQuantity: "5", enteredUnitId: "unit-lb", unitCode: "LB" },
         ]);
       });
 
@@ -608,7 +694,7 @@ describe("kioskReducer", () => {
       it("5. same item + same source combine identically through EITHER path", () => {
         let state = kioskReducer(stateReadyToAdd("5"), { type: "ADD_TO_CART", nextStep: "item_select" });
         state = kioskReducer(state, { type: "ITEM_SELECTED", item: ITEM });
-        state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+        state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
         state = kioskReducer(state, { type: "AVAILABILITY_LOADED", locations: [LOC_A] });
         state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "3" });
         state = kioskReducer(state, { type: "ADD_TO_CART", nextStep: "review" }); // second add uses the OTHER path
@@ -621,7 +707,7 @@ describe("kioskReducer", () => {
       it("6. same item from a DIFFERENT source remains a separate line via Add & Review", () => {
         let state = kioskReducer(stateReadyToAdd("5", LOC_A), { type: "ADD_TO_CART", nextStep: "item_select" });
         state = kioskReducer(state, { type: "ITEM_SELECTED", item: ITEM });
-        state = kioskReducer(state, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+        state = kioskReducer(state, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
         state = kioskReducer(state, { type: "AVAILABILITY_LOADED", locations: [LOC_B] });
         state = kioskReducer(state, { type: "QUANTITY_CHANGED", value: "3" });
         state = kioskReducer(state, { type: "ADD_TO_CART", nextStep: "review" });
@@ -638,7 +724,7 @@ describe("kioskReducer", () => {
         });
 
         let viaReview = kioskReducer(base, { type: "EDIT_CART_LINE", lineId: "item-1::loc-a" });
-        viaReview = kioskReducer(viaReview, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+        viaReview = kioskReducer(viaReview, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
         viaReview = kioskReducer(viaReview, { type: "AVAILABILITY_LOADED", locations: [LOC_A] });
         viaReview = kioskReducer(viaReview, { type: "QUANTITY_CHANGED", value: "9" });
         viaReview = kioskReducer(viaReview, { type: "SAVE_CART_LINE_EDIT", nextStep: "review" });
@@ -647,7 +733,7 @@ describe("kioskReducer", () => {
         expect(viaReview.step).toBe("review");
 
         let viaShopping = kioskReducer(base, { type: "EDIT_CART_LINE", lineId: "item-1::loc-a" });
-        viaShopping = kioskReducer(viaShopping, { type: "WITHDRAWAL_UNIT_LOADED", unit: UNIT });
+        viaShopping = kioskReducer(viaShopping, { type: "USAGE_UNITS_LOADED", units: USAGE_UNITS });
         viaShopping = kioskReducer(viaShopping, { type: "AVAILABILITY_LOADED", locations: [LOC_A] });
         viaShopping = kioskReducer(viaShopping, { type: "QUANTITY_CHANGED", value: "7" });
         viaShopping = kioskReducer(viaShopping, { type: "SAVE_CART_LINE_EDIT", nextStep: "item_select" });

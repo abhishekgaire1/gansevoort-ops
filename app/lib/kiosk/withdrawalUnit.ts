@@ -2,89 +2,106 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
  * Framework-agnostic core for the kiosk's quantity-entry screen under the
- * withdrawal-unit simplification: an employee always withdraws in the
- * item's own canonical base unit (inventory_items.base_unit_id -- see
- * units.unit_type for its COUNT/WEIGHT/VOLUME tracking basis), never a
- * packaging unit like BOX/CASE/PACK. Those packaging units stay in
- * inventory_item_units untouched, for a future purchasing/receiving
- * workflow -- this file never lists them.
+ * purchase-versus-usage unit model (see supabase/migrations/
+ * 20260811100113_purchase_usage_units_schema.sql and
+ * 20260811100115_withdrawal_kiosk_unit_authorization.sql): an employee
+ * withdraws in whichever unit(s) a manager has explicitly confirmed as a
+ * kiosk USAGE unit for the item -- one required primary, one optional
+ * secondary -- never any vendor purchase-only unit (BOX/CASE as sold),
+ * and never a unit this loader didn't itself return.
  *
- * DATA CONVENTION this relies on: every withdrawable item must have an
- * ACTIVE inventory_item_units row for its own base unit (unit_id =
- * base_unit_id), with conversion_factor = 1 and requires_actual_measurement
- * = false -- the base unit is always trivially "one of its own entry
- * units," at a 1:1 conversion. This is what record_inventory_withdrawal's
- * enforce_movement_line_measurement() trigger and the
- * inventory_movement_lines_item_unit_fk constraint require in order to
- * accept entered_unit_id = base_unit_id at all (see
- * 20260811100005_inventory_transactions.sql) -- neither the schema nor the
- * RPC were changed for this simplification, so master data must supply
- * that row for every item (scripts/dev-seed.ts does this for every seeded
- * item). If it's missing, this returns unit_not_configured rather than
- * letting the employee reach a quantity screen that would only fail at
- * final submit.
+ * This deliberately returns ONLY what the kiosk needs to display and
+ * submit a choice -- unit id, code, name, slot -- and never the
+ * conversion_factor those rows carry. The server independently
+ * re-derives and re-checks the authoritative factor at withdrawal time
+ * (enforce_movement_line_measurement's ISSUE_TO_STATION branch); nothing
+ * the browser holds is ever trusted for that arithmetic.
  */
 
-export interface WithdrawalUnit {
-  baseUnitId: string;
-  baseUnitCode: string;
-  baseUnitName: string;
-  baseUnitType: string;
+export type KioskUsageSlot = 1 | 2;
+
+export interface KioskUsageUnitOption {
+  usageUnitId: string;
+  unitId: string;
+  unitCode: string;
+  unitName: string;
+  slot: KioskUsageSlot;
 }
 
-export type GetWithdrawalUnitResult =
-  | { ok: true; unit: WithdrawalUnit }
+export interface KioskUsageUnits {
+  primary: KioskUsageUnitOption;
+  /** Null when the item has no confirmed secondary usage unit -- never a
+   * fabricated placeholder (approved-plan §3). */
+  secondary: KioskUsageUnitOption | null;
+  /** True only when a secondary exists -- a one-unit item gets rigid,
+   * selector-free quantity entry (approved-plan §11). */
+  needsSelector: boolean;
+}
+
+export type GetKioskUsageUnitsResult =
+  | { ok: true; units: KioskUsageUnits }
   | { ok: false; reason: "item_not_found" | "unit_not_configured" };
 
-interface BaseUnitRow {
-  code: string;
-  name: string;
-  unit_type: string;
+interface UsageUnitRow {
+  id: string;
+  usage_slot: number;
+  inventory_item_units: {
+    unit_id: string;
+    units: { code: string; name: string } | { code: string; name: string }[] | null;
+  } | null;
 }
 
-export async function getWithdrawalUnitForItem(
+export async function getKioskUsageUnitsForItem(
   supabase: SupabaseClient,
   organizationId: string,
   inventoryItemId: string
-): Promise<GetWithdrawalUnitResult> {
+): Promise<GetKioskUsageUnitsResult> {
   const { data: item, error: itemError } = await supabase
     .from("inventory_items")
-    .select("id, base_unit_id, units(code, name, unit_type)")
+    .select("id")
     .eq("id", inventoryItemId)
     .eq("organization_id", organizationId)
     .maybeSingle();
 
   if (itemError) {
-    throw new Error(`getWithdrawalUnitForItem item lookup failed: ${itemError.message}`);
+    throw new Error(`getKioskUsageUnitsForItem item lookup failed: ${itemError.message}`);
   }
   if (!item) {
     return { ok: false, reason: "item_not_found" };
   }
 
-  const baseUnit = (Array.isArray(item.units) ? item.units[0] : item.units) as BaseUnitRow | null;
-
-  const { data: entryUnit, error: entryUnitError } = await supabase
-    .from("inventory_item_units")
-    .select("id")
+  const { data: rows, error: rowsError } = await supabase
+    .from("inventory_item_usage_units")
+    .select("id, usage_slot, inventory_item_units!inner(unit_id, is_active, requires_actual_measurement, units(code, name))")
+    .eq("organization_id", organizationId)
     .eq("inventory_item_id", inventoryItemId)
-    .eq("unit_id", item.base_unit_id)
     .eq("is_active", true)
-    .maybeSingle();
+    .eq("inventory_item_units.is_active", true)
+    .order("usage_slot", { ascending: true });
 
-  if (entryUnitError) {
-    throw new Error(`getWithdrawalUnitForItem entry-unit lookup failed: ${entryUnitError.message}`);
+  if (rowsError) {
+    throw new Error(`getKioskUsageUnitsForItem usage-unit lookup failed: ${rowsError.message}`);
   }
-  if (!entryUnit) {
+
+  const toOption = (row: UsageUnitRow): KioskUsageUnitOption | null => {
+    const iiu = row.inventory_item_units;
+    if (!iiu) return null;
+    const unit = (Array.isArray(iiu.units) ? iiu.units[0] : iiu.units) as { code: string; name: string } | null;
+    if (!unit) return null;
+    const slot = row.usage_slot === 2 ? 2 : 1;
+    return { usageUnitId: row.id, unitId: iiu.unit_id, unitCode: unit.code, unitName: unit.name, slot };
+  };
+
+  const options = ((rows ?? []) as unknown as UsageUnitRow[]).map(toOption).filter((o): o is KioskUsageUnitOption => o !== null);
+
+  const primary = options.find((o) => o.slot === 1) ?? null;
+  if (!primary) {
     return { ok: false, reason: "unit_not_configured" };
   }
+  const secondary = options.find((o) => o.slot === 2) ?? null;
 
   return {
     ok: true,
-    unit: {
-      baseUnitId: item.base_unit_id as string,
-      baseUnitCode: baseUnit?.code ?? "",
-      baseUnitName: baseUnit?.name ?? "",
-      baseUnitType: baseUnit?.unit_type ?? "",
-    },
+    units: { primary, secondary, needsSelector: secondary !== null },
   };
 }
