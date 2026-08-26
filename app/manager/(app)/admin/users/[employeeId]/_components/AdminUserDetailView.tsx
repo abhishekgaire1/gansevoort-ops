@@ -299,7 +299,7 @@ export function AdminUserDetailView({
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Kiosk Access</p>
           <div className="mt-3 flex flex-col gap-2">
             <Row label="Status" value={user.appUserId ? (user.isAppUserActive ? "Enabled" : "Disabled") : "Not enabled"} />
-            <Row label="PIN" value={user.hasPin ? "Configured" : "Not configured"} />
+            <Row label="PIN" value={user.hasPin ? (user.kioskPinResetRequired ? "PIN reset required" : "Kiosk PIN active") : "Not configured"} />
           </div>
           <button type="button" onClick={() => setPinModalOpen(true)} className={`mt-3 ${secondaryButtonClass}`}>
             {user.hasPin ? "Reset Kiosk PIN" : "Set Kiosk PIN"}
@@ -535,6 +535,10 @@ function ResetPinModal({
 
   async function handleSubmit() {
     if (pending) return;
+    if (!/^\d{4}$/.test(pin)) {
+      setError("Enter a 4-digit PIN.");
+      return;
+    }
     if (pin !== confirmPin) {
       setError("PIN and confirmation do not match.");
       return;
@@ -572,15 +576,17 @@ function ResetPinModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div role="alertdialog" aria-modal="true" className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-900 p-5">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-300">{hasPin ? "Reset Kiosk PIN" : "Set Kiosk PIN"}</h2>
+        <p className="mt-1 text-xs text-zinc-500">Enter a 4-digit PIN. The existing PIN is never shown here.</p>
         <div className="mt-4 flex flex-col gap-3">
           <label className="flex flex-col gap-1 text-xs text-zinc-400">
             New PIN
             <input
               type="password"
               inputMode="numeric"
-              maxLength={6}
+              autoComplete="off"
+              maxLength={4}
               value={pin}
-              onChange={(e) => setPin(e.target.value)}
+              onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
               className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
             />
           </label>
@@ -589,9 +595,10 @@ function ResetPinModal({
             <input
               type="password"
               inputMode="numeric"
-              maxLength={6}
+              autoComplete="off"
+              maxLength={4}
               value={confirmPin}
-              onChange={(e) => setConfirmPin(e.target.value)}
+              onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
               className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
             />
           </label>

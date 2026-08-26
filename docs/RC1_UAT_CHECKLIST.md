@@ -68,7 +68,8 @@ Confirm before testing begins:
 
 ## D. Employee / iPad authentication
 
-1. Correct six-digit PIN succeeds.
+1. Correct four-digit PIN succeeds. (Corrected from "six-digit" -- see
+   Section P below for the full four-digit PIN transition scenarios.)
 2. Incorrect PIN is rejected with a safe, generic message.
 3. Repeated incorrect PIN attempts trigger rate-limit behavior rather than
    unlimited retries.
@@ -362,7 +363,63 @@ None of the scenarios below are pre-marked as passed -- record Pass/Fail/Not App
 
 ---
 
-## P. Final outcome
+## P. Four-digit kiosk PIN
+
+Using synthetic test employees only. Never enter a real employee PIN in
+this environment. None of the scenarios below are pre-marked as passed --
+record Pass/Fail/Not Applicable for each during the real manual pass.
+
+1. A brand-new employee created with a four-digit kiosk PIN (e.g. `1234`)
+   can log in at the kiosk with it immediately.
+2. A PIN beginning with zero (e.g. `0042`) is accepted at creation and
+   authenticates correctly at the kiosk -- the leading zero is never
+   dropped anywhere in the path.
+3. A legacy employee (a six-digit-era PIN from before this feature) is
+   blocked from the kiosk with the same generic "incorrect PIN" message
+   as any other failed attempt -- never a message revealing that a reset
+   is needed, and never a six-digit entry field.
+4. A manager resets that legacy employee's kiosk PIN to a new four-digit
+   PIN from the Admin Users screen (double-entry required), and the
+   employee can immediately log in at the kiosk with the new PIN.
+5. The Admin Users detail screen shows "PIN reset required" for the
+   legacy employee before the reset, and "Kiosk PIN active" immediately
+   after.
+6. Assigning a four-digit PIN that is already active for a different
+   employee in the same organization is rejected with a generic
+   duplicate/unavailable message that does not name the other employee.
+7. An incorrect four-digit PIN at the kiosk is rejected with a generic
+   message, the PIN entry clears, and no employee identity or account
+   status is revealed.
+8. Repeated incorrect PIN attempts from the same device trigger the
+   device-level rate limit within a few attempts (not dozens), with a
+   generic "too many attempts" message.
+9. Repeated incorrect PIN attempts continue to be blocked at the
+   organization level even after clearing the kiosk browser's cookies
+   (device-level protection reset, but IP/organization protection does
+   not reset).
+10. Normal shared-kiosk operation -- many DIFFERENT employees
+    successfully logging in and out on the same physical kiosk/network
+    over a shift -- is never itself blocked as "too many attempts."
+11. Two or more kiosks/iPads on the same store Wi-Fi network can each log
+    in successfully in the same time window without tripping each other's
+    rate limits under ordinary use.
+12. On iPad, the PIN pad shows exactly four positions, auto-submits the
+    instant the fourth digit is entered (no separate "Enter"/"Submit" tap
+    required), and a fifth digit cannot be entered.
+13. Backspace removes one digit at a time; after a failed attempt, the
+    entry is cleared and ready for a fresh PIN without any leftover
+    digits from the previous attempt.
+14. A successful kiosk login issues a working session (station selection,
+    item withdrawal, etc.) exactly as before this change -- no change to
+    session length, station authorization, or withdrawal behavior.
+15. The kiosk session still expires/times out exactly as before, and
+    re-authentication after expiry requires the four-digit PIN again.
+16. Nowhere in the browser UI, browser devtools/network requests, or
+    server logs does a PIN value or its hash ever appear in plain text.
+
+---
+
+## Q. Final outcome
 
 - [ ] Every scenario above is marked **Pass**, **Fail**, or **Not
       Applicable**.

@@ -388,7 +388,7 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     throw error;
   }
 
-  const lockedEmployeePin = "111111";
+  const lockedEmployeePin = "1111";
   const lockedEmployeeAppUserId = await ensureEmployeeAppUser("TEST-RPC-LOCKED", "TestLocked", lockedEmployeePin, {
     defaultStationId: stationId,
     autoResolveStation: true,
@@ -396,7 +396,7 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     isActive: true,
   });
 
-  const changeableEmployeePin = "222222";
+  const changeableEmployeePin = "2222";
   const changeableEmployeeAppUserId = await ensureEmployeeAppUser("TEST-RPC-CHANGEABLE", "TestChangeable", changeableEmployeePin, {
     defaultStationId: stationId,
     autoResolveStation: true,
@@ -404,14 +404,14 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     isActive: true,
   });
 
-  const inactiveEmployeeAppUserId = await ensureEmployeeAppUser("TEST-RPC-INACTIVE", "TestInactive", "333333", {
+  const inactiveEmployeeAppUserId = await ensureEmployeeAppUser("TEST-RPC-INACTIVE", "TestInactive", "3333", {
     defaultStationId: null,
     autoResolveStation: false,
     canChangeStation: false,
     isActive: false,
   });
 
-  const mustPickEmployeePin = "444444";
+  const mustPickEmployeePin = "4444";
   const mustPickEmployeeAppUserId = await ensureEmployeeAppUser("TEST-RPC-MUST-PICK", "TestMustPick", mustPickEmployeePin, {
     defaultStationId: null,
     autoResolveStation: false,
@@ -506,8 +506,8 @@ export async function setupOtherOrgFixtures(supabase: SupabaseClient): Promise<O
       .insert({
         organization_id: organizationId,
         employee_id: employeeId,
-        pin_lookup_hash: hashPinLookup("999999", pinPepperEnv),
-        pin_hash: await hashPinForStorage("999999"),
+        pin_lookup_hash: hashPinLookup("9999", pinPepperEnv),
+        pin_hash: await hashPinForStorage("9999"),
         is_active: true,
       })
       .select("id")

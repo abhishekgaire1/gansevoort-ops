@@ -73,7 +73,8 @@ describe("setEmployeeKioskPin -- set/reset lifecycle", () => {
     const auth = await verifyPinCore(fx.supabase, {
       pin,
       organizationId: fx.organizationId,
-      sourceIdentifier: `iam-set-${randomUUID()}`,
+      sourceIp: `iam-set-${randomUUID()}`,
+      deviceId: `iam-set-${randomUUID()}`,
       pinPepper: PIN_PEPPER,
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });
@@ -92,7 +93,8 @@ describe("setEmployeeKioskPin -- set/reset lifecycle", () => {
     const oldAuth = await verifyPinCore(fx.supabase, {
       pin: oldPin,
       organizationId: fx.organizationId,
-      sourceIdentifier: `iam-reset-old-${randomUUID()}`,
+      sourceIp: `iam-reset-old-${randomUUID()}`,
+      deviceId: `iam-reset-old-${randomUUID()}`,
       pinPepper: PIN_PEPPER,
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });
@@ -101,7 +103,8 @@ describe("setEmployeeKioskPin -- set/reset lifecycle", () => {
     const newAuth = await verifyPinCore(fx.supabase, {
       pin: newPin,
       organizationId: fx.organizationId,
-      sourceIdentifier: `iam-reset-new-${randomUUID()}`,
+      sourceIp: `iam-reset-new-${randomUUID()}`,
+      deviceId: `iam-reset-new-${randomUUID()}`,
       pinPepper: PIN_PEPPER,
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });
@@ -163,14 +166,16 @@ describe("setEmployeeKioskPin -- set/reset lifecycle", () => {
     const authHere = await verifyPinCore(fx.supabase, {
       pin,
       organizationId: fx.organizationId,
-      sourceIdentifier: `iam-crossorg-here-${randomUUID()}`,
+      sourceIp: `iam-crossorg-here-${randomUUID()}`,
+      deviceId: `iam-crossorg-here-${randomUUID()}`,
       pinPepper: PIN_PEPPER,
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });
     const authThere = await verifyPinCore(fx.supabase, {
       pin,
       organizationId: other.organizationId,
-      sourceIdentifier: `iam-crossorg-there-${randomUUID()}`,
+      sourceIp: `iam-crossorg-there-${randomUUID()}`,
+      deviceId: `iam-crossorg-there-${randomUUID()}`,
       pinPepper: PIN_PEPPER,
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });
@@ -294,7 +299,8 @@ describe("linkInvitedAppUser", () => {
     const auth = await verifyPinCore(fx.supabase, {
       pin,
       organizationId: fx.organizationId,
-      sourceIdentifier: `iam-link-keeps-pin-auth-${randomUUID()}`,
+      sourceIp: `iam-link-keeps-pin-auth-${randomUUID()}`,
+      deviceId: `iam-link-keeps-pin-auth-${randomUUID()}`,
       pinPepper: PIN_PEPPER,
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });
@@ -333,7 +339,8 @@ describe("Inactive employee kiosk authentication", () => {
     const auth = await verifyPinCore(fx.supabase, {
       pin,
       organizationId: fx.organizationId,
-      sourceIdentifier: `iam-inactive-auth-${randomUUID()}`,
+      sourceIp: `iam-inactive-auth-${randomUUID()}`,
+      deviceId: `iam-inactive-auth-${randomUUID()}`,
       pinPepper: PIN_PEPPER,
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });
@@ -464,7 +471,8 @@ describe("Manager/Admin provisioning resumability (post-launch fix)", () => {
     const auth = await verifyPinCore(fx.supabase, {
       pin,
       organizationId: fx.organizationId,
-      sourceIdentifier: `iam-provision-keeps-pin-${randomUUID()}`,
+      sourceIp: `iam-provision-keeps-pin-${randomUUID()}`,
+      deviceId: `iam-provision-keeps-pin-${randomUUID()}`,
       pinPepper: PIN_PEPPER,
       kioskTokenSecret: KIOSK_TOKEN_SECRET,
     });

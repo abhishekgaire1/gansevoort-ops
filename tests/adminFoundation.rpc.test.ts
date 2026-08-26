@@ -34,8 +34,13 @@ beforeAll(async () => {
 });
 
 function uniquePin(): string {
-  // 6 digits, astronomically unlikely to collide across parallel test runs.
-  return String(Math.floor(100000 + Math.random() * 900000));
+  // 4 digits (the current kiosk PIN format) -- collisions across parallel
+  // test runs are far more likely than the old 6-digit space, but this is
+  // an isolation convenience for test fixtures, not a security property;
+  // a collision here just means the RPC's own org-scoped uniqueness
+  // constraint rejects the second insert, which these tests already
+  // handle as a genuine, distinguishable failure mode elsewhere.
+  return String(Math.floor(1000 + Math.random() * 9000));
 }
 
 /** A real, auth-linked test admin app_user -- idempotent find-or-create,

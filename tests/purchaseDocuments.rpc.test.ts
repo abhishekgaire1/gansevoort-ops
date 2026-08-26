@@ -1582,8 +1582,8 @@ async function ensureThirdManager(): Promise<string> {
     .insert({
       organization_id: fx.organizationId,
       employee_id: employeeId,
-      pin_lookup_hash: hashPinLookup("555555", pinPepper),
-      pin_hash: await hashPinForStorage("555555"),
+      pin_lookup_hash: hashPinLookup("5555", pinPepper),
+      pin_hash: await hashPinForStorage("5555"),
       is_active: true,
     })
     .select("id")

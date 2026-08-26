@@ -27,49 +27,84 @@ afterEach(() => {
 });
 
 describe("isValidPinFormat", () => {
-  it("accepts exactly 6 digits", () => {
-    expect(isValidPinFormat("123456")).toBe(true);
-    expect(isValidPinFormat("000000")).toBe(true);
+  it("accepts exactly 4 digits", () => {
+    expect(isValidPinFormat("1234")).toBe(true);
+    expect(isValidPinFormat("0000")).toBe(true);
   });
 
-  it("rejects anything else", () => {
+  it("accepts a PIN beginning with zero", () => {
+    expect(isValidPinFormat("0042")).toBe(true);
+  });
+
+  it("rejects three digits", () => {
+    expect(isValidPinFormat("123")).toBe(false);
+  });
+
+  it("rejects five digits", () => {
     expect(isValidPinFormat("12345")).toBe(false);
-    expect(isValidPinFormat("1234567")).toBe(false);
-    expect(isValidPinFormat("12a456")).toBe(false);
+  });
+
+  it("rejects six digits (the legacy format)", () => {
+    expect(isValidPinFormat("123456")).toBe(false);
+  });
+
+  it("rejects non-numeric characters", () => {
+    expect(isValidPinFormat("12a4")).toBe(false);
+  });
+
+  it("rejects whitespace", () => {
     expect(isValidPinFormat("")).toBe(false);
-    expect(isValidPinFormat(" 12345")).toBe(false);
+    expect(isValidPinFormat(" 123")).toBe(false);
+    expect(isValidPinFormat("1234 ")).toBe(false);
+    expect(isValidPinFormat(" 1234")).toBe(false);
   });
 });
 
 describe("hashPinLookup", () => {
   it("is deterministic for the same PIN and pepper", () => {
-    expect(hashPinLookup("123456", "pepper-a")).toBe(hashPinLookup("123456", "pepper-a"));
+    expect(hashPinLookup("1234", "pepper-a")).toBe(hashPinLookup("1234", "pepper-a"));
   });
 
   it("differs for a different PIN", () => {
-    expect(hashPinLookup("123456", "pepper-a")).not.toBe(hashPinLookup("654321", "pepper-a"));
+    expect(hashPinLookup("1234", "pepper-a")).not.toBe(hashPinLookup("4321", "pepper-a"));
   });
 
   it("differs for a different pepper", () => {
-    expect(hashPinLookup("123456", "pepper-a")).not.toBe(hashPinLookup("123456", "pepper-b"));
+    expect(hashPinLookup("1234", "pepper-a")).not.toBe(hashPinLookup("1234", "pepper-b"));
+  });
+
+  it("is deterministic (proves the lookup path stays reproducible under the four-digit format)", () => {
+    const first = hashPinLookup("0042", "pepper-a");
+    const second = hashPinLookup("0042", "pepper-a");
+    expect(first).toBe(second);
   });
 });
 
 describe("hashPinForStorage / verifyPinHash", () => {
   it("round-trips: correct PIN verifies against its own hash", async () => {
-    const hash = await hashPinForStorage("482913");
-    await expect(verifyPinHash("482913", hash)).resolves.toBe(true);
+    const hash = await hashPinForStorage("4829");
+    await expect(verifyPinHash("4829", hash)).resolves.toBe(true);
   });
 
   it("rejects a wrong PIN against the hash", async () => {
-    const hash = await hashPinForStorage("482913");
-    await expect(verifyPinHash("999999", hash)).resolves.toBe(false);
+    const hash = await hashPinForStorage("4829");
+    await expect(verifyPinHash("9999", hash)).resolves.toBe(false);
   });
 
-  it("produces a different hash each time (random salt)", async () => {
-    const hashA = await hashPinForStorage("482913");
-    const hashB = await hashPinForStorage("482913");
+  it("produces a different hash each time (random salt) -- proves Argon2id verification stays salted/non-deterministic under the four-digit format", async () => {
+    const hashA = await hashPinForStorage("4829");
+    const hashB = await hashPinForStorage("4829");
     expect(hashA).not.toBe(hashB);
+  });
+
+  it("PIN values remain strings end-to-end (never coerced to a number, which would drop a leading zero)", async () => {
+    const pin = "0042";
+    expect(typeof pin).toBe("string");
+    const hash = await hashPinForStorage(pin);
+    await expect(verifyPinHash("0042", hash)).resolves.toBe(true);
+    // A numeric coercion of "0042" would become 42 and could never
+    // round-trip back to the original leading-zero string.
+    await expect(verifyPinHash("42", hash)).resolves.toBe(false);
   });
 });
 
@@ -208,12 +243,17 @@ describe("kiosk token", () => {
 });
 
 describe("deriveRateLimitKey", () => {
-  it("is deterministic for the same source", () => {
-    expect(deriveRateLimitKey("1.2.3.4")).toBe(deriveRateLimitKey("1.2.3.4"));
+  it("is deterministic for the same scope and source", () => {
+    expect(deriveRateLimitKey("ip", "1.2.3.4")).toBe(deriveRateLimitKey("ip", "1.2.3.4"));
   });
 
   it("differs for a different source", () => {
-    expect(deriveRateLimitKey("1.2.3.4")).not.toBe(deriveRateLimitKey("5.6.7.8"));
+    expect(deriveRateLimitKey("ip", "1.2.3.4")).not.toBe(deriveRateLimitKey("ip", "5.6.7.8"));
+  });
+
+  it("differs for a different scope, even with the identical raw source -- scopes can never collide on the same counter row", () => {
+    expect(deriveRateLimitKey("ip", "1.2.3.4")).not.toBe(deriveRateLimitKey("ip_all_attempts", "1.2.3.4"));
+    expect(deriveRateLimitKey("device", "same-value")).not.toBe(deriveRateLimitKey("org", "same-value"));
   });
 });
 
