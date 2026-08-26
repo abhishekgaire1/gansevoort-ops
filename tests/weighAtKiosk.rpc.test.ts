@@ -31,6 +31,34 @@ let locationId: string;
 let spendCategoryId: string;
 let categoryId: string;
 
+/** Mirrors tests/withdrawal.rpc.test.ts's own seedAbundantStock exactly --
+ * record_inventory_withdrawal validates the requested quantity against
+ * the source location's real ledger balance (20260811100073), so every
+ * withdrawal test below needs real stock seeded first. This is the same
+ * "lower-level ledger write" pattern 20260811100125 restored the
+ * automatic-computation fallback for (no measured_base_quantity supplied
+ * -- PIECE's own conversion_factor of 1 applies). */
+async function seedAbundantStock(inventoryItemId: string, baseUnitId: string): Promise<void> {
+  const { data: movement, error: movementError } = await fx.supabase
+    .from("inventory_movements")
+    .insert({
+      organization_id: fx.organizationId,
+      location_id: locationId,
+      station_id: null,
+      movement_type: "PURCHASE_RECEIPT",
+      performed_by_app_user_id: fx.changeableEmployeeAppUserId,
+      business_date: new Date().toISOString().slice(0, 10),
+      client_request_id: randomUUID(),
+    })
+    .select("id")
+    .single();
+  if (movementError) throw movementError;
+  const { error: lineError } = await fx.supabase
+    .from("inventory_movement_lines")
+    .insert({ movement_id: movement!.id, inventory_item_id: inventoryItemId, entered_quantity: 10_000_000, entered_unit_id: baseUnitId });
+  if (lineError) throw lineError;
+}
+
 async function createFreshFixedBaseItem(runTag: string): Promise<string> {
   const { purchaseDocumentId } = await createDraftPurchaseDocumentWithLines(fx.supabase, {
     organizationId: fx.organizationId,
@@ -51,6 +79,8 @@ async function createFreshFixedBaseItem(runTag: string): Promise<string> {
     baseUnitCode: "PIECE",
     rememberVendorMapping: false,
   });
+  const { data: item } = await fx.supabase.from("inventory_items").select("base_unit_id").eq("id", result.inventoryItemId).single();
+  await seedAbundantStock(result.inventoryItemId, item!.base_unit_id as string);
   return result.inventoryItemId;
 }
 

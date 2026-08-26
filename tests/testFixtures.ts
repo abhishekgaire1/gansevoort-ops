@@ -146,6 +146,43 @@ export interface RpcTestFixtures {
   inactiveVendorId: string;
 }
 
+/** Ensures (organization, item, slot) references EXACTLY inventoryItemUnitId
+ * -- unlike a plain findOrInsert match on (organization, item, slot) alone,
+ * this corrects a stale/mismatched row rather than silently trusting
+ * whatever already occupies that slot (a real hazard here: this shared
+ * fixture item has been reused across many earlier ad hoc debugging
+ * sessions that registered a DIFFERENT unit in the same slot before this
+ * helper existed). Always leaves exactly one active row at this slot,
+ * referencing the correct unit. */
+async function ensureUsageUnitSlot(
+  supabase: SupabaseClient,
+  organizationId: string,
+  inventoryItemId: string,
+  usageSlot: number,
+  inventoryItemUnitId: string
+): Promise<void> {
+  const { data: existing } = await supabase
+    .from("inventory_item_usage_units")
+    .select("id, inventory_item_unit_id")
+    .eq("organization_id", organizationId)
+    .eq("inventory_item_id", inventoryItemId)
+    .eq("usage_slot", usageSlot)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (existing) {
+    if (existing.inventory_item_unit_id === inventoryItemUnitId) return;
+    const { error } = await supabase.from("inventory_item_usage_units").update({ inventory_item_unit_id: inventoryItemUnitId }).eq("id", existing.id);
+    if (error) throw error;
+    return;
+  }
+
+  const { error } = await supabase
+    .from("inventory_item_usage_units")
+    .insert({ organization_id: organizationId, inventory_item_id: inventoryItemId, inventory_item_unit_id: inventoryItemUnitId, usage_slot: usageSlot, is_active: true });
+  if (error && error.code !== "23505") throw error;
+}
+
 async function findOrInsert(
   supabase: SupabaseClient,
   table: string,
@@ -286,18 +323,8 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
   // withdraw a box and weigh it, never a manager_add_secondary_usage_unit
   // fixed-factor row (BOX genuinely varies in weight, which is the whole
   // point of this fixture).
-  await findOrInsert(
-    supabase,
-    "inventory_item_usage_units",
-    { organization_id: organizationId, inventory_item_id: variableWeightItemId, usage_slot: 1 },
-    { organization_id: organizationId, inventory_item_id: variableWeightItemId, inventory_item_unit_id: variableWeightLbIiuId, usage_slot: 1, is_active: true }
-  );
-  await findOrInsert(
-    supabase,
-    "inventory_item_usage_units",
-    { organization_id: organizationId, inventory_item_id: variableWeightItemId, usage_slot: 2 },
-    { organization_id: organizationId, inventory_item_id: variableWeightItemId, inventory_item_unit_id: variableWeightBoxIiuId, usage_slot: 2, is_active: true }
-  );
+  await ensureUsageUnitSlot(supabase, organizationId, variableWeightItemId, 1, variableWeightLbIiuId);
+  await ensureUsageUnitSlot(supabase, organizationId, variableWeightItemId, 2, variableWeightBoxIiuId);
 
   const fixedConversionItemId = await findOrInsert(
     supabase,
@@ -322,18 +349,8 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
   // PIECE (base) primary, CASE confirmed as a FIXED secondary (factor 10)
   // -- same rationale as variableWeightItemId above, fixed-conversion
   // side.
-  await findOrInsert(
-    supabase,
-    "inventory_item_usage_units",
-    { organization_id: organizationId, inventory_item_id: fixedConversionItemId, usage_slot: 1 },
-    { organization_id: organizationId, inventory_item_id: fixedConversionItemId, inventory_item_unit_id: fixedConversionPieceIiuId, usage_slot: 1, is_active: true }
-  );
-  await findOrInsert(
-    supabase,
-    "inventory_item_usage_units",
-    { organization_id: organizationId, inventory_item_id: fixedConversionItemId, usage_slot: 2 },
-    { organization_id: organizationId, inventory_item_id: fixedConversionItemId, inventory_item_unit_id: fixedConversionCaseIiuId, usage_slot: 2, is_active: true }
-  );
+  await ensureUsageUnitSlot(supabase, organizationId, fixedConversionItemId, 1, fixedConversionPieceIiuId);
+  await ensureUsageUnitSlot(supabase, organizationId, fixedConversionItemId, 2, fixedConversionCaseIiuId);
 
   const noRuleItemId = await findOrInsert(
     supabase,
@@ -341,12 +358,17 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     { organization_id: organizationId, name: `${TEST_PREFIX}No Rule Item` },
     { organization_id: organizationId, category_id: categoryId, base_unit_id: pieceUnitId, name: `${TEST_PREFIX}No Rule Item` }
   );
-  await findOrInsert(
+  const noRuleIiuId = await findOrInsert(
     supabase,
     "inventory_item_units",
     { inventory_item_id: noRuleItemId, unit_id: pieceUnitId },
     { inventory_item_id: noRuleItemId, unit_id: pieceUnitId, conversion_factor: 1, is_default_entry_unit: true }
   );
+  // Kiosk usage-unit registration -- see variableWeightItemId's own
+  // comment above for why this is needed explicitly (this fixture item
+  // is created fresh by whichever test file runs first, after
+  // 20260811100119's one-time backfill already ran).
+  await ensureUsageUnitSlot(supabase, organizationId, noRuleItemId, 1, noRuleIiuId);
 
   const volumeItemId = await findOrInsert(
     supabase,
@@ -354,12 +376,13 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     { organization_id: organizationId, name: `${TEST_PREFIX}Volume Item` },
     { organization_id: organizationId, category_id: categoryId, base_unit_id: galUnitId, name: `${TEST_PREFIX}Volume Item` }
   );
-  await findOrInsert(
+  const volumeIiuId = await findOrInsert(
     supabase,
     "inventory_item_units",
     { inventory_item_id: volumeItemId, unit_id: galUnitId },
     { inventory_item_id: volumeItemId, unit_id: galUnitId, conversion_factor: 1, is_default_entry_unit: true }
   );
+  await ensureUsageUnitSlot(supabase, organizationId, volumeItemId, 1, volumeIiuId);
 
   // Low threshold so an over-threshold test withdrawal reliably trips it.
   await findOrInsert(
