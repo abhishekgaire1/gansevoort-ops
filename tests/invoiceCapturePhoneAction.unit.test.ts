@@ -15,6 +15,8 @@ import {
   getCapturePhoneStatusAction,
   beginCaptureUploadAction,
   finishCaptureUploadAction,
+  deleteCapturePageAction,
+  reorderCapturePagesAction,
 } from "@/app/actions/invoiceCapturePhone";
 
 const VALID_TOKEN = "A".repeat(43);
@@ -100,12 +102,22 @@ describe("getCapturePhoneStatusAction -- token-authorized, no auth gate", () => 
 
   it("returns the session status for a valid token", async () => {
     const { client } = buildFakeServiceClient({
-      rpcImpl: async () => ({ data: [{ out_session_id: "session-1", out_status: "RECEIVED" }], error: null }),
+      rpcImpl: async () => ({ data: [{ out_session_id: "session-1", out_status: "RECEIVED", out_page_count: 1 }], error: null }),
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
     const result = await getCapturePhoneStatusAction(VALID_TOKEN);
-    expect(result).toEqual({ ok: true, status: "RECEIVED" });
+    expect(result).toEqual({ ok: true, status: "RECEIVED", pageCount: 1 });
+  });
+
+  it("multi-page (100127): reports the actual page count from the RPC, not always 1", async () => {
+    const { client } = buildFakeServiceClient({
+      rpcImpl: async () => ({ data: [{ out_session_id: "session-1", out_status: "RECEIVED", out_page_count: 3 }], error: null }),
+    });
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await getCapturePhoneStatusAction(VALID_TOKEN);
+    expect(result).toEqual({ ok: true, status: "RECEIVED", pageCount: 3 });
   });
 });
 
@@ -114,7 +126,7 @@ describe("beginCaptureUploadAction -- narrow, scoped upload slot only", () => {
     const { client, rpc } = buildFakeServiceClient({});
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await beginCaptureUploadAction(MALFORMED_TOKEN, "image/jpeg");
+    const result = await beginCaptureUploadAction(MALFORMED_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "invalid", message: "This capture link is not valid." });
     expect(rpc).not.toHaveBeenCalled();
   });
@@ -123,7 +135,7 @@ describe("beginCaptureUploadAction -- narrow, scoped upload slot only", () => {
     const { client, createSignedUploadUrl } = buildFakeServiceClient({});
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await beginCaptureUploadAction(VALID_TOKEN, "application/pdf");
+    const result = await beginCaptureUploadAction(VALID_TOKEN, "application/pdf", 1);
     expect(result).toEqual({ ok: false, reason: "invalid_file_type", message: "Unsupported photo format." });
     expect(createSignedUploadUrl).not.toHaveBeenCalled();
   });
@@ -132,7 +144,7 @@ describe("beginCaptureUploadAction -- narrow, scoped upload slot only", () => {
     const { client } = buildFakeServiceClient({ rpcImpl: async () => ({ data: null, error: { code: "GA059", message: "not found" } }) });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "invalid", message: "This capture link is not valid." });
   });
 
@@ -140,7 +152,7 @@ describe("beginCaptureUploadAction -- narrow, scoped upload slot only", () => {
     const { client } = buildFakeServiceClient({ rpcImpl: async () => ({ data: null, error: { code: "GA060", message: "expired" } }) });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "expired", message: "This capture link has expired." });
   });
 
@@ -148,7 +160,7 @@ describe("beginCaptureUploadAction -- narrow, scoped upload slot only", () => {
     const { client } = buildFakeServiceClient({ rpcImpl: async () => ({ data: null, error: { code: "GA061", message: "not available" } }) });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "unavailable", message: "This capture session is no longer available." });
   });
 
@@ -158,7 +170,7 @@ describe("beginCaptureUploadAction -- narrow, scoped upload slot only", () => {
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.path).toBe("org/org-1/captures/session-1/page-1.jpg");
@@ -166,14 +178,28 @@ describe("beginCaptureUploadAction -- narrow, scoped upload slot only", () => {
     expect(createSignedUploadUrl).toHaveBeenCalledWith("org/org-1/captures/session-1/page-1.jpg");
   });
 
-  it("always requests page 1 -- single-page V1 scope, never a client-supplied page number", async () => {
+  it("forwards the caller-supplied page number to the RPC, which independently re-validates it server-side (never trusted as an identity)", async () => {
     const { client, rpc } = buildFakeServiceClient({
       rpcImpl: async () => ({ data: [{ out_session_id: "session-1", out_organization_id: "org-1" }], error: null }),
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(rpc).toHaveBeenCalledWith("begin_invoice_capture_upload", { p_token_digest: expect.any(String), p_page_number: 1 });
+  });
+
+  it("multi-page (100127): page 2 is scoped to its own distinct storage path, never overwriting page 1's", async () => {
+    const { client, createSignedUploadUrl } = buildFakeServiceClient({
+      rpcImpl: async () => ({ data: [{ out_session_id: "session-1", out_organization_id: "org-1" }], error: null }),
+    });
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await beginCaptureUploadAction(VALID_TOKEN, "image/jpeg", 2);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.path).toBe("org/org-1/captures/session-1/page-2.jpg");
+    }
+    expect(createSignedUploadUrl).toHaveBeenCalledWith("org/org-1/captures/session-1/page-2.jpg");
   });
 });
 
@@ -182,7 +208,7 @@ describe("finishCaptureUploadAction -- server-authoritative re-validation, never
     const { client } = buildFakeServiceClient({});
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await finishCaptureUploadAction(MALFORMED_TOKEN, "image/jpeg");
+    const result = await finishCaptureUploadAction(MALFORMED_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "invalid", message: "This capture link is not valid." });
   });
 
@@ -192,7 +218,7 @@ describe("finishCaptureUploadAction -- server-authoritative re-validation, never
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "expired", message: "This capture link has expired." });
   });
 
@@ -202,7 +228,7 @@ describe("finishCaptureUploadAction -- server-authoritative re-validation, never
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "unavailable", message: "This capture session is no longer available." });
   });
 
@@ -214,7 +240,7 @@ describe("finishCaptureUploadAction -- server-authoritative re-validation, never
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "invalid_file_type", message: "The photo appears to be empty. Try again." });
   });
 
@@ -226,7 +252,7 @@ describe("finishCaptureUploadAction -- server-authoritative re-validation, never
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toMatchObject({ ok: false, reason: "invalid_file_type" });
   });
 
@@ -240,7 +266,7 @@ describe("finishCaptureUploadAction -- server-authoritative re-validation, never
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: true });
 
     const recordCall = rpc.mock.calls.find((call) => call[0] === "record_invoice_capture_page");
@@ -258,7 +284,7 @@ describe("finishCaptureUploadAction -- server-authoritative re-validation, never
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
 
     const recordCall = rpc.mock.calls.find((call) => call[0] === "record_invoice_capture_page");
     const hash = recordCall![1].p_content_hash as string;
@@ -275,7 +301,82 @@ describe("finishCaptureUploadAction -- server-authoritative re-validation, never
     });
     getServiceRoleClientMock.mockReturnValue(client);
 
-    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg");
+    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg", 1);
     expect(result).toEqual({ ok: false, reason: "unavailable", message: "This capture session is no longer available." });
+  });
+
+  it("multi-page (100127): a session already RECEIVED (page 1+ already recorded) still accepts finishing the NEXT page, not just WAITING", async () => {
+    const { client, rpc } = buildFakeServiceClient({
+      rpcImpl: async (name: string) => {
+        if (name === "get_invoice_capture_session_phone") return { data: [{ out_session_id: "session-1", out_status: "RECEIVED" }], error: null };
+        return { data: [{ out_session_id: "session-1", out_already_recorded: false }], error: null };
+      },
+      sessionOrgId: "org-1",
+    });
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await finishCaptureUploadAction(VALID_TOKEN, "image/jpeg", 2);
+    expect(result).toEqual({ ok: true });
+
+    const recordCall = rpc.mock.calls.find((call) => call[0] === "record_invoice_capture_page");
+    expect(recordCall![1]).toMatchObject({ p_page_number: 2, p_storage_path: "org/org-1/captures/session-1/page-2.jpg" });
+  });
+});
+
+describe("deleteCapturePageAction -- retake/delete, only while the session is still open for editing", () => {
+  it("rejects a malformed token before ever touching the database", async () => {
+    const { client, rpc } = buildFakeServiceClient({});
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await deleteCapturePageAction(MALFORMED_TOKEN, 2);
+    expect(result).toEqual({ ok: false, reason: "invalid", message: "This capture link is not valid." });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("maps GA072 (page not found) to a distinct not_found response, never the generic misconfigured fallback", async () => {
+    const { client } = buildFakeServiceClient({ rpcImpl: async () => ({ data: null, error: { code: "GA072", message: "page 5 not found for this capture session" } }) });
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await deleteCapturePageAction(VALID_TOKEN, 5);
+    expect(result).toEqual({ ok: false, reason: "not_found", message: "That page no longer exists in this capture session." });
+  });
+
+  it("returns the remaining page count on success", async () => {
+    const { client, rpc } = buildFakeServiceClient({
+      rpcImpl: async () => ({ data: [{ out_session_id: "session-1", out_remaining_page_count: 2 }], error: null }),
+    });
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await deleteCapturePageAction(VALID_TOKEN, 2);
+    expect(result).toEqual({ ok: true, remainingPageCount: 2 });
+    expect(rpc).toHaveBeenCalledWith("delete_invoice_capture_page", { p_token_digest: expect.any(String), p_page_number: 2 });
+  });
+});
+
+describe("reorderCapturePagesAction -- authoritative page order, phone-token-authorized", () => {
+  it("rejects a malformed token before ever touching the database", async () => {
+    const { client, rpc } = buildFakeServiceClient({});
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await reorderCapturePagesAction(MALFORMED_TOKEN, [2, 1]);
+    expect(result).toEqual({ ok: false, reason: "invalid", message: "This capture link is not valid." });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("maps GA072 (malformed permutation) to a not_found response", async () => {
+    const { client } = buildFakeServiceClient({ rpcImpl: async () => ({ data: null, error: { code: "GA072", message: "reorder must be a permutation" } }) });
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await reorderCapturePagesAction(VALID_TOKEN, [1, 1]);
+    expect(result).toEqual({ ok: false, reason: "not_found", message: "That page no longer exists in this capture session." });
+  });
+
+  it("forwards the new page order to the RPC", async () => {
+    const { client, rpc } = buildFakeServiceClient({ rpcImpl: async () => ({ data: [{ out_session_id: "session-1" }], error: null }) });
+    getServiceRoleClientMock.mockReturnValue(client);
+
+    const result = await reorderCapturePagesAction(VALID_TOKEN, [2, 1]);
+    expect(result).toEqual({ ok: true });
+    expect(rpc).toHaveBeenCalledWith("reorder_invoice_capture_pages", { p_token_digest: expect.any(String), p_new_page_order: [2, 1] });
   });
 });

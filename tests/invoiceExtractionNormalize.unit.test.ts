@@ -42,6 +42,7 @@ describe("normalizeInvoiceExtraction", () => {
             priceBasisUnit: "LB",
             lineTotal: 134.7,
             rawLineText: "5 CS 90.4 LB $1.49/LB $134.70",
+          sourcePageNumber: null,
           },
         ],
       })
@@ -72,6 +73,7 @@ describe("normalizeInvoiceExtraction", () => {
             priceBasisUnit: "BOX",
             lineTotal: 74,
             rawLineText: "2 BOX $37.00 BOX $74.00",
+          sourcePageNumber: null,
           },
         ],
       })
@@ -101,6 +103,7 @@ describe("normalizeInvoiceExtraction", () => {
             priceBasisUnit: "DZ",
             lineTotal: 25,
             rawLineText: null,
+          sourcePageNumber: null,
           },
         ],
       })

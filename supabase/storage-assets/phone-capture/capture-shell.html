@@ -46,8 +46,33 @@
   button.primary { background: #fbbf24; color: #09090b; width: 100%; margin-top: 2rem; }
   button.primary:disabled { opacity: 0.4; cursor: default; }
   button.secondary { background: transparent; border-color: #3f3f46; color: #e4e4e7; flex: 1; }
+  button.danger { background: transparent; border-color: #7f1d1d; color: #fca5a5; }
   .success { color: #34d399; font-size: 1.125rem; font-weight: 600; }
   .danger { color: #f87171; font-size: 1rem; font-weight: 600; }
+
+  /* Page review / thumbnail rail (multi-page, 100127) */
+  .page-count { font-size: 0.9375rem; font-weight: 600; color: #fafafa; margin: 0 0 1rem; }
+  .page-list { display: flex; flex-direction: column; gap: 0.75rem; overflow-y: auto; max-height: 48vh; }
+  .page-card { display: flex; align-items: center; gap: 0.75rem; border: 1px solid #27272a; border-radius: 0.875rem; padding: 0.625rem; }
+  .page-card img.thumb, .page-card .thumb-placeholder {
+    width: 3.5rem; height: 3.5rem; border-radius: 0.625rem; object-fit: cover; flex-shrink: 0; background: #18181b;
+  }
+  .page-card .thumb-placeholder { display: flex; align-items: center; justify-content: center; font-size: 0.6875rem; color: #52525b; border: 1px dashed #3f3f46; text-align: center; padding: 0.25rem; }
+  .page-card .page-label { flex: 1; font-size: 0.875rem; font-weight: 600; color: #fafafa; }
+  .page-card .page-actions { display: flex; gap: 0.5rem; }
+  .page-card button { padding: 0.5rem 0.875rem; font-size: 0.8125rem; min-height: 44px; }
+  .add-page-btn { background: transparent; border: 1px dashed #52525b; color: #d4d4d8; width: 100%; margin-top: 1rem; }
+  .add-page-btn:disabled { opacity: 0.4; cursor: default; }
+  .submit-btn { background: #fbbf24; color: #09090b; width: 100%; margin-top: 1.5rem; }
+  .submit-btn:disabled { opacity: 0.4; cursor: default; }
+  .page-limit-note { font-size: 0.8125rem; color: #71717a; margin-top: 0.5rem; text-align: center; }
+  .confirm-delete { display: flex; flex-direction: column; gap: 0.5rem; border: 1px solid #7f1d1d; border-radius: 0.75rem; padding: 0.75rem; background: rgba(127, 29, 29, 0.15); }
+  .confirm-delete p { color: #fca5a5; font-size: 0.8125rem; margin: 0; }
+  .confirm-delete .row { margin-top: 0.5rem; }
+  .status-note { font-size: 0.8125rem; }
+  .status-note.error { color: #f87171; }
+  .status-note.busy { color: #a1a1aa; }
+  .status-note.ok { color: #34d399; }
 </style>
 </head>
 <body>
@@ -65,18 +90,36 @@
       <li>there is minimal glare</li>
     </ul>
     <input id="camera-input" type="file" accept="image/jpeg,image/png" capture="environment" style="display:none" />
-    <button type="button" class="primary" id="take-photo-btn">Take Photo</button>
+    <button type="button" class="primary" id="take-photo-btn" aria-label="Take a photo of page 1">Take Photo</button>
   </section>
 
   <section id="step-preview" class="step">
-    <img class="preview" id="preview-img" alt="Captured invoice preview" />
+    <h1 id="preview-heading">Review Photo</h1>
+    <img class="preview" id="preview-img" alt="Captured invoice page preview" />
     <div class="row">
       <button type="button" class="secondary" id="retake-btn">Retake</button>
       <button type="button" class="primary" id="use-photo-btn" style="margin-top:0;flex:1">Use Photo</button>
     </div>
   </section>
 
-  <section id="step-uploading" class="step center"><p>Sending photo…</p></section>
+  <section id="step-uploading" class="step center"><p id="uploading-message">Sending photo…</p></section>
+
+  <!-- Multi-page review (100127): shown after any page is successfully
+       uploaded, and on reload-recovery when a session already has pages.
+       "Add Another Page" and "Submit Document" are deliberately distinct
+       in both color and position -- adding is a secondary/outline action,
+       submitting is the one primary amber action on the whole screen, so
+       a rushed tap can't accidentally end the capture early. -->
+  <section id="step-page-review" class="step">
+    <h1>Pages</h1>
+    <p class="page-count" id="page-count-label">1 page</p>
+    <p id="recovered-note" style="display:none">These pages were captured earlier. Photos aren&apos;t shown again after a reload, but they were saved -- add more or submit when ready.</p>
+    <div class="page-list" id="page-list"></div>
+    <p class="page-limit-note" id="page-limit-note" style="display:none">Maximum of 20 pages reached.</p>
+    <button type="button" class="add-page-btn" id="add-page-btn" aria-label="Add another page">+ Add Another Page</button>
+    <button type="button" class="submit-btn" id="submit-document-btn" aria-label="Submit the complete document">Submit Document</button>
+    <p class="status-note" id="page-review-status" role="status" aria-live="polite"></p>
+  </section>
 
   <section id="step-success" class="step center">
     <p class="success">✓ Photo Sent</p>
@@ -135,7 +178,9 @@
   // the same way as publishableKey -- public project URL, no secret.
   var functionUrl = "__PHONE_CAPTURE_API_BASE__";
 
-  var steps = ["loading", "ready", "preview", "uploading", "success", "upload-error", "expired", "unavailable", "invalid", "network-error"];
+  var MAX_PAGES = 20;
+
+  var steps = ["loading", "ready", "preview", "uploading", "page-review", "success", "upload-error", "expired", "unavailable", "invalid", "network-error"];
   function showStep(name) {
     for (var i = 0; i < steps.length; i++) {
       var el = document.getElementById("step-" + steps[i]);
@@ -143,9 +188,32 @@
     }
   }
 
+  // Multi-page state (100127). `pages` holds every page confirmed uploaded
+  // THIS browser session (previewUrl set, a real client-side Blob URL);
+  // `recoveredPageCount` holds the count of pages a status check found
+  // already recorded (e.g. after an accidental reload) whose bytes were
+  // never held by this page instance -- their thumbnails can't be shown
+  // again (client-side Blobs don't survive a reload), but the page COUNT
+  // itself is real and is never silently lost: recovered pages render as
+  // a placeholder thumbnail, and every action (retake/delete) works on
+  // them by page number exactly like a live one, since the server is the
+  // authoritative source either way. Navigating between the camera input
+  // and the preview/page-review steps never touches either of these --
+  // only an explicit Use Photo / Delete / Retake action ever does.
+  var pages = [];
+  var recoveredPageCount = 0;
   var selectedFile = null;
   var previewUrl = null;
+  var pendingPageNumber = 1;
   var STATUS_TIMEOUT_MS = 12000;
+
+  function totalPageCount() {
+    return pages.length > 0 ? pages.length : recoveredPageCount;
+  }
+
+  function nextPageNumber() {
+    return totalPageCount() + 1;
+  }
 
   // Distinguishes a transport/timeout failure (rejects with
   // {networkError:true}) from a normal, well-formed API response the
@@ -185,7 +253,8 @@
     if (result.status === "WAITING") return "ready";
     if (result.status === "EXPIRED") return "expired";
     if (result.status === "CANCELLED") return "unavailable";
-    if (result.status === "RECEIVED" || result.status === "CONTINUED") return "success";
+    if (result.status === "RECEIVED") return "page-review";
+    if (result.status === "CONTINUED") return "success";
     return "invalid";
   }
 
@@ -194,7 +263,14 @@
   function loadStatus() {
     showStep("loading");
     call("status")
-      .then(function (result) { showStep(mapStatusToStep(result)); })
+      .then(function (result) {
+        if (result.ok && typeof result.pageCount === "number") {
+          recoveredPageCount = result.pageCount;
+        }
+        var step = mapStatusToStep(result);
+        if (step === "page-review") renderPageReview();
+        showStep(step);
+      })
       .catch(function () { showStep("network-error"); });
   }
 
@@ -206,14 +282,23 @@
 
   document.getElementById("network-retry-btn").addEventListener("click", loadStatus);
 
-  document.getElementById("take-photo-btn").addEventListener("click", function () {
+  function openCameraFor(pageNumber) {
+    pendingPageNumber = pageNumber;
     document.getElementById("camera-input").click();
+  }
+
+  document.getElementById("take-photo-btn").addEventListener("click", function () {
+    openCameraFor(nextPageNumber());
+  });
+  document.getElementById("add-page-btn").addEventListener("click", function () {
+    if (nextPageNumber() > MAX_PAGES) return;
+    openCameraFor(nextPageNumber());
   });
   document.getElementById("retake-btn").addEventListener("click", function () {
-    document.getElementById("camera-input").click();
+    openCameraFor(pendingPageNumber);
   });
   document.getElementById("error-retake-btn").addEventListener("click", function () {
-    document.getElementById("camera-input").click();
+    openCameraFor(pendingPageNumber);
   });
   document.getElementById("error-retry-btn").addEventListener("click", function () {
     if (selectedFile) usePhoto();
@@ -227,10 +312,14 @@
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     previewUrl = URL.createObjectURL(file);
     document.getElementById("preview-img").src = previewUrl;
+    document.getElementById("preview-heading").textContent = "Review Page " + pendingPageNumber;
     showStep("preview");
   });
 
   document.getElementById("use-photo-btn").addEventListener("click", usePhoto);
+  document.getElementById("submit-document-btn").addEventListener("click", function () {
+    showStep("success");
+  });
 
   function uploadToSignedUrl(signedUrl, file) {
     var formData = new FormData();
@@ -251,19 +340,26 @@
 
   function usePhoto() {
     if (!selectedFile) return;
+    var pageNumber = pendingPageNumber;
+    var fileForThisPage = selectedFile;
+    var previewForThisPage = previewUrl;
     showStep("uploading");
-    var contentType = selectedFile.type || "image/jpeg";
+    document.getElementById("uploading-message").textContent = "Sending page " + pageNumber + "…";
+    var contentType = fileForThisPage.type || "image/jpeg";
 
-    call("begin-upload", { contentType: contentType })
+    call("begin-upload", { contentType: contentType, pageNumber: pageNumber })
       .then(function (begun) {
         if (!begun.ok) return Promise.reject(begun);
-        return uploadToSignedUrl(begun.signedUrl, selectedFile).then(function () {
-          return call("finish-upload", { contentType: contentType });
+        return uploadToSignedUrl(begun.signedUrl, fileForThisPage).then(function () {
+          return call("finish-upload", { contentType: contentType, pageNumber: pageNumber });
         });
       })
       .then(function (finished) {
         if (!finished.ok) return Promise.reject(finished);
-        showStep("success");
+        pages.push({ pageNumber: pageNumber, previewUrl: previewForThisPage });
+        selectedFile = null;
+        renderPageReview();
+        showStep("page-review");
       })
       .catch(function (failure) {
         if (failure && failure.reason === "expired") return showStep("expired");
@@ -273,6 +369,168 @@
           (failure && failure.message) || "Check your connection and try again.";
         showStep("upload-error");
       });
+  }
+
+  function setPageReviewStatus(text, kind) {
+    var el = document.getElementById("page-review-status");
+    el.textContent = text || "";
+    el.className = "status-note" + (kind ? " " + kind : "");
+  }
+
+  function renumberAfterRemoval(removedPageNumber) {
+    // Mirrors delete_invoice_capture_page's own server-side renumbering --
+    // every locally-held page after the removed one shifts down by one so
+    // client and server page numbers never drift apart.
+    var next = [];
+    for (var i = 0; i < pages.length; i++) {
+      var p = pages[i];
+      if (p.pageNumber === removedPageNumber) continue;
+      next.push({ pageNumber: p.pageNumber > removedPageNumber ? p.pageNumber - 1 : p.pageNumber, previewUrl: p.previewUrl });
+    }
+    pages = next;
+    if (recoveredPageCount > 0) recoveredPageCount -= 1;
+  }
+
+  function requestDeletePage(pageNumber) {
+    setPageReviewStatus("Deleting page " + pageNumber + "…", "busy");
+    call("delete-page", { pageNumber: pageNumber })
+      .then(function (result) {
+        if (!result.ok) return Promise.reject(result);
+        renumberAfterRemoval(pageNumber);
+        setPageReviewStatus("Page " + pageNumber + " deleted.", "ok");
+        if (totalPageCount() === 0) {
+          showStep("ready");
+          return;
+        }
+        renderPageReview();
+      })
+      .catch(function (failure) {
+        setPageReviewStatus((failure && failure.message) || "Could not delete that page. Try again.", "error");
+      });
+  }
+
+  function requestRetakePage(pageNumber) {
+    setPageReviewStatus("Removing page " + pageNumber + " for retake…", "busy");
+    call("delete-page", { pageNumber: pageNumber })
+      .then(function (result) {
+        if (!result.ok) return Promise.reject(result);
+        renumberAfterRemoval(pageNumber);
+        setPageReviewStatus("", null);
+        openCameraFor(pageNumber);
+      })
+      .catch(function (failure) {
+        setPageReviewStatus((failure && failure.message) || "Could not start the retake. Try again.", "error");
+      });
+  }
+
+  // Renders the current page list (live + recovered) into #page-list.
+  // Delete requires an explicit inline confirm step before it actually
+  // calls delete-page -- never a single accidental tap destroys a page.
+  function renderPageReview() {
+    var total = totalPageCount();
+    var countLabel = document.getElementById("page-count-label");
+    countLabel.textContent = total + " page" + (total === 1 ? "" : "s");
+
+    document.getElementById("recovered-note").style.display = pages.length === 0 && recoveredPageCount > 0 ? "block" : "none";
+
+    var list = document.getElementById("page-list");
+    list.innerHTML = "";
+
+    for (var n = 1; n <= total; n++) {
+      var live = null;
+      for (var i = 0; i < pages.length; i++) {
+        if (pages[i].pageNumber === n) { live = pages[i]; break; }
+      }
+
+      var card = document.createElement("div");
+      card.className = "page-card";
+
+      if (live && live.previewUrl) {
+        var img = document.createElement("img");
+        img.className = "thumb";
+        img.src = live.previewUrl;
+        img.alt = "Page " + n + " thumbnail";
+        card.appendChild(img);
+      } else {
+        var placeholder = document.createElement("div");
+        placeholder.className = "thumb-placeholder";
+        placeholder.textContent = "Page " + n;
+        card.appendChild(placeholder);
+      }
+
+      var label = document.createElement("span");
+      label.className = "page-label";
+      label.textContent = "Page " + n;
+      card.appendChild(label);
+
+      var actions = document.createElement("div");
+      actions.className = "page-actions";
+
+      var retakeBtn = document.createElement("button");
+      retakeBtn.type = "button";
+      retakeBtn.className = "secondary";
+      retakeBtn.textContent = "Retake";
+      retakeBtn.setAttribute("aria-label", "Retake page " + n);
+      (function (pageNumber) {
+        retakeBtn.addEventListener("click", function () { requestRetakePage(pageNumber); });
+      })(n);
+      actions.appendChild(retakeBtn);
+
+      if (total > 1) {
+        var deleteBtn = document.createElement("button");
+        deleteBtn.type = "button";
+        deleteBtn.className = "danger";
+        deleteBtn.textContent = "Delete";
+        deleteBtn.setAttribute("aria-label", "Delete page " + n);
+        deleteBtn.addEventListener("click", function () {
+          showDeleteConfirm(card, n);
+        });
+        actions.appendChild(deleteBtn);
+      }
+
+      card.appendChild(actions);
+      list.appendChild(card);
+    }
+
+    var addBtn = document.getElementById("add-page-btn");
+    var atLimit = total >= MAX_PAGES;
+    addBtn.disabled = atLimit;
+    document.getElementById("page-limit-note").style.display = atLimit ? "block" : "none";
+  }
+
+  // Require confirmation before deleting a captured page: replaces that
+  // page's action row with an inline "Are you sure?" prompt rather than
+  // acting on the first tap.
+  function showDeleteConfirm(card, pageNumber) {
+    var existing = card.querySelector(".confirm-delete");
+    if (existing) return;
+
+    var confirmBox = document.createElement("div");
+    confirmBox.className = "confirm-delete";
+    var text = document.createElement("p");
+    text.textContent = "Delete page " + pageNumber + "? This cannot be undone.";
+    confirmBox.appendChild(text);
+
+    var row = document.createElement("div");
+    row.className = "row";
+    var cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "secondary";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", function () { confirmBox.remove(); });
+    var confirmBtn = document.createElement("button");
+    confirmBtn.type = "button";
+    confirmBtn.className = "danger";
+    confirmBtn.style.flex = "1";
+    confirmBtn.textContent = "Delete Page";
+    confirmBtn.addEventListener("click", function () {
+      confirmBox.remove();
+      requestDeletePage(pageNumber);
+    });
+    row.appendChild(cancelBtn);
+    row.appendChild(confirmBtn);
+    confirmBox.appendChild(row);
+    card.appendChild(confirmBox);
   }
 })();
 </script>

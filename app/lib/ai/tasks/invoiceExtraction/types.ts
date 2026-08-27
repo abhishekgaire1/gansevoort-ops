@@ -24,6 +24,14 @@ export interface NormalizedInvoiceLine {
   priceBasisUnit: string | null;
   lineTotal: number | null;
   rawLineText: string | null;
+  /** Multi-page capture (100127): which page (1-indexed, matching the
+   * order files were supplied to extraction in) this line was read from.
+   * Null/absent when not confidently attributable to one page -- optional
+   * (not required) so every other object-literal producer of this shape
+   * across the codebase (PurchaseDocumentLine extends this type) doesn't
+   * need updating just to add a page-provenance field only extraction
+   * itself ever populates. */
+  sourcePageNumber?: number | null;
 }
 
 export interface NormalizedInvoiceExtraction {

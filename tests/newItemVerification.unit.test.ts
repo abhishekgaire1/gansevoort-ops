@@ -229,4 +229,54 @@ describe("computeNewItemVerificationStatus", () => {
     });
     expect(status.sameCodeDifferentFactorWarning).toBe(false);
   });
+
+  // ---- Weigh-at-kiosk restoration (20260811100126) additions ----
+
+  it("defaults secondaryRequiresMeasurement to false (never measured) when omitted -- existing fixed-item callers are unaffected", () => {
+    const status = computeNewItemVerificationStatus({ ...inventoryDefaults, secondaryUsageUnitCode: "EACH", secondaryConversionFactor: "" });
+    expect(status.canVerify).toBe(false);
+    expect(status.missing).toContain("Secondary usage unit conversion factor");
+    expect(status.secondaryModeValid).toBe(false);
+  });
+
+  it("does not require a secondary conversion factor when the manager explicitly picks measured mode", () => {
+    const status = computeNewItemVerificationStatus({
+      ...inventoryDefaults,
+      secondaryUsageUnitCode: "BOX",
+      secondaryConversionFactor: "",
+      secondaryRequiresMeasurement: true,
+    });
+    expect(status.canVerify).toBe(true);
+    expect(status.missing).toEqual([]);
+    expect(status.secondaryModeValid).toBe(true);
+  });
+
+  it("never suppresses the same-code-different-factor warning check by accident, but the warning cannot fire for a measured secondary (no factor to compare)", () => {
+    const status = computeNewItemVerificationStatus({
+      ...inventoryDefaults,
+      purchaseUnitCode: "CASE",
+      receivingBehavior: "FIXED_CONVERSION",
+      fixedConversionFactor: "24",
+      secondaryUsageUnitCode: "CASE",
+      secondaryConversionFactor: "",
+      secondaryRequiresMeasurement: true,
+    });
+    expect(status.sameCodeDifferentFactorWarning).toBe(false);
+    expect(status.canVerify).toBe(true);
+  });
+
+  it("a one-unit item (no secondary) always reports a valid secondary mode", () => {
+    const status = computeNewItemVerificationStatus(inventoryDefaults);
+    expect(status.secondaryModeValid).toBe(true);
+  });
+
+  it("AI cannot bypass manager verification: canVerify is false whenever a required field is still unresolved, regardless of how confidently the AI proposed it -- there is no code path here that forces canVerify true without every requirement actually being met", () => {
+    const unresolved = computeNewItemVerificationStatus({ ...inventoryDefaults, categoryId: "", spendCategoryId: "", baseUnitCode: "" });
+    expect(unresolved.canVerify).toBe(false);
+    // computeNewItemVerificationStatus is a pure predicate -- it never
+    // performs the RPC call itself. Approving a classification always
+    // requires a separate, explicit call to approveNewItemClassification
+    // (see itemClassificationActions.unit.test.ts), never something this
+    // module can trigger on its own.
+  });
 });

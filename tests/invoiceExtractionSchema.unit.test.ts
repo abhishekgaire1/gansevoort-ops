@@ -14,6 +14,7 @@ const VALID_LINE = {
   priceBasisUnit: "LB",
   lineTotal: 134.7,
   rawLineText: "5 CS 90.4 LB $1.49/LB $134.70",
+  sourcePageNumber: null,
 };
 
 const VALID_EXTRACTION = {
@@ -78,6 +79,7 @@ describe("GeminiInvoiceExtractionSchema", () => {
           priceBasisUnit: "BOX",
           lineTotal: 74.0,
           rawLineText: "2 BOX $37.00 BOX $74.00",
+          sourcePageNumber: null,
         },
       ],
     });

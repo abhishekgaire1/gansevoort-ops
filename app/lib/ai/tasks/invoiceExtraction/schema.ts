@@ -29,6 +29,11 @@ export const GeminiInvoiceLineSchema = z.object({
   priceBasisUnit: z.string().nullable(),
   lineTotal: z.number().nullable(),
   rawLineText: z.string().nullable(),
+  /** Multi-page capture (100127): which page (1-indexed, matching the
+   * order files were supplied in) this line was read from. Null when the
+   * model can't confidently attribute a line to one page, or for a
+   * single-page document where it isn't meaningfully different from 1. */
+  sourcePageNumber: z.number().nullable(),
 });
 
 export const GeminiInvoiceExtractionSchema = z.object({

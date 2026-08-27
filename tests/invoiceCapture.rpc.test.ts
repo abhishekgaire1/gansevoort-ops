@@ -9,12 +9,16 @@ import { finalizeDocumentUploadRpc, type FinalizeDocumentUploadRpcInput } from "
  * comment (not run in CI; `npm test` does not include this file, run
  * explicitly via `npm run test:integration`).
  *
- * Proves the Phone-to-Desktop Invoice Capture milestone's new RPCs
- * (supabase/migrations/20260811100103_invoice_phone_capture.sql) against
- * real Postgres: session creation/expiry-derivation/cancellation/
- * continuation, the phone-facing digest-only lookup, single-page-V1
- * upload-slot rejection rules, idempotent page recording, append-only
- * integrity on both new tables, and cross-organization isolation --
+ * Proves the Phone-to-Desktop Invoice Capture milestone's RPCs
+ * (supabase/migrations/20260811100103_invoice_phone_capture.sql, relaxed
+ * for multi-page by 20260811100127-100129) against real Postgres: session
+ * creation/expiry-derivation/cancellation/continuation, the phone-facing
+ * digest-only lookup, sequential-page-only upload-slot rejection rules,
+ * idempotent page recording, append-only integrity where it still applies
+ * (invoice_capture_sessions' hard-delete guard, document_pages' full
+ * immutability -- invoice_capture_pages itself is now deliberately
+ * mutable pre-submission staging, see tests/multiPageDocuments.rpc.test.ts
+ * for its own delete/reorder RPCs), and cross-organization isolation --
  * exactly the class of guarantee a mocked-client unit test cannot prove
  * (a mock never actually enforces a Postgres trigger or a real unique
  * index).
@@ -267,8 +271,12 @@ describe("begin_invoice_capture_upload / record_invoice_capture_page", () => {
     expect(error!.code).toBe("GA060");
   });
 
-  it("raises GA061 for any page number other than 1 -- single-page V1 scope", async () => {
+  it("raises GA061 for any page number other than the next sequential one (100127: multi-page now allowed, but never out of order)", async () => {
     const { digest } = await createSession(fx.organizationId, fx.changeableEmployeeAppUserId);
+    // No page recorded yet -- the only valid next page is 1, so page 2 is
+    // rejected as out-of-sequence (a different reason than the old
+    // single-page-only restriction this test used to guard, but the same
+    // error code, since a fresh session's "next expected page" is always 1).
     const { error } = await fx.supabase.rpc("begin_invoice_capture_upload", { p_token_digest: digest, p_page_number: 2 });
     expect(error!.code).toBe("GA061");
   });
@@ -427,22 +435,48 @@ describe("append-only integrity", () => {
     expect(error).not.toBeNull();
   });
 
-  it("invoice_capture_pages rejects both update and delete once a page is recorded -- fully append-only", async () => {
+  it("invoice_capture_pages permits update/delete (100127: deliberately mutable pre-submission staging so retake/delete/reorder can work) -- RLS deny-by-default plus the narrow RPC layer remain the actual authorization boundary, not a blanket table trigger", async () => {
     const { sessionId, digest } = await createSession(fx.organizationId, fx.changeableEmployeeAppUserId);
     await beginAndRecordPage(sessionId, digest);
 
+    // A raw update/delete via the service-role client (the same trust
+    // level the RPCs themselves run at) now succeeds -- forbid_update_
+    // delete was intentionally dropped from this table in 100127 because
+    // delete_invoice_capture_page/reorder_invoice_capture_pages need
+    // genuine in-place UPDATE (renumbering) and DELETE (retake/remove),
+    // and a BEFORE UPDATE/DELETE trigger blocks those regardless of
+    // caller. No anon/authenticated client can ever reach this table
+    // directly (RLS has no policies for them) -- only server-role code
+    // (the RPCs, or this test) ever could.
     const { error: updateError } = await fx.supabase
       .from("invoice_capture_pages")
       .update({ content_type: "image/png" })
       .eq("capture_session_id", sessionId)
       .eq("page_number", 1);
+    expect(updateError).toBeNull();
+  });
+
+  it("document_pages (the durable, per-document page record) remains fully append-only -- unlike invoice_capture_pages' pre-submission staging, a finalized document's pages are never mutated once recorded", async () => {
+    const documentId = randomUUID();
+    await finalizeDocumentUploadRpc(fx.supabase, {
+      documentId,
+      organizationId: fx.organizationId,
+      uploadedByAppUserId: fx.changeableEmployeeAppUserId,
+      storagePath: `org/${fx.organizationId}/documents/${documentId}/original.pdf`,
+      originalFilename: "test-invoice.pdf",
+      contentType: "application/pdf",
+      byteSize: 12345,
+      fileSha256: randomBytes(32).toString("hex"),
+      provider: "gemini",
+      model: "gemini-3.6-flash",
+      vendorId: fx.vendorId,
+      declaredDocumentType: "INVOICE",
+    } as FinalizeDocumentUploadRpcInput);
+
+    const { error: updateError } = await fx.supabase.from("document_pages").update({ content_type: "image/png" }).eq("document_id", documentId).eq("page_number", 1);
     expect(updateError).not.toBeNull();
 
-    const { error: deleteError } = await fx.supabase
-      .from("invoice_capture_pages")
-      .delete()
-      .eq("capture_session_id", sessionId)
-      .eq("page_number", 1);
+    const { error: deleteError } = await fx.supabase.from("document_pages").delete().eq("document_id", documentId).eq("page_number", 1);
     expect(deleteError).not.toBeNull();
   });
 });

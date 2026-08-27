@@ -35,6 +35,12 @@ export interface NewItemVerificationFields {
   fixedConversionFactor: string;
   secondaryUsageUnitCode: string;
   secondaryConversionFactor: string;
+  /** Weigh-at-kiosk restoration (20260811100126): optional, defaults to
+   * false (fixed conversion) -- an omitted/false value reproduces every
+   * pre-existing caller's behavior exactly. Only ever true when the
+   * manager has explicitly picked "Measure at withdrawal" for the
+   * secondary usage unit; never AI-proposed, never defaulted to true. */
+  secondaryRequiresMeasurement?: boolean;
 }
 
 export interface NewItemVerificationStatus {
@@ -48,14 +54,25 @@ export interface NewItemVerificationStatus {
    * different conversion factors -- a legitimate, deliberately supported
    * configuration (approved-plan §5: "vendor CASE" vs "kiosk CASE" can
    * mean different quantities), surfaced as a warning for the manager to
-   * confirm rather than silently forced to match either way. */
+   * confirm rather than silently forced to match either way. Never
+   * applies when the secondary is measured -- there is no factor to
+   * compare. */
   sameCodeDifferentFactorWarning: boolean;
+  /** True whenever the secondary usage unit's fixed-vs-measured
+   * configuration is internally consistent (measured: no factor
+   * required; fixed: a positive factor is required) -- false only while
+   * a fixed secondary is missing its factor. Always true when there is
+   * no secondary usage unit at all. */
+  secondaryModeValid: boolean;
 }
 
 export function computeNewItemVerificationStatus(fields: NewItemVerificationFields): NewItemVerificationStatus {
   const usesDistinctPurchaseUnit = fields.disposition === "INVENTORY" && fields.purchaseUnitCode !== "" && fields.purchaseUnitCode !== fields.baseUnitCode;
   const needsConversionFactor = usesDistinctPurchaseUnit && fields.receivingBehavior === "FIXED_CONVERSION";
   const hasSecondaryUsageUnit = fields.disposition === "INVENTORY" && fields.secondaryUsageUnitCode !== "";
+  // Defaults to false (fixed conversion) -- an omitted flag, exactly like
+  // every pre-100126 caller, never implies "measured."
+  const secondaryRequiresMeasurement = hasSecondaryUsageUnit && (fields.secondaryRequiresMeasurement ?? false);
 
   const missing: string[] = [];
   if (!fields.name.trim()) missing.push("Item name");
@@ -68,12 +85,15 @@ export function computeNewItemVerificationStatus(fields: NewItemVerificationFiel
   if (hasSecondaryUsageUnit && fields.secondaryUsageUnitCode === fields.baseUnitCode) {
     missing.push("Secondary usage unit (must differ from the base unit)");
   }
-  if (hasSecondaryUsageUnit && (!fields.secondaryConversionFactor.trim() || Number(fields.secondaryConversionFactor) <= 0)) {
+  const secondaryFactorMissing =
+    hasSecondaryUsageUnit && !secondaryRequiresMeasurement && (!fields.secondaryConversionFactor.trim() || Number(fields.secondaryConversionFactor) <= 0);
+  if (secondaryFactorMissing) {
     missing.push("Secondary usage unit conversion factor");
   }
 
   const sameCodeDifferentFactorWarning =
     hasSecondaryUsageUnit &&
+    !secondaryRequiresMeasurement &&
     usesDistinctPurchaseUnit &&
     needsConversionFactor &&
     fields.secondaryUsageUnitCode === fields.purchaseUnitCode &&
@@ -81,5 +101,15 @@ export function computeNewItemVerificationStatus(fields: NewItemVerificationFiel
     fields.fixedConversionFactor.trim() !== "" &&
     Number(fields.secondaryConversionFactor) !== Number(fields.fixedConversionFactor);
 
-  return { missing, canVerify: missing.length === 0, usesDistinctPurchaseUnit, needsConversionFactor, hasSecondaryUsageUnit, sameCodeDifferentFactorWarning };
+  const secondaryModeValid = !hasSecondaryUsageUnit || secondaryRequiresMeasurement || !secondaryFactorMissing;
+
+  return {
+    missing,
+    canVerify: missing.length === 0,
+    usesDistinctPurchaseUnit,
+    needsConversionFactor,
+    hasSecondaryUsageUnit,
+    sameCodeDifferentFactorWarning,
+    secondaryModeValid,
+  };
 }

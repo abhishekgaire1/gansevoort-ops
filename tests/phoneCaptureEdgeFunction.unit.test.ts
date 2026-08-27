@@ -13,7 +13,10 @@ import { describe, expect, it } from "vitest";
  * itself upholds the narrow-authorization invariants the Phone Capture
  * spec requires -- no service-role/secret key ever reaches a phone
  * response, org/session/storage-path are always server-derived (never
- * read from the request body), single-page V1 is hardcoded, and the
+ * read from the request body -- page NUMBER is the one deliberate
+ * exception, since 20260811100127 added real multi-page support: it's
+ * just an integer position, not an identity, and every RPC that consumes
+ * it re-validates sequencing/existence server-side regardless), and the
  * platform-level auth mode matches the deliberate "capture token is the
  * boundary" design recorded in config.toml.
  *
@@ -60,14 +63,32 @@ describe("phone-capture Edge Function -- org/session/storage path are always ser
     expect(FUNCTION_SOURCE).not.toMatch(/body\.storagePath/);
   });
 
-  it("buildCaptureStoragePath is only ever called with the RPC-returned organizationId/sessionId, never a request field", () => {
-    expect(FUNCTION_SOURCE).toContain("buildCaptureStoragePath(row.out_organization_id, row.out_session_id, 1, extension)");
-    expect(FUNCTION_SOURCE).toContain("buildCaptureStoragePath(organizationId, statusRow.out_session_id, 1, extension)");
+  it("buildCaptureStoragePath is only ever called with the RPC-returned organizationId/sessionId, never a request field for those two arguments", () => {
+    expect(FUNCTION_SOURCE).toContain("buildCaptureStoragePath(row.out_organization_id, row.out_session_id, pageNumber, extension)");
+    expect(FUNCTION_SOURCE).toContain("buildCaptureStoragePath(organizationId, statusRow.out_session_id, pageNumber, extension)");
   });
 
-  it("page number is hardcoded to 1 everywhere -- single-page V1, never taken from the client", () => {
-    expect(FUNCTION_SOURCE).toContain('p_page_number: 1');
-    expect(FUNCTION_SOURCE).not.toMatch(/p_page_number:\s*body\./);
+  it("multi-page (100127): page number now comes from the request body for begin/finish/delete, but organization_id/session_id/storage path never do", () => {
+    // The one deliberate exception to "the body is never trusted for
+    // identity" -- a page number is just an integer position within a
+    // session already resolved from the token digest, never an
+    // organization/session/storage-path, and every RPC that consumes it
+    // (begin_invoice_capture_upload, record_invoice_capture_page,
+    // delete_invoice_capture_page) independently re-derives and enforces
+    // sequencing/existence server-side regardless of what the client
+    // claims (see the RPCs' own tests).
+    expect(FUNCTION_SOURCE).toMatch(/p_page_number:\s*pageNumber/);
+    expect(FUNCTION_SOURCE).toMatch(/body\.pageNumber/);
+    expect(FUNCTION_SOURCE).not.toMatch(/p_page_number:\s*body\.pageNumber/);
+    expect(FUNCTION_SOURCE).not.toMatch(/body\.organizationId/);
+    expect(FUNCTION_SOURCE).not.toMatch(/body\.sessionId/);
+    expect(FUNCTION_SOURCE).not.toMatch(/body\.path\b/);
+    expect(FUNCTION_SOURCE).not.toMatch(/body\.storagePath/);
+  });
+
+  it("multi-page (100127): reorder-pages reads newPageOrder from the body but never an organizationId/sessionId alongside it", () => {
+    expect(FUNCTION_SOURCE).toMatch(/body\.newPageOrder/);
+    expect(FUNCTION_SOURCE).toMatch(/p_new_page_order:\s*newPageOrder/);
   });
 });
 
@@ -96,10 +117,18 @@ describe("phone-capture Edge Function -- uses the same RPCs, error codes, and bu
     expect(FUNCTION_SOURCE).toContain('"record_invoice_capture_page"');
   });
 
-  it("maps GA059/GA060/GA061 identically to the Node original", () => {
+  it("maps GA059/GA060/GA061/GA072 identically to the Node original", () => {
     expect(FUNCTION_SOURCE).toContain('"GA059"');
     expect(FUNCTION_SOURCE).toContain('"GA060"');
     expect(FUNCTION_SOURCE).toContain('"GA061"');
+    expect(FUNCTION_SOURCE).toContain('"GA072"');
+  });
+
+  it("multi-page (100127): also calls delete_invoice_capture_page and reorder_invoice_capture_pages, dispatched via delete-page/reorder-pages actions", () => {
+    expect(FUNCTION_SOURCE).toContain('"delete_invoice_capture_page"');
+    expect(FUNCTION_SOURCE).toContain('"reorder_invoice_capture_pages"');
+    expect(FUNCTION_SOURCE).toContain('"delete-page"');
+    expect(FUNCTION_SOURCE).toContain('"reorder-pages"');
   });
 
   it("reuses the existing receiving-documents bucket, never a new/public bucket", () => {

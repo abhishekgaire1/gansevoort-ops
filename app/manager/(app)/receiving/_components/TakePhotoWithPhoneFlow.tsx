@@ -7,9 +7,11 @@ import {
   getCaptureSessionStatusAction,
   cancelCaptureSessionAction,
   getCaptureImageDownloadUrlAction,
+  listCaptureSessionPagesAction,
   continueCaptureSessionAction,
   type CaptureSessionState,
 } from "@/app/actions/invoiceCaptureDesktop";
+import { addCapturedPageToDocumentAction } from "@/app/actions/invoiceCapturePageBridge";
 import { createVendorFromReceiving, type VendorSummary } from "@/app/actions/vendors";
 import type { DeclaredDocumentType } from "@/app/actions/documentUpload";
 import { initiateUpload, uploadAndFinalize } from "../_lib/uploadFileToDocument";
@@ -215,6 +217,24 @@ export function TakePhotoWithPhoneFlow({
         return;
       }
 
+      // Multi-page (100127): page 1 is now a real document via the normal
+      // pipeline above -- every additional captured page (if any) is added
+      // to that SAME document next, in order, never as a separate
+      // document. Sequential, not parallel: add_document_page requires
+      // each page to arrive in strict order.
+      const pagesResult = await listCaptureSessionPagesAction(session.sessionId);
+      if (pagesResult.ok) {
+        const additionalPages = pagesResult.pages.filter((p) => p.pageNumber > 1).sort((a, b) => a.pageNumber - b.pageNumber);
+        for (const page of additionalPages) {
+          const pageResult = await addCapturedPageToDocumentAction(session.sessionId, finalized.documentId, page.pageNumber);
+          if (!pageResult.ok) {
+            setError(`Page ${page.pageNumber} could not be added: ${pageResult.message}`);
+            setStep("received");
+            return;
+          }
+        }
+      }
+
       await continueCaptureSessionAction(session.sessionId, finalized.documentId);
 
       router.push(`/manager/receiving/${finalized.documentId}`);
@@ -278,7 +298,9 @@ export function TakePhotoWithPhoneFlow({
                 ) : (
                   <p className="text-sm text-zinc-500">Loading preview…</p>
                 )}
-                <p className="text-xs text-zinc-500">Source: Phone Capture · 1 page</p>
+                <p className="text-xs text-zinc-500">
+                  Source: Phone Capture · {session?.pageCount ?? 1} page{(session?.pageCount ?? 1) === 1 ? "" : "s"}
+                </p>
 
                 <label className="flex flex-col gap-1 text-xs text-zinc-400">
                   Vendor

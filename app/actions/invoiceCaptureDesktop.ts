@@ -192,6 +192,48 @@ export async function getCaptureImageDownloadUrlAction(sessionId: string): Promi
   return { ok: true, downloadUrl: signed.signedUrl, contentType: page.content_type as string };
 }
 
+export interface CapturedPageSummary {
+  pageNumber: number;
+  downloadUrl: string;
+  contentType: string;
+}
+
+export type ListCaptureSessionPagesResult = { ok: true; pages: CapturedPageSummary[] } | AuthFailure | { ok: false; reason: "misconfigured"; message: string };
+
+/** Multi-page (100127): enumerates EVERY page this session has received,
+ * in order, each with its own short-lived signed read URL -- the bridge
+ * to the real upload pipeline (below) downloads each in turn and feeds
+ * them into finalizeDocumentUpload (page 1) / addDocumentPageRpc (page
+ * 2+) so all pages become ONE document, never separate ones. Org-scoped
+ * exactly like list_invoice_capture_pages_desktop itself -- a session
+ * belonging to a different organization is invisible here, same as every
+ * other desktop action in this file. */
+export async function listCaptureSessionPagesAction(sessionId: string): Promise<ListCaptureSessionPagesResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  const supabase = getServiceRoleClient();
+  const { data, error } = await supabase.rpc("list_invoice_capture_pages_desktop", {
+    p_organization_id: auth.manager.organizationId,
+    p_session_id: sessionId,
+  });
+  if (error) {
+    return { ok: false, reason: "misconfigured", message: "Could not load the captured pages. Try again." };
+  }
+
+  const rows = (data ?? []) as { out_page_number: number; out_storage_path: string; out_content_type: string }[];
+  const pages: CapturedPageSummary[] = [];
+  for (const row of rows) {
+    const { data: signed, error: signError } = await supabase.storage.from(RECEIVING_DOCUMENTS_BUCKET).createSignedUrl(row.out_storage_path, 300);
+    if (signError || !signed) {
+      return { ok: false, reason: "misconfigured", message: "Could not load one of the captured pages. Try again." };
+    }
+    pages.push({ pageNumber: row.out_page_number, downloadUrl: signed.signedUrl, contentType: row.out_content_type });
+  }
+
+  return { ok: true, pages };
+}
+
 export type ContinueCaptureSessionResult = { ok: true } | AuthFailure | { ok: false; reason: "misconfigured"; message: string };
 
 /** Called AFTER the desktop has already run the downloaded image through

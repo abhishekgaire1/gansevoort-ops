@@ -57,7 +57,25 @@ function createChainable(result: FakeResult, updates: { table: string; payload: 
   return proxy;
 }
 
-function buildFakeServiceClient(opts: { claimResult: FakeResult; documentResult?: FakeResult; downloadResult?: FakeResult }) {
+interface FakeDocumentPage {
+  out_page_number: number;
+  out_storage_path: string;
+  out_content_type: string;
+}
+
+function buildFakeServiceClient(opts: {
+  claimResult: FakeResult;
+  /** Defaults to a single page-1 row -- the overwhelming common case and
+   * the only case every pre-100127 document/test needs. Pass more entries
+   * to exercise the multi-page download path. */
+  documentPages?: FakeDocumentPage[];
+  listDocumentPagesError?: { message: string };
+  downloadResult?: FakeResult;
+  /** Keyed by storage_path -- lets a multi-page test return a distinct
+   * download result per page. Falls back to `downloadResult` for any path
+   * not present here. */
+  downloadResultsByPath?: Record<string, FakeResult>;
+}) {
   const updates: { table: string; payload: unknown }[] = [];
   let documentExtractionsCallCount = 0;
 
@@ -67,19 +85,30 @@ function buildFakeServiceClient(opts: { claimResult: FakeResult; documentResult?
       const result: FakeResult = documentExtractionsCallCount === 1 ? opts.claimResult : { data: null, error: null };
       return createChainable(result, updates, table);
     }
-    if (table === "documents") {
-      return createChainable(opts.documentResult ?? { data: null, error: { message: "not found" } }, updates, table);
-    }
     throw new Error(`unexpected table ${table}`);
   });
 
-  const download = vi.fn().mockResolvedValue(opts.downloadResult ?? { data: null, error: { message: "not found" } });
+  const download = vi.fn((path: string) => {
+    const byPath = opts.downloadResultsByPath?.[path];
+    return Promise.resolve(byPath ?? opts.downloadResult ?? { data: null, error: { message: "not found" } });
+  });
   const storageFrom = vi.fn(() => ({ download }));
+
+  const defaultPages: FakeDocumentPage[] = [{ out_page_number: 1, out_storage_path: "org/org-1/documents/doc-1/original.pdf", out_content_type: "application/pdf" }];
+
   // AI Configuration + Usage/Cost Tracking milestone: executeAITask's
-  // best-effort usage write calls this -- stubbed so it succeeds quietly
-  // rather than exercising (harmless but noisy) its own internal
-  // catch-and-log path in every test here.
-  const rpc = vi.fn().mockResolvedValue({ data: [{ out_event_id: "usage-event-1" }], error: null });
+  // best-effort usage write also goes through .rpc() -- branch on the RPC
+  // name so list_document_pages (this module's own multi-page lookup) and
+  // the usage-write RPC never share one fixed response.
+  const rpc = vi.fn((fnName: string) => {
+    if (fnName === "list_document_pages") {
+      if (opts.listDocumentPagesError) {
+        return Promise.resolve({ data: null, error: opts.listDocumentPagesError });
+      }
+      return Promise.resolve({ data: opts.documentPages ?? defaultPages, error: null });
+    }
+    return Promise.resolve({ data: [{ out_event_id: "usage-event-1" }], error: null });
+  });
 
   return {
     client: { from, storage: { from: storageFrom }, rpc } as unknown as SupabaseClient,
@@ -137,7 +166,6 @@ describe("runDocumentExtractionAttempt -- successful run", () => {
         data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", provider: "gemini", model: "gemini-3.6-flash" },
         error: null,
       },
-      documentResult: { data: { storage_path: "org/org-1/documents/doc-1/original.pdf" }, error: null },
       downloadResult: { data: { arrayBuffer: async () => new TextEncoder().encode("%PDF-1.4\n").buffer }, error: null },
     });
     getServiceRoleClientMock.mockReturnValue(fake.client);
@@ -172,7 +200,7 @@ describe("runDocumentExtractionAttempt -- successful run", () => {
     expect(runInvoiceExtractionMock).toHaveBeenCalledTimes(1);
     expect(runInvoiceExtractionMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ mimeType: "application/pdf" }),
+      { files: [expect.objectContaining({ mimeType: "application/pdf" })] },
       "gemini-3.6-flash"
     );
 
@@ -184,6 +212,111 @@ describe("runDocumentExtractionAttempt -- successful run", () => {
   });
 });
 
+describe("runDocumentExtractionAttempt -- multi-page capture (100127)", () => {
+  it("downloads every page in order and passes all of them as one multi-file extraction call -- never one call per page", async () => {
+    const fake = buildFakeServiceClient({
+      claimResult: {
+        data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", provider: "gemini", model: "gemini-3.6-flash" },
+        error: null,
+      },
+      documentPages: [
+        { out_page_number: 1, out_storage_path: "org/org-1/documents/doc-1/page-1.jpg", out_content_type: "image/jpeg" },
+        { out_page_number: 2, out_storage_path: "org/org-1/documents/doc-1/page-2.jpg", out_content_type: "image/jpeg" },
+        { out_page_number: 3, out_storage_path: "org/org-1/documents/doc-1/page-3.jpg", out_content_type: "image/jpeg" },
+      ],
+      downloadResultsByPath: {
+        // Real JPEG magic bytes (0xFF 0xD8 0xFF) as raw bytes -- TextEncoder
+        // would UTF-8-re-encode \xFF into two different bytes, which is not
+        // what sniffMimeType checks for.
+        "org/org-1/documents/doc-1/page-1.jpg": { data: { arrayBuffer: async () => Uint8Array.from([0xff, 0xd8, 0xff, 1]).buffer }, error: null },
+        "org/org-1/documents/doc-1/page-2.jpg": { data: { arrayBuffer: async () => Uint8Array.from([0xff, 0xd8, 0xff, 2]).buffer }, error: null },
+        "org/org-1/documents/doc-1/page-3.jpg": { data: { arrayBuffer: async () => Uint8Array.from([0xff, 0xd8, 0xff, 3]).buffer }, error: null },
+      },
+    });
+    getServiceRoleClientMock.mockReturnValue(fake.client);
+
+    runInvoiceExtractionMock.mockResolvedValue({
+      normalized: {
+        documentType: null,
+        vendorName: "Acme",
+        vendorAddress: null,
+        vendorPhone: null,
+        invoiceNumber: null,
+        invoiceDate: null,
+        deliveryDate: null,
+        purchaseOrderNumber: null,
+        subtotal: null,
+        tax: null,
+        fees: null,
+        total: null,
+        currency: null,
+        lines: [],
+        warnings: [],
+      },
+      issues: [],
+      raw: {},
+      model: "gemini-3.6-flash",
+      provider: "gemini",
+    });
+
+    await runDocumentExtractionAttempt("attempt-1");
+
+    expect(fake.download).toHaveBeenCalledTimes(3);
+    expect(fake.download).toHaveBeenNthCalledWith(1, "org/org-1/documents/doc-1/page-1.jpg");
+    expect(fake.download).toHaveBeenNthCalledWith(2, "org/org-1/documents/doc-1/page-2.jpg");
+    expect(fake.download).toHaveBeenNthCalledWith(3, "org/org-1/documents/doc-1/page-3.jpg");
+
+    // Exactly ONE extraction call, carrying all 3 pages as separate files
+    // in page order -- never 3 separate per-page extraction calls (which
+    // would risk double-counting header fields/totals across pages).
+    expect(runInvoiceExtractionMock).toHaveBeenCalledTimes(1);
+    const [, extractInput] = runInvoiceExtractionMock.mock.calls[0] as [unknown, { files: { mimeType: string }[] }];
+    expect(extractInput.files).toHaveLength(3);
+    expect(extractInput.files.every((f) => f.mimeType === "image/jpeg")).toBe(true);
+  });
+
+  it("a single-page document (the pre-100127 default) still passes exactly one file -- unchanged behavior", async () => {
+    const fake = buildFakeServiceClient({
+      claimResult: {
+        data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", provider: "gemini", model: "gemini-3.6-flash" },
+        error: null,
+      },
+      downloadResult: { data: { arrayBuffer: async () => new TextEncoder().encode("%PDF-1.4\n").buffer }, error: null },
+    });
+    getServiceRoleClientMock.mockReturnValue(fake.client);
+
+    runInvoiceExtractionMock.mockResolvedValue({
+      normalized: {
+        documentType: null,
+        vendorName: "Acme",
+        vendorAddress: null,
+        vendorPhone: null,
+        invoiceNumber: null,
+        invoiceDate: null,
+        deliveryDate: null,
+        purchaseOrderNumber: null,
+        subtotal: null,
+        tax: null,
+        fees: null,
+        total: null,
+        currency: null,
+        lines: [],
+        warnings: [],
+      },
+      issues: [],
+      raw: {},
+      model: "gemini-3.6-flash",
+      provider: "gemini",
+    });
+
+    await runDocumentExtractionAttempt("attempt-1");
+
+    expect(fake.download).toHaveBeenCalledTimes(1);
+    const [, extractInput] = runInvoiceExtractionMock.mock.calls[0] as [unknown, { files: unknown[] }];
+    expect(extractInput.files).toHaveLength(1);
+  });
+});
+
 describe("runDocumentExtractionAttempt -- failed run", () => {
   it("marks the attempt FAILED with the provider's error code when extraction throws an AIProviderError", async () => {
     const fake = buildFakeServiceClient({
@@ -191,7 +324,6 @@ describe("runDocumentExtractionAttempt -- failed run", () => {
         data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", provider: "gemini", model: "gemini-3.6-flash" },
         error: null,
       },
-      documentResult: { data: { storage_path: "org/org-1/documents/doc-1/original.pdf" }, error: null },
       downloadResult: { data: { arrayBuffer: async () => new TextEncoder().encode("%PDF-1.4\n").buffer }, error: null },
     });
     getServiceRoleClientMock.mockReturnValue(fake.client);
@@ -216,7 +348,7 @@ describe("runDocumentExtractionAttempt -- failed run", () => {
         data: { id: "attempt-1", organization_id: "org-1", document_id: "doc-1", provider: "gemini", model: "gemini-3.6-flash" },
         error: null,
       },
-      documentResult: { data: null, error: { message: "not found" } },
+      documentPages: [],
     });
     getServiceRoleClientMock.mockReturnValue(fake.client);
 

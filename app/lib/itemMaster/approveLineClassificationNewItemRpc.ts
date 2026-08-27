@@ -23,6 +23,11 @@ export interface ApproveLineClassificationNewItemInput {
    * §6/§11). Null/omitted means the item has no secondary usage unit. */
   secondaryUsageUnitCode?: string | null;
   secondaryConversionFactor?: number | null;
+  /** Weigh-at-kiosk restoration (20260811100126): true only when the
+   * manager explicitly picked "Measure at withdrawal" for the secondary
+   * usage unit. Omitted/false reproduces prior behavior exactly (a fixed
+   * secondary requiring a positive conversion factor). */
+  secondaryRequiresMeasurement?: boolean;
 }
 
 export interface ApproveLineClassificationNewItemResult {
@@ -60,6 +65,7 @@ export async function approveLineClassificationNewItemRpc(
     p_fixed_conversion_factor: input.fixedConversionFactor ?? null,
     p_secondary_usage_unit_code: input.secondaryUsageUnitCode ?? null,
     p_secondary_conversion_factor: input.secondaryConversionFactor ?? null,
+    p_secondary_requires_measurement: input.secondaryRequiresMeasurement ?? false,
   });
 
   if (error) {

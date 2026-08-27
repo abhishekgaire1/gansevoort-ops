@@ -103,6 +103,32 @@ describe("approveNewItemClassification", () => {
     expect(result).toEqual({ ok: true, inventoryItemId: "item-1" });
   });
 
+  // ---- Simplified verification screen (progressive disclosure) additions ----
+
+  it("weigh-at-kiosk restoration: existing callers that omit secondaryRequiresMeasurement still send it through as undefined -- approveLineClassificationNewItemRpc itself defaults it to false, so behavior is unchanged", async () => {
+    approveNewMock.mockResolvedValue({ inventoryItemId: "item-1", classificationId: "class-1" });
+    await approveNewItemClassification(input);
+    expect(approveNewMock).toHaveBeenCalledWith(expect.anything(), expect.not.objectContaining({ secondaryRequiresMeasurement: true }));
+  });
+
+  it("simplified verification screen: persists the complete underlying model, including an explicitly confirmed measured secondary usage unit", async () => {
+    approveNewMock.mockResolvedValue({ inventoryItemId: "item-1", classificationId: "class-1" });
+    await approveNewItemClassification({
+      ...input,
+      secondaryUsageUnitCode: "BOX",
+      secondaryConversionFactor: null,
+      secondaryRequiresMeasurement: true,
+    });
+    expect(approveNewMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        secondaryUsageUnitCode: "BOX",
+        secondaryConversionFactor: null,
+        secondaryRequiresMeasurement: true,
+      })
+    );
+  });
+
   it("maps LineNotFoundInCurrentRevisionError to a friendly result", async () => {
     approveNewMock.mockRejectedValue(new LineNotFoundInCurrentRevisionError("gone"));
     const result = await approveNewItemClassification(input);

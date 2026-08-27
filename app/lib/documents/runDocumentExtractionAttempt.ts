@@ -1,9 +1,11 @@
 import "server-only";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { RECEIVING_DOCUMENTS_BUCKET } from "@/app/lib/documents/storagePath";
+import { listDocumentPagesRpc } from "@/app/lib/documents/listDocumentPagesRpc";
 import { sanitizeGeminiRawResponse } from "@/app/lib/ai/providers/gemini";
 import { AIProviderError } from "@/app/lib/ai/provider";
 import { runInvoiceExtraction } from "@/app/lib/ai/tasks/invoiceExtraction/runInvoiceExtraction";
+import type { ExtractInvoiceFile } from "@/app/lib/ai/tasks/invoiceExtraction/extract";
 import { executeAITask, AIProviderUnavailableError } from "@/app/lib/ai/router/executeAITask";
 import { sniffMimeType } from "@/app/lib/files/sniffMimeType";
 
@@ -35,29 +37,27 @@ export async function runDocumentExtractionAttempt(attemptId: string): Promise<v
   }
 
   try {
-    const { data: document, error: documentError } = await serviceClient
-      .from("documents")
-      .select("storage_path")
-      .eq("id", claimed.document_id)
-      .eq("organization_id", claimed.organization_id)
-      .single();
-
-    if (documentError || !document) {
-      throw new Error(`document ${claimed.document_id} not found for attempt ${attemptId}`);
+    // Multi-page capture (100127): document_pages always has at least one
+    // row (page 1, whether from finalize_document_upload's own trigger or
+    // the migration's one-time backfill) -- ordered by page_number so
+    // every file below is handed to extraction in the correct page order.
+    const docPages = await listDocumentPagesRpc(serviceClient, claimed.organization_id, claimed.document_id);
+    if (docPages.length === 0) {
+      throw new Error(`document ${claimed.document_id} has no pages for attempt ${attemptId}`);
     }
 
-    const { data: blob, error: downloadError } = await serviceClient.storage
-      .from(RECEIVING_DOCUMENTS_BUCKET)
-      .download(document.storage_path);
-
-    if (downloadError || !blob) {
-      throw new Error(`could not download document ${claimed.document_id} for attempt ${attemptId}`);
-    }
-
-    const buffer = Buffer.from(await blob.arrayBuffer());
-    const mimeType = sniffMimeType(buffer);
-    if (!mimeType) {
-      throw new Error(`document ${claimed.document_id} no longer matches an accepted file signature`);
+    const files: ExtractInvoiceFile[] = [];
+    for (const page of docPages) {
+      const { data: blob, error: downloadError } = await serviceClient.storage.from(RECEIVING_DOCUMENTS_BUCKET).download(page.storagePath);
+      if (downloadError || !blob) {
+        throw new Error(`could not download document ${claimed.document_id} page ${page.pageNumber} for attempt ${attemptId}`);
+      }
+      const buffer = Buffer.from(await blob.arrayBuffer());
+      const mimeType = sniffMimeType(buffer);
+      if (!mimeType) {
+        throw new Error(`document ${claimed.document_id} page ${page.pageNumber} no longer matches an accepted file signature`);
+      }
+      files.push({ bytesBase64: buffer.toString("base64"), mimeType });
     }
 
     // AI Configuration + Usage/Cost Tracking milestone: provider/model
@@ -76,7 +76,7 @@ export async function runDocumentExtractionAttempt(attemptId: string): Promise<v
       sourceType: "document_extraction",
       sourceId: attemptId,
       run: async (provider, model) => {
-        const extraction = await runInvoiceExtraction(provider, { fileBytesBase64: buffer.toString("base64"), mimeType }, model);
+        const extraction = await runInvoiceExtraction(provider, { files }, model);
         return { data: extraction, raw: extraction.raw, model: extraction.model, provider: extraction.provider };
       },
     });

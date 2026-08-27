@@ -42,11 +42,15 @@ Total: $204.23
 `.trim();
 
     const result = await extractInvoiceRaw(provider, {
-      fileBytesBase64: Buffer.from(sampleInvoiceText, "utf-8").toString("base64"),
-      // Gemini does not accept plain text as an inline file part in the
-      // same way as an image/PDF; this smoke test sends it as a minimal
-      // "text file" so the multimodal file-input path is still exercised.
-      mimeType: "text/plain",
+      files: [
+        {
+          bytesBase64: Buffer.from(sampleInvoiceText, "utf-8").toString("base64"),
+          // Gemini does not accept plain text as an inline file part in the
+          // same way as an image/PDF; this smoke test sends it as a minimal
+          // "text file" so the multimodal file-input path is still exercised.
+          mimeType: "text/plain",
+        },
+      ],
     });
 
     const normalized = normalizeInvoiceExtraction(result.data);

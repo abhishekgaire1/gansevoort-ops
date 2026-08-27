@@ -5,6 +5,7 @@ import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { RECEIVING_DOCUMENTS_BUCKET } from "@/app/lib/documents/storagePath";
 import { buildArchiveFilename } from "@/app/lib/documents/archiveFilename";
+import { listDocumentPagesRpc } from "@/app/lib/documents/listDocumentPagesRpc";
 
 /**
  * View and download are deliberately separate actions/URLs (never one
@@ -22,6 +23,7 @@ export type DocumentUrlResult =
 interface ResolvedDocument {
   ok: true;
   serviceClient: SupabaseClient;
+  organizationId: string;
   storagePath: string;
   originalFilename: string;
 }
@@ -51,10 +53,16 @@ async function resolveOwnedDocument(documentId: string): Promise<ResolvedDocumen
     return { ok: false, reason: "not_found" };
   }
 
-  return { ok: true, serviceClient, storagePath: document.storage_path, originalFilename: document.original_filename };
+  return {
+    ok: true,
+    serviceClient,
+    organizationId: auth.manager.organizationId,
+    storagePath: document.storage_path,
+    originalFilename: document.original_filename,
+  };
 }
 
-function unresolvedToResult(resolved: UnresolvedDocument): DocumentUrlResult {
+function unresolvedToResult(resolved: UnresolvedDocument): { ok: false; reason: "not_authorized" | "not_found"; message: string } {
   return {
     ok: false,
     reason: resolved.reason,
@@ -117,4 +125,34 @@ export async function getDocumentDownloadUrl(documentId: string): Promise<Docume
   }
 
   return { ok: true, url: data.signedUrl };
+}
+
+export type DocumentPageViewUrlsResult =
+  | { ok: true; pages: { pageNumber: number; url: string; contentType: string }[] }
+  | { ok: false; reason: "not_authorized" | "not_found" | "misconfigured"; message: string };
+
+/** Multi-page capture (100127): every page of a document, in order, each
+ * with its own inline-viewing signed URL (same TTL/no-download-header
+ * pattern as getDocumentViewUrl). A single-page document -- every
+ * document created before 100127, and the overwhelming majority created
+ * after it -- returns exactly one page. */
+export async function getDocumentPageViewUrls(documentId: string): Promise<DocumentPageViewUrlsResult> {
+  const resolved = await resolveOwnedDocument(documentId);
+  if (!resolved.ok) return unresolvedToResult(resolved);
+
+  const docPages = await listDocumentPagesRpc(resolved.serviceClient, resolved.organizationId, documentId);
+  if (docPages.length === 0) {
+    return { ok: false, reason: "not_found", message: "Document not found." };
+  }
+
+  const pages: { pageNumber: number; url: string; contentType: string }[] = [];
+  for (const page of docPages) {
+    const { data, error } = await resolved.serviceClient.storage.from(RECEIVING_DOCUMENTS_BUCKET).createSignedUrl(page.storagePath, SIGNED_URL_TTL_SECONDS);
+    if (error || !data) {
+      return { ok: false, reason: "misconfigured", message: "Could not load the document. Try again." };
+    }
+    pages.push({ pageNumber: page.pageNumber, url: data.signedUrl, contentType: page.contentType });
+  }
+
+  return { ok: true, pages };
 }

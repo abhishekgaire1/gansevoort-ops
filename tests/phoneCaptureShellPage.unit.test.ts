@@ -134,3 +134,66 @@ describe("phone-capture shell page -- no infinite Loading state", () => {
     expect(SHELL_SOURCE).toMatch(/call\("finish-upload"/);
   });
 });
+
+describe("phone-capture shell page -- multi-page support (100127)", () => {
+  it("existing single-page capture flow is unchanged: page 1 still goes through take-photo -> preview -> begin-upload -> finish-upload", () => {
+    expect(SHELL_SOURCE).toMatch(/take-photo-btn"\)\.addEventListener\("click",\s*function\s*\(\)\s*\{\s*openCameraFor\(nextPageNumber\(\)\)/);
+    expect(SHELL_SOURCE).toMatch(/call\("begin-upload",\s*\{\s*contentType:\s*contentType,\s*pageNumber:\s*pageNumber\s*\}\)/);
+    expect(SHELL_SOURCE).toMatch(/call\("finish-upload",\s*\{\s*contentType:\s*contentType,\s*pageNumber:\s*pageNumber\s*\}\)/);
+  });
+
+  it("a RECEIVED status with pages maps to the page-review step, not straight to success", () => {
+    const mapStatusMatch = SHELL_SOURCE.match(/function mapStatusToStep\(result\)[\s\S]*?\n  }/);
+    expect(mapStatusMatch).not.toBeNull();
+    expect(mapStatusMatch![0]).toMatch(/status === "RECEIVED"\) return "page-review"/);
+    expect(mapStatusMatch![0]).toMatch(/status === "CONTINUED"\) return "success"/);
+  });
+
+  it("reads pageCount from the status response to recover the page count after a reload, even though photo bytes can't be recovered", () => {
+    expect(SHELL_SOURCE).toMatch(/recoveredPageCount\s*=\s*result\.pageCount/);
+    expect(SHELL_SOURCE).toContain("recovered-note");
+  });
+
+  it("enforces a 20-page client-side cap on Add Another Page, matching the server's own cap", () => {
+    expect(SHELL_SOURCE).toMatch(/MAX_PAGES\s*=\s*20/);
+    expect(SHELL_SOURCE).toMatch(/if\s*\(nextPageNumber\(\)\s*>\s*MAX_PAGES\)\s*return;/);
+  });
+
+  it("Add Another Page and Submit Document are distinct elements with different button classes, never the same control", () => {
+    expect(SHELL_SOURCE).toMatch(/class="add-page-btn" id="add-page-btn"/);
+    expect(SHELL_SOURCE).toMatch(/class="submit-btn" id="submit-document-btn"/);
+  });
+
+  it("retake calls delete-page for the existing page before reopening the camera for that same page number", () => {
+    const retakeMatch = SHELL_SOURCE.match(/function requestRetakePage\(pageNumber\)[\s\S]*?\n  }/);
+    expect(retakeMatch).not.toBeNull();
+    expect(retakeMatch![0]).toMatch(/call\("delete-page",\s*\{\s*pageNumber:\s*pageNumber\s*\}\)/);
+    expect(retakeMatch![0]).toMatch(/openCameraFor\(pageNumber\)/);
+  });
+
+  it("deleting a page requires an explicit inline confirmation before delete-page is ever called", () => {
+    expect(SHELL_SOURCE).toMatch(/function showDeleteConfirm/);
+    const confirmMatch = SHELL_SOURCE.match(/function showDeleteConfirm[\s\S]*?\n  }/);
+    expect(confirmMatch![0]).toMatch(/Delete page.*This cannot be undone/);
+    expect(confirmMatch![0]).toMatch(/requestDeletePage\(pageNumber\)/);
+  });
+
+  it("Delete is only offered when more than one page exists", () => {
+    expect(SHELL_SOURCE).toMatch(/if\s*\(total\s*>\s*1\)\s*\{/);
+  });
+
+  it("renumbers locally-held pages after a removal, mirroring the server's own contiguous renumbering", () => {
+    expect(SHELL_SOURCE).toMatch(/function renumberAfterRemoval\(removedPageNumber\)/);
+  });
+
+  it("submitting the document is a visually and textually distinct primary action from adding a page", () => {
+    expect(SHELL_SOURCE).toContain("Submit Document");
+    expect(SHELL_SOURCE).toContain("+ Add Another Page");
+  });
+
+  it("still never shows any Receiving/Inventory/Admin business UI in the new multi-page screens", () => {
+    for (const forbidden of ["Receiving Queue", "Inventory", "Admin", "Verify", "Post"]) {
+      expect(SHELL_SOURCE).not.toContain(forbidden);
+    }
+  });
+});

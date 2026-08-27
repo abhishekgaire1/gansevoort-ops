@@ -103,8 +103,30 @@ describe("approveLineClassificationNewItemRpc", () => {
       p_fixed_conversion_factor: null,
       p_secondary_usage_unit_code: null,
       p_secondary_conversion_factor: null,
+      p_secondary_requires_measurement: false,
     });
     expect(result).toEqual({ inventoryItemId: "item-1", classificationId: "class-1" });
+  });
+
+  it("weigh-at-kiosk restoration: defaults p_secondary_requires_measurement to false when omitted, and passes true only when explicitly confirmed", async () => {
+    const { client, rpc } = fakeSupabase({ data: [{ out_inventory_item_id: "item-1", out_classification_id: "class-1" }], error: null });
+
+    await approveLineClassificationNewItemRpc(client, {
+      purchaseDocumentId: "pd-1",
+      lineKey: "line-1",
+      organizationId: "org-1",
+      appUserId: "user-1",
+      finalName: "Frozen Peas",
+      disposition: "INVENTORY",
+      categoryId: "cat-1",
+      spendCategoryId: "spend-1",
+      baseUnitCode: "LB",
+      secondaryUsageUnitCode: "BOX",
+      secondaryConversionFactor: null,
+      secondaryRequiresMeasurement: true,
+    });
+
+    expect(rpc).toHaveBeenCalledWith("approve_line_classification_new_item", expect.objectContaining({ p_secondary_requires_measurement: true, p_secondary_conversion_factor: null }));
   });
 
   it("passes a manager-confirmed secondary usage unit through as its own trailing params -- never derived from any AI proposal", async () => {

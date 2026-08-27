@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { getDocumentViewUrl, getDocumentDownloadUrl } from "@/app/actions/documentAccess";
+import { getDocumentDownloadUrl } from "@/app/actions/documentAccess";
+import { useDocumentPageNavigator, DocumentPageNavigatorControls } from "@/app/manager/(app)/_components/DocumentPageNavigator";
 import { retryDocumentExtraction } from "@/app/actions/documentExtraction";
 import { createOrOpenPurchaseDocumentDraft } from "@/app/actions/purchaseDocuments";
 import { archiveDocument } from "@/app/actions/documentArchive";
@@ -86,8 +87,7 @@ export function DocumentDetailView({
   attempts: AttemptView[];
 }) {
   const router = useRouter();
-  const [viewUrl, setViewUrl] = useState<string | null>(null);
-  const [viewError, setViewError] = useState<string | null>(null);
+  const { viewUrl, viewError, contentType: pageContentType, pageNumber, pageCount, goPrev, goNext } = useDocumentPageNavigator(documentId, contentType);
   const [downloadPending, setDownloadPending] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [retryPending, setRetryPending] = useState(false);
@@ -102,23 +102,6 @@ export function DocumentDetailView({
 
   const latest = attempts[0] ?? null;
   const status = deriveDocumentStatus(latest);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    getDocumentViewUrl(documentId).then((result) => {
-      if (cancelled) return;
-      if (result.ok) {
-        setViewUrl(result.url);
-      } else {
-        setViewError(result.message);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [documentId]);
 
   async function handleDownload() {
     // Opened synchronously, before the await below, so Mobile Safari's
@@ -297,7 +280,8 @@ export function DocumentDetailView({
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div className={`rounded-2xl border border-zinc-800 bg-zinc-900 p-4 ${narrowPane === "document" ? "" : "hidden lg:block"}`}>
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Original Document</h2>
-          <DocumentViewer viewUrl={viewUrl} viewError={viewError} contentType={contentType} />
+          <DocumentPageNavigatorControls pageNumber={pageNumber} pageCount={pageCount} onPrev={goPrev} onNext={goNext} />
+          <DocumentViewer viewUrl={viewUrl} viewError={viewError} contentType={pageContentType} />
         </div>
 
         <div className={`flex flex-col gap-6 ${narrowPane === "extraction" ? "" : "hidden lg:flex"}`}>

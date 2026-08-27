@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { getDocumentViewUrl } from "@/app/actions/documentAccess";
+import { useDocumentPageNavigator, DocumentPageNavigatorControls } from "@/app/manager/(app)/_components/DocumentPageNavigator";
 import { checkPurchaseDocumentDuplicates, discardPurchaseDocumentDraft, withdrawPurchaseDocumentSubmission } from "@/app/actions/purchaseDocuments";
 import { PreparationWizard } from "./PreparationWizard";
 import { FinalReviewView } from "./FinalReviewView";
@@ -104,8 +104,7 @@ interface Props {
  */
 export function PurchaseDocumentReviewView(props: Props) {
   const router = useRouter();
-  const [viewUrl, setViewUrl] = useState<string | null>(null);
-  const [viewError, setViewError] = useState<string | null>(null);
+  const { viewUrl, viewError, contentType: pageContentType, pageNumber, pageCount, goPrev, goNext } = useDocumentPageNavigator(props.documentId, props.contentType);
   const [duplicates, setDuplicates] = useState<PossibleDuplicatePurchaseDocument[]>(props.initialDuplicates);
   const [duplicatesDismissed, setDuplicatesDismissed] = useState(false);
   const [showDiscardForm, setShowDiscardForm] = useState(false);
@@ -116,18 +115,6 @@ export function PurchaseDocumentReviewView(props: Props) {
   const [withdrawReason, setWithdrawReason] = useState("");
   const [withdrawPending, setWithdrawPending] = useState(false);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getDocumentViewUrl(props.documentId).then((result) => {
-      if (cancelled) return;
-      if (result.ok) setViewUrl(result.url);
-      else setViewError(result.message);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.documentId]);
 
   const editableAsPreparer = props.isPreparer && props.status === "DRAFT";
   const editableAsReviewer = !props.isPreparer && props.status === "READY_FOR_VERIFICATION";
@@ -312,6 +299,8 @@ export function PurchaseDocumentReviewView(props: Props) {
         </div>
       ) : null}
 
+      <DocumentPageNavigatorControls pageNumber={pageNumber} pageCount={pageCount} onPrev={goPrev} onNext={goNext} />
+
       {showFinalReview ? (
         <FinalReviewView
           purchaseDocumentId={props.purchaseDocumentId}
@@ -322,7 +311,7 @@ export function PurchaseDocumentReviewView(props: Props) {
           submittedLines={props.submittedLines}
           viewUrl={viewUrl}
           viewError={viewError}
-          contentType={props.contentType}
+          contentType={pageContentType}
           vendors={props.vendors}
           vendorName={props.vendorName}
           declaredVendorName={props.declaredVendorName}
@@ -348,7 +337,7 @@ export function PurchaseDocumentReviewView(props: Props) {
           lines={props.lines}
           viewUrl={viewUrl}
           viewError={viewError}
-          contentType={props.contentType}
+          contentType={pageContentType}
           vendorName={props.vendorName}
           declaredVendorName={props.declaredVendorName}
           aiSuggestedVendorName={props.aiSuggestedVendorName}

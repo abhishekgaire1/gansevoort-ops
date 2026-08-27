@@ -343,3 +343,46 @@ describe("validateInvoiceExtraction -- zero-value/free lines are not automatical
     expect(issues.some((i) => i.code.startsWith("LINE_NEGATIVE"))).toBe(false);
   });
 });
+
+describe("validateInvoiceExtraction -- multi-page capture (100127): sourcePageNumber never interferes with reconciliation", () => {
+  it("still reconciles a combined multi-page-style extraction correctly (lines tagged with sourcePageNumber across several pages)", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({
+        subtotal: 204.23,
+        tax: 0,
+        total: 204.23,
+        lines: [
+          baseLine({ description: "Tomatoes", packageQuantity: 5, unitPrice: 20, lineTotal: 100, sourcePageNumber: 1 }),
+          baseLine({ description: "Eggs", packageQuantity: 2, unitPrice: 37, lineTotal: 74, sourcePageNumber: 1 }),
+          baseLine({ description: "Bread", packageQuantity: 1, unitPrice: 30.23, lineTotal: 30.23, sourcePageNumber: 2 }),
+        ],
+      })
+    );
+    expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH")).toBe(false);
+  });
+
+  it("still flags a genuine conflicting/mismatched total for a multi-page-style extraction -- sourcePageNumber does not suppress it", () => {
+    const { issues } = validateInvoiceExtraction(
+      baseExtraction({
+        subtotal: 100,
+        tax: 0,
+        total: 999, // does not reconcile with the lines below
+        lines: [
+          baseLine({ description: "Tomatoes", packageQuantity: 5, unitPrice: 20, lineTotal: 100, sourcePageNumber: 1 }),
+          baseLine({ description: "Bread", packageQuantity: 1, unitPrice: 30, lineTotal: 30, sourcePageNumber: 2 }),
+        ],
+      })
+    );
+    expect(issues.some((i) => i.code === "INVOICE_TOTAL_MISMATCH" || i.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE")).toBe(true);
+  });
+
+  it("sourcePageNumber being absent/null (single-page documents) behaves identically to before -- no new validation issue is introduced by its mere presence or absence", () => {
+    const withPageNumbers = validateInvoiceExtraction(
+      baseExtraction({ subtotal: 50, tax: 0, total: 50, lines: [baseLine({ packageQuantity: 1, unitPrice: 50, lineTotal: 50, sourcePageNumber: 1 })] })
+    ).issues;
+    const withoutPageNumbers = validateInvoiceExtraction(
+      baseExtraction({ subtotal: 50, tax: 0, total: 50, lines: [baseLine({ packageQuantity: 1, unitPrice: 50, lineTotal: 50 })] })
+    ).issues;
+    expect(withPageNumbers).toEqual(withoutPageNumbers);
+  });
+});

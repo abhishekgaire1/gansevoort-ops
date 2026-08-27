@@ -17,6 +17,11 @@ function normalizeNullableNumber(value: number | null): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+function normalizeSourcePageNumber(value: number | null): number | null {
+  if (value === null) return null;
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : null;
+}
+
 function normalizeLine(line: GeminiInvoiceLine): NormalizedInvoiceLine {
   return {
     vendorSku: normalizeNullableString(line.vendorSku),
@@ -29,6 +34,7 @@ function normalizeLine(line: GeminiInvoiceLine): NormalizedInvoiceLine {
     priceBasisUnit: normalizeNullableString(line.priceBasisUnit),
     lineTotal: normalizeNullableNumber(line.lineTotal),
     rawLineText: normalizeNullableString(line.rawLineText),
+    sourcePageNumber: normalizeSourcePageNumber(line.sourcePageNumber),
   };
 }
 

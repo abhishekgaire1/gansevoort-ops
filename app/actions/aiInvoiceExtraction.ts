@@ -74,11 +74,7 @@ export async function extractInvoiceFromUpload(formData: FormData, compareModel?
   const provider = new GeminiProvider(apiKey);
 
   try {
-    const result = await runInvoiceExtraction(
-      provider,
-      { fileBytesBase64: buffer.toString("base64"), mimeType: sniffedMimeType },
-      compareModel
-    );
+    const result = await runInvoiceExtraction(provider, { files: [{ bytesBase64: buffer.toString("base64"), mimeType: sniffedMimeType }] }, compareModel);
     // The mapping step: `result.raw` (the Gemini SDK response) is
     // deliberately dropped here, never spread/returned directly. Only
     // scalar debug fields, picked by extractGeminiDebugMetadata, survive.

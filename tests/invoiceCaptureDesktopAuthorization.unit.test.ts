@@ -24,6 +24,7 @@ import {
   getActiveCaptureSessionAction,
   cancelCaptureSessionAction,
   getCaptureImageDownloadUrlAction,
+  listCaptureSessionPagesAction,
   continueCaptureSessionAction,
 } from "@/app/actions/invoiceCaptureDesktop";
 
@@ -62,6 +63,7 @@ describe("Phone Capture desktop actions -- authorization gate", () => {
     { name: "getActiveCaptureSessionAction", call: () => getActiveCaptureSessionAction() },
     { name: "cancelCaptureSessionAction", call: () => cancelCaptureSessionAction("session-1") },
     { name: "getCaptureImageDownloadUrlAction", call: () => getCaptureImageDownloadUrlAction("session-1") },
+    { name: "listCaptureSessionPagesAction", call: () => listCaptureSessionPagesAction("session-1") },
     { name: "continueCaptureSessionAction", call: () => continueCaptureSessionAction("session-1", "doc-1") },
   ];
 
@@ -123,6 +125,43 @@ describe("getCaptureSessionStatusAction / getActiveCaptureSessionAction -- alway
     expect(rpcMock).toHaveBeenCalledWith("get_active_invoice_capture_session_for_manager", {
       p_organization_id: "org-1",
       p_created_by_app_user_id: "user-1",
+    });
+  });
+});
+
+describe("listCaptureSessionPagesAction -- multi-page (100127), always scoped to the caller's own org", () => {
+  it("passes the authenticated organizationId to list_invoice_capture_pages_desktop, never a client-supplied one", async () => {
+    rpcMock.mockResolvedValue({ data: [{ out_page_number: 1, out_storage_path: "org/org-1/captures/session-1/page-1.jpg", out_content_type: "image/jpeg" }], error: null });
+    await listCaptureSessionPagesAction("session-1");
+    expect(rpcMock).toHaveBeenCalledWith("list_invoice_capture_pages_desktop", { p_organization_id: "org-1", p_session_id: "session-1" });
+  });
+
+  it("a session belonging to a different organization returns no pages, never leaking cross-org data -- the RPC itself is the org boundary, and this action never widens it", async () => {
+    // Mirrors list_invoice_capture_pages_desktop's own WHERE organization_id
+    // = p_organization_id filter: a session id from another org simply
+    // yields zero rows here, exactly like any other org-scoped read in
+    // this codebase (e.g. getCaptureImageDownloadUrlAction's own
+    // .eq("organization_id", ...) pattern).
+    rpcMock.mockResolvedValue({ data: [], error: null });
+    const result = await listCaptureSessionPagesAction("session-in-another-org");
+    expect(result).toEqual({ ok: true, pages: [] });
+  });
+
+  it("returns pages in order with a signed URL and content type for each", async () => {
+    rpcMock.mockResolvedValue({
+      data: [
+        { out_page_number: 1, out_storage_path: "org/org-1/captures/session-1/page-1.jpg", out_content_type: "image/jpeg" },
+        { out_page_number: 2, out_storage_path: "org/org-1/captures/session-1/page-2.jpg", out_content_type: "image/jpeg" },
+      ],
+      error: null,
+    });
+    const result = await listCaptureSessionPagesAction("session-1");
+    expect(result).toEqual({
+      ok: true,
+      pages: [
+        { pageNumber: 1, downloadUrl: "https://example.test/signed", contentType: "image/jpeg" },
+        { pageNumber: 2, downloadUrl: "https://example.test/signed", contentType: "image/jpeg" },
+      ],
     });
   });
 });

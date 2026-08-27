@@ -274,6 +274,7 @@ export interface ApproveNewItemClassificationInput {
   fixedConversionFactor?: number | null;
   secondaryUsageUnitCode?: string | null;
   secondaryConversionFactor?: number | null;
+  secondaryRequiresMeasurement?: boolean;
 }
 
 export type ApproveClassificationResult =
@@ -309,6 +310,7 @@ export async function approveNewItemClassification(input: ApproveNewItemClassifi
       fixedConversionFactor: input.fixedConversionFactor,
       secondaryUsageUnitCode: input.secondaryUsageUnitCode,
       secondaryConversionFactor: input.secondaryConversionFactor,
+      secondaryRequiresMeasurement: input.secondaryRequiresMeasurement,
     });
     return { ok: true, inventoryItemId: result.inventoryItemId };
   } catch (err) {

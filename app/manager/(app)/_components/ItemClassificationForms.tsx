@@ -6,6 +6,13 @@ import type { InventoryItemSummary, CategorySummary } from "@/app/actions/itemMa
 import type { UnitSummary } from "@/app/actions/itemMaster";
 import { computeNewItemVerificationStatus } from "@/app/lib/itemMaster/newItemVerification";
 import { flattenSpendCategoryPaths, type SpendCategoryPath } from "@/app/lib/itemMaster/spendCategoryPaths";
+import {
+  categoriesMatch,
+  derivePurchaseSummary,
+  isReceivingBehaviorInferred,
+  shouldShowDispositionControl,
+  shouldAutoExpandAdvancedSettings,
+} from "@/app/lib/itemMaster/simplifiedVerificationView";
 
 export type { SpendCategoryPath };
 export { flattenSpendCategoryPaths };
@@ -214,6 +221,18 @@ function ReviewSectionHeading({ children }: { children: ReactNode }) {
   return <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{children}</p>;
 }
 
+/** Small "Edit" affordance shown next to a simplified summary row --
+ * opens Advanced Settings (the single place raw/technical controls
+ * render) rather than a second, separately-bound copy of the same
+ * inputs. */
+function EditLink({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className="text-[11px] font-medium text-zinc-500 hover:text-zinc-300">
+      Edit
+    </button>
+  );
+}
+
 /** A human-readable, always-derived (never separately stored) correlation
  * line -- "1 CASE = 24 EACH" -- used both inline next to the field that
  * produced it and again in the Correlation Review section so the manager
@@ -278,8 +297,25 @@ export function NewItemApprovalForm({
   // one-unit item is the default, fully valid state).
   const [secondaryUsageUnitCode, setSecondaryUsageUnitCode] = useState("");
   const [secondaryConversionFactor, setSecondaryConversionFactor] = useState("");
+  // Weigh-at-kiosk restoration (20260811100126): the secondary usage
+  // unit's mode. Defaults to "fixed" -- the manager must explicitly pick
+  // "Measure at withdrawal," it is never auto-selected.
+  const [secondaryMode, setSecondaryMode] = useState<"fixed" | "measured">("fixed");
+  // "+ Add another withdrawal option" -- the secondary-unit composer is
+  // hidden by default (a one-unit item is the common case) and revealed
+  // either by this explicit action or by opening Advanced Settings below;
+  // it is never re-hidden automatically once a secondary unit is chosen.
+  const [secondaryComposerOpen, setSecondaryComposerOpen] = useState(false);
+  // Advanced Settings: closed by default; `null` means "the manager
+  // hasn't explicitly toggled it yet," in which case it reactively
+  // auto-expands for the cases below. Once the manager clicks the
+  // toggle, their explicit choice wins from then on.
+  const [advancedManuallyOpen, setAdvancedManuallyOpen] = useState<boolean | null>(null);
+  const [categoryDiscrepancyAcknowledged, setCategoryDiscrepancyAcknowledged] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const secondaryRequiresMeasurement = secondaryMode === "measured";
 
   const { missing, canVerify, usesDistinctPurchaseUnit, needsConversionFactor, hasSecondaryUsageUnit, sameCodeDifferentFactorWarning } = computeNewItemVerificationStatus({
     name,
@@ -292,10 +328,52 @@ export function NewItemApprovalForm({
     fixedConversionFactor,
     secondaryUsageUnitCode,
     secondaryConversionFactor,
+    secondaryRequiresMeasurement,
   });
 
+  const categoryName = categories.find((c) => c.id === categoryId)?.name ?? null;
+  const spendPath = spendPaths.find((s) => s.id === spendCategoryId)?.path ?? null;
+  const categoriesDoMatch = disposition === "INVENTORY" && categoriesMatch(categoryName, spendPath);
+  const categoryConfirmationNeeded = disposition === "INVENTORY" && categoryId !== "" && spendCategoryId !== "" && !categoriesDoMatch;
+
+  const baseUnitName = units.find((u) => u.code === baseUnitCode)?.name ?? null;
+  const purchaseUnitName = units.find((u) => u.code === purchaseUnitCode)?.name ?? null;
+  const receivingBehaviorInferred = isReceivingBehaviorInferred({
+    baseUnitCode: baseUnitCode || null,
+    purchaseUnitCode: purchaseUnitCode || null,
+    receivingBehavior,
+    fixedConversionFactor: fixedConversionFactor.trim() !== "" ? Number(fixedConversionFactor) : null,
+  });
+  const purchaseSummary = derivePurchaseSummary({
+    baseUnitCode: baseUnitCode || null,
+    baseUnitName,
+    purchaseUnitCode: purchaseUnitCode || null,
+    purchaseUnitName,
+    receivingBehavior: receivingBehavior as "SAME_UNIT" | "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY",
+    fixedConversionFactor: fixedConversionFactor.trim() !== "" ? Number(fixedConversionFactor) : null,
+  });
+
+  const showDispositionControl = shouldShowDispositionControl(confidence, disposition);
+  const autoExpandAdvanced = shouldAutoExpandAdvancedSettings({
+    confidence,
+    categoriesMatch: disposition === "INVENTORY" ? categoriesDoMatch : true,
+    hasSecondaryUsageUnit,
+    receivingBehaviorInferred,
+    disposition,
+  });
+  const advancedOpen = advancedManuallyOpen ?? autoExpandAdvanced;
+  const showSecondaryControls = secondaryComposerOpen || advancedOpen;
+  const showCategoryRawControls = categoryConfirmationNeeded || advancedOpen;
+  const showPurchaseRawControls = purchaseSummary === null || !receivingBehaviorInferred || advancedOpen;
+
+  function openAdvanced() {
+    setAdvancedManuallyOpen(true);
+  }
+
+  const canVerifyOverall = canVerify && (!categoryConfirmationNeeded || categoryDiscrepancyAcknowledged);
+
   async function handleVerify() {
-    if (!canVerify) return;
+    if (!canVerifyOverall) return;
     setPending(true);
     setError(null);
     const result = await approveNewItemClassification({
@@ -311,7 +389,8 @@ export function NewItemApprovalForm({
       receivingBehavior: usesDistinctPurchaseUnit ? receivingBehavior : null,
       fixedConversionFactor: needsConversionFactor ? Number(fixedConversionFactor) : null,
       secondaryUsageUnitCode: hasSecondaryUsageUnit ? secondaryUsageUnitCode : null,
-      secondaryConversionFactor: hasSecondaryUsageUnit ? Number(secondaryConversionFactor) : null,
+      secondaryConversionFactor: hasSecondaryUsageUnit && !secondaryRequiresMeasurement ? Number(secondaryConversionFactor) : null,
+      secondaryRequiresMeasurement: hasSecondaryUsageUnit ? secondaryRequiresMeasurement : false,
     });
     if (!result.ok) {
       setPending(false);
@@ -321,7 +400,6 @@ export function NewItemApprovalForm({
     onVerified();
   }
 
-  const nameStatus = fieldStatus(true, name !== defaults.name);
   const dispositionStatus = fieldStatus(true, disposition !== defaults.disposition);
   const categoryStatus = fieldStatus(defaults.categoryId !== null, categoryId !== (defaults.categoryId ?? ""));
   const spendCategoryStatus = fieldStatus(defaults.spendCategoryId !== null, spendCategoryId !== (defaults.spendCategoryId ?? ""));
@@ -333,26 +411,26 @@ export function NewItemApprovalForm({
     <div className="flex flex-col gap-4 rounded-xl border border-amber-800 bg-amber-950/10 p-4">
       <div className="flex items-center justify-between">
         <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">AI Recommends</p>
-        {confidence !== null ? <p className="text-xs text-zinc-500">Confidence: {Math.round(confidence * 100)}%</p> : null}
+        {confidence !== null ? <p className="text-[10px] text-zinc-600">Confidence: {Math.round(confidence * 100)}%</p> : null}
       </div>
 
-      {/* ---- 1. Inventory identity ---------------------------------- */}
+      {/* ---- 1. Item identity ---------------------------------------- */}
       <div className="flex flex-col gap-3">
-        <ReviewSectionHeading>Inventory identity</ReviewSectionHeading>
+        <ReviewSectionHeading>Item identity</ReviewSectionHeading>
         <label className="flex flex-col gap-1 text-xs text-zinc-400">
-          <span className="flex items-center gap-2">
-            Item name
-            {nameStatus === "ai" ? <AiBadge /> : null}
-          </span>
+          Item name
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
             className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 ${!name.trim() ? "border-red-700" : "border-zinc-700"}`}
           />
-          {nameStatus === "changed" ? <ChangedNote /> : null}
         </label>
 
-        <div className="flex flex-wrap gap-3">
+        {/* Disposition: a simple label for the common (confident,
+            inventory) case; the raw dropdown only when the AI is
+            uncertain, the item is already non-inventory, or Advanced
+            Settings is open. */}
+        {showDispositionControl || advancedOpen ? (
           <label className="flex flex-col gap-1 text-xs text-zinc-400">
             <span className="flex items-center gap-2">
               Disposition
@@ -366,30 +444,82 @@ export function NewItemApprovalForm({
               <option value="INVENTORY">Inventory</option>
               <option value="NON_INVENTORY">Non-inventory</option>
             </select>
-            {dispositionStatus === "changed" ? <ChangedNote /> : null}
           </label>
-          {disposition === "INVENTORY" ? (
-            <label className="flex flex-col gap-1 text-xs text-zinc-400">
-              <span className="flex items-center gap-2">
-                Inventory category
-                {categoryStatus === "ai" ? <AiBadge /> : null}
-              </span>
-              <select
-                value={categoryId}
-                onChange={(e) => setCategoryId(e.target.value)}
-                className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 ${!categoryId ? "border-red-700" : "border-zinc-700"}`}
-              >
-                <option value="">Select category…</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-              {categoryStatus === "changed" ? <ChangedNote /> : null}
-              <CategoryNotListedHint onRefresh={onCategoryCreated} />
-            </label>
-          ) : null}
+        ) : (
+          <p className="text-xs text-zinc-400">
+            <span className="text-zinc-500">Disposition: </span>Inventory item
+          </p>
+        )}
+
+        {/* Category: one merged summary when the inventory category and
+            spend category resolve to the same plain-language name;
+            otherwise both, distinctly labeled, with an explicit
+            confirmation required before verifying. */}
+        {disposition === "INVENTORY" && categoriesDoMatch && !showCategoryRawControls ? (
+          <div className="flex items-center justify-between gap-2 text-xs text-zinc-400">
+            <span>
+              <span className="text-zinc-500">Category: </span>
+              {categoryName}
+            </span>
+            <EditLink onClick={openAdvanced} />
+          </div>
+        ) : disposition === "INVENTORY" ? (
+          <div className="flex flex-col gap-2">
+            {categoryConfirmationNeeded ? (
+              <div className="flex flex-col gap-1.5 rounded-lg border border-amber-800 bg-amber-950/20 px-3 py-2">
+                <p className="text-[11px] text-amber-300">
+                  Inventory category (&ldquo;{categoryName}&rdquo;) and spend category (&ldquo;{spendPath}&rdquo;) are different -- confirm this is intentional.
+                </p>
+                <label className="flex items-center gap-2 text-[11px] text-zinc-300">
+                  <input type="checkbox" checked={categoryDiscrepancyAcknowledged} onChange={(e) => setCategoryDiscrepancyAcknowledged(e.target.checked)} />
+                  These are intentionally different categories
+                </label>
+              </div>
+            ) : null}
+            <div className="flex flex-wrap gap-3">
+              <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                <span className="flex items-center gap-2">
+                  Inventory category
+                  {categoryStatus === "ai" ? <AiBadge /> : null}
+                </span>
+                <select
+                  value={categoryId}
+                  onChange={(e) => setCategoryId(e.target.value)}
+                  className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 ${!categoryId ? "border-red-700" : "border-zinc-700"}`}
+                >
+                  <option value="">Select category…</option>
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                {categoryStatus === "changed" ? <ChangedNote /> : null}
+                <CategoryNotListedHint onRefresh={onCategoryCreated} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                <span className="flex items-center gap-2">
+                  Spend category
+                  {spendCategoryStatus === "ai" ? <AiBadge /> : null}
+                </span>
+                <select
+                  value={spendCategoryId}
+                  onChange={(e) => setSpendCategoryId(e.target.value)}
+                  className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 ${!spendCategoryId ? "border-red-700" : "border-zinc-700"}`}
+                >
+                  <option value="">Select category…</option>
+                  {spendPaths.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.path}
+                    </option>
+                  ))}
+                </select>
+                {spendCategoryStatus === "changed" ? <ChangedNote /> : null}
+                <CategoryNotListedHint onRefresh={onSpendCategoryCreated} />
+              </label>
+            </div>
+          </div>
+        ) : (
           <label className="flex flex-col gap-1 text-xs text-zinc-400">
             <span className="flex items-center gap-2">
               Spend category
@@ -407,174 +537,232 @@ export function NewItemApprovalForm({
                 </option>
               ))}
             </select>
-            {spendCategoryStatus === "changed" ? <ChangedNote /> : null}
             <CategoryNotListedHint onRefresh={onSpendCategoryCreated} />
           </label>
-        </div>
+        )}
       </div>
 
       {disposition === "INVENTORY" ? (
         <>
-          {/* ---- 2. How this item will be used --------------------- */}
+          {/* ---- 2. How employees use it ----------------------------- */}
           <div className="flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
-            <ReviewSectionHeading>How this item will be used</ReviewSectionHeading>
+            <ReviewSectionHeading>Employees withdraw this item as</ReviewSectionHeading>
             <div className="flex flex-wrap items-start gap-3">
-              <label className="flex flex-col gap-1 text-xs text-zinc-400">
-                <span className="flex items-center gap-2">
-                  Primary kiosk usage unit
-                  {baseUnitStatus === "ai" ? <AiBadge /> : null}
-                </span>
-                <select
-                  value={baseUnitCode}
-                  onChange={(e) => setBaseUnitCode(e.target.value)}
-                  className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 ${!baseUnitCode ? "border-red-700" : "border-zinc-700"}`}
-                >
-                  <option value="">Select unit…</option>
-                  {units.map((u) => (
-                    <option key={u.code} value={u.code}>
-                      {u.name} ({u.code})
-                    </option>
-                  ))}
-                </select>
-                {baseUnitStatus === "changed" ? <ChangedNote /> : null}
-                <p className="text-[11px] text-zinc-500">This is also the item&apos;s base inventory unit -- always required.</p>
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-zinc-400">
-                Secondary kiosk usage unit (optional)
-                <select
-                  value={secondaryUsageUnitCode}
-                  onChange={(e) => setSecondaryUsageUnitCode(e.target.value)}
-                  className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
-                >
-                  <option value="">None -- one usage unit only</option>
-                  {units
-                    .filter((u) => u.code !== baseUnitCode)
-                    .map((u) => (
+              {advancedOpen ? (
+                <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                  <span className="flex items-center gap-2">
+                    Employees withdraw this item as
+                    {baseUnitStatus === "ai" ? <AiBadge /> : null}
+                  </span>
+                  <select
+                    value={baseUnitCode}
+                    onChange={(e) => setBaseUnitCode(e.target.value)}
+                    className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 ${!baseUnitCode ? "border-red-700" : "border-zinc-700"}`}
+                  >
+                    <option value="">Select unit…</option>
+                    {units.map((u) => (
                       <option key={u.code} value={u.code}>
                         {u.name} ({u.code})
                       </option>
                     ))}
-                </select>
-              </label>
-              {hasSecondaryUsageUnit ? (
-                <label className="flex flex-col gap-1 text-xs text-zinc-400">
-                  Conversion factor
-                  <input
-                    type="number"
-                    value={secondaryConversionFactor}
-                    onChange={(e) => setSecondaryConversionFactor(e.target.value)}
-                    className={`w-24 rounded-lg border bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 ${
-                      !secondaryConversionFactor.trim() || Number(secondaryConversionFactor) <= 0 ? "border-red-700" : "border-zinc-700"
-                    }`}
-                  />
+                  </select>
+                  <p className="text-[11px] text-zinc-500">This is also the item&apos;s base inventory unit -- always required.</p>
                 </label>
-              ) : null}
+              ) : (
+                <p className="text-xs text-zinc-400">{baseUnitName ?? "Not selected"}</p>
+              )}
             </div>
-            {hasSecondaryUsageUnit ? (
-              <EquationLine contextLabel="Kiosk" factor={secondaryConversionFactor} fromUnit={secondaryUsageUnitCode} toUnit={baseUnitCode} />
-            ) : null}
-          </div>
 
-          {/* ---- 3. How this vendor sells it ------------------------ */}
-          <div className="flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
-            <ReviewSectionHeading>How this vendor sells it</ReviewSectionHeading>
-            <div className="flex flex-wrap items-start gap-3">
-              <label className="flex flex-col gap-1 text-xs text-zinc-400">
-                <span className="flex items-center gap-2">
-                  Vendor purchase unit
-                  {purchaseUnitStatus === "ai" ? <AiBadge /> : null}
-                </span>
-                <select value={purchaseUnitCode} onChange={(e) => setPurchaseUnitCode(e.target.value)} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100">
-                  {/* An empty selection only genuinely means "same as base unit" once a
-                      base unit is actually resolved -- otherwise there is nothing yet
-                      to be the same as, so this must never silently read as a valid
-                      resolved SAME_UNIT proposal. */}
-                  <option value="">{baseUnitCode ? "Same as base unit" : "Needs selection"}</option>
-                  {units.map((u) => (
-                    <option key={u.code} value={u.code}>
-                      {u.name} ({u.code})
-                    </option>
-                  ))}
-                </select>
-                {purchaseUnitStatus === "changed" ? <ChangedNote /> : null}
-              </label>
-              {usesDistinctPurchaseUnit ? (
-                <>
+            {!showSecondaryControls ? (
+              <button type="button" onClick={() => setSecondaryComposerOpen(true)} className="self-start text-[11px] font-medium text-amber-300 hover:text-amber-200">
+                + Add another withdrawal option
+              </button>
+            ) : (
+              <div className="flex flex-col gap-2 rounded-lg border border-zinc-800 bg-zinc-900 p-2.5">
+                <div className="flex flex-wrap items-start gap-3">
                   <label className="flex flex-col gap-1 text-xs text-zinc-400">
-                    <span className="flex items-center gap-2">
-                      Receiving behavior
-                      {receivingBehaviorStatus === "ai" ? <AiBadge /> : null}
-                    </span>
+                    Secondary withdrawal unit
                     <select
-                      value={receivingBehavior}
-                      onChange={(e) => setReceivingBehavior(e.target.value as NewItemApprovalDefaults["receivingBehavior"] & string)}
+                      value={secondaryUsageUnitCode}
+                      onChange={(e) => setSecondaryUsageUnitCode(e.target.value)}
                       className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
                     >
-                      <option value="FIXED_CONVERSION">Fixed conversion (e.g. 1 case = 24)</option>
-                      <option value="MEASURE_EACH_DELIVERY">Measure each delivery (weight/volume varies)</option>
-                      <option value="COUNT_EACH_DELIVERY">Count each delivery (count varies)</option>
+                      <option value="">None -- one usage unit only</option>
+                      {units
+                        .filter((u) => u.code !== baseUnitCode)
+                        .map((u) => (
+                          <option key={u.code} value={u.code}>
+                            {u.name} ({u.code})
+                          </option>
+                        ))}
                     </select>
-                    {receivingBehaviorStatus === "changed" ? <ChangedNote /> : null}
                   </label>
-                  {receivingBehavior === "FIXED_CONVERSION" ? (
+                  {hasSecondaryUsageUnit ? (
+                    <div className="flex flex-col gap-1 text-xs text-zinc-400">
+                      <span>Mode</span>
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setSecondaryMode("fixed")}
+                          className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                            secondaryMode === "fixed" ? "bg-amber-400 text-zinc-950" : "border border-zinc-700 text-zinc-400"
+                          }`}
+                        >
+                          Fixed conversion
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSecondaryMode("measured")}
+                          className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                            secondaryMode === "measured" ? "bg-sky-400 text-zinc-950" : "border border-zinc-700 text-zinc-400"
+                          }`}
+                        >
+                          Measure at withdrawal
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {hasSecondaryUsageUnit && !secondaryRequiresMeasurement ? (
                     <label className="flex flex-col gap-1 text-xs text-zinc-400">
-                      Fixed conversion factor
+                      Conversion factor
                       <input
                         type="number"
-                        value={fixedConversionFactor}
-                        onChange={(e) => setFixedConversionFactor(e.target.value)}
+                        value={secondaryConversionFactor}
+                        onChange={(e) => setSecondaryConversionFactor(e.target.value)}
                         className={`w-24 rounded-lg border bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 ${
-                          !fixedConversionFactor.trim() || Number(fixedConversionFactor) <= 0 ? "border-red-700" : "border-zinc-700"
+                          !secondaryConversionFactor.trim() || Number(secondaryConversionFactor) <= 0 ? "border-red-700" : "border-zinc-700"
                         }`}
                       />
                     </label>
                   ) : null}
-                </>
-              ) : null}
-            </div>
-            {needsConversionFactor ? <EquationLine contextLabel="Vendor" factor={fixedConversionFactor} fromUnit={purchaseUnitCode} toUnit={baseUnitCode} /> : null}
+                </div>
+                {hasSecondaryUsageUnit && secondaryRequiresMeasurement ? (
+                  <p className="text-[11px] text-sky-300">Employees must enter the actual measured {baseUnitName ?? "base unit"} quantity every time -- no conversion factor is used.</p>
+                ) : null}
+                {hasSecondaryUsageUnit && !secondaryRequiresMeasurement ? (
+                  <EquationLine contextLabel="Kiosk" factor={secondaryConversionFactor} fromUnit={secondaryUsageUnitCode} toUnit={baseUnitCode} />
+                ) : null}
+                {sameCodeDifferentFactorWarning ? (
+                  <div className="mt-1 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-800 bg-amber-950/30 px-3 py-2">
+                    <p className="text-[11px] text-amber-300">
+                      {purchaseUnitCode} means different quantities here: the vendor&apos;s {purchaseUnitCode} converts at {fixedConversionFactor}, but the kiosk&apos;s {purchaseUnitCode} converts
+                      at {secondaryConversionFactor}. This is allowed (a vendor case and a kiosk case aren&apos;t required to match) -- confirm this is intentional, or make them the same value
+                      below.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setSecondaryConversionFactor(fixedConversionFactor)}
+                      className="shrink-0 whitespace-nowrap rounded-full border border-amber-700 px-2.5 py-1 text-[11px] font-medium text-amber-300 hover:bg-amber-900/30"
+                    >
+                      Use vendor&apos;s value ({fixedConversionFactor})
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
           </div>
 
-          {/* ---- 4. Correlation review ------------------------------ */}
-          {hasSecondaryUsageUnit || needsConversionFactor ? (
-            <div className="flex flex-col gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
-              <ReviewSectionHeading>Correlation review</ReviewSectionHeading>
-              {needsConversionFactor ? <EquationLine contextLabel="Vendor purchase unit" factor={fixedConversionFactor} fromUnit={purchaseUnitCode} toUnit={baseUnitCode} /> : null}
-              {hasSecondaryUsageUnit ? <EquationLine contextLabel="Kiosk secondary usage unit" factor={secondaryConversionFactor} fromUnit={secondaryUsageUnitCode} toUnit={baseUnitCode} /> : null}
-              {sameCodeDifferentFactorWarning ? (
-                <div className="mt-1 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-800 bg-amber-950/30 px-3 py-2">
-                  <p className="text-[11px] text-amber-300">
-                    {purchaseUnitCode} means different quantities here: the vendor&apos;s {purchaseUnitCode} converts at {fixedConversionFactor}, but the kiosk&apos;s {purchaseUnitCode} converts at{" "}
-                    {secondaryConversionFactor}. This is allowed (a vendor case and a kiosk case aren&apos;t required to match) -- confirm this is intentional, or make them the same value below.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setSecondaryConversionFactor(fixedConversionFactor)}
-                    className="shrink-0 whitespace-nowrap rounded-full border border-amber-700 px-2.5 py-1 text-[11px] font-medium text-amber-300 hover:bg-amber-900/30"
-                  >
-                    Use vendor&apos;s value ({fixedConversionFactor})
-                  </button>
+          {/* ---- 3. How it is purchased ------------------------------ */}
+          <div className="flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+            <ReviewSectionHeading>How it is purchased</ReviewSectionHeading>
+            {!showPurchaseRawControls && purchaseSummary ? (
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-zinc-400">
+                  <p>{purchaseSummary.headline}</p>
+                  {purchaseSummary.detail ? <p className="text-[11px] text-zinc-500">{purchaseSummary.detail}</p> : null}
                 </div>
-              ) : null}
-            </div>
-          ) : null}
+                <EditLink onClick={openAdvanced} />
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-start gap-3">
+                  <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                    <span className="flex items-center gap-2">
+                      Vendor purchase unit
+                      {purchaseUnitStatus === "ai" ? <AiBadge /> : null}
+                    </span>
+                    <select
+                      value={purchaseUnitCode}
+                      onChange={(e) => setPurchaseUnitCode(e.target.value)}
+                      className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
+                    >
+                      {/* An empty selection only genuinely means "same as base unit" once a
+                          base unit is actually resolved -- otherwise there is nothing yet
+                          to be the same as, so this must never silently read as a valid
+                          resolved SAME_UNIT proposal. */}
+                      <option value="">{baseUnitCode ? "Same as base unit" : "Needs selection"}</option>
+                      {units.map((u) => (
+                        <option key={u.code} value={u.code}>
+                          {u.name} ({u.code})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {usesDistinctPurchaseUnit ? (
+                    <>
+                      <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                        <span className="flex items-center gap-2">
+                          Receiving behavior
+                          {receivingBehaviorStatus === "ai" ? <AiBadge /> : null}
+                        </span>
+                        <select
+                          value={receivingBehavior}
+                          onChange={(e) => setReceivingBehavior(e.target.value as NewItemApprovalDefaults["receivingBehavior"] & string)}
+                          className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
+                        >
+                          <option value="FIXED_CONVERSION">Fixed conversion (e.g. 1 case = 24)</option>
+                          <option value="MEASURE_EACH_DELIVERY">Measure each delivery (weight/volume varies)</option>
+                          <option value="COUNT_EACH_DELIVERY">Count each delivery (count varies)</option>
+                        </select>
+                      </label>
+                      {receivingBehavior === "FIXED_CONVERSION" ? (
+                        <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                          Fixed conversion factor
+                          <input
+                            type="number"
+                            value={fixedConversionFactor}
+                            onChange={(e) => setFixedConversionFactor(e.target.value)}
+                            className={`w-24 rounded-lg border bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 ${
+                              !fixedConversionFactor.trim() || Number(fixedConversionFactor) <= 0 ? "border-red-700" : "border-zinc-700"
+                            }`}
+                          />
+                        </label>
+                      ) : null}
+                    </>
+                  ) : null}
+                </div>
+                {needsConversionFactor ? <EquationLine contextLabel="Vendor" factor={fixedConversionFactor} fromUnit={purchaseUnitCode} toUnit={baseUnitCode} /> : null}
+              </div>
+            )}
+          </div>
+
+          {/* ---- Advanced settings ----------------------------------- */}
+          <div className="flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => setAdvancedManuallyOpen(!advancedOpen)}
+              className="self-start text-[11px] font-medium text-zinc-500 hover:text-zinc-300"
+            >
+              {advancedOpen ? "▾" : "▸"} Advanced settings
+            </button>
+          </div>
         </>
       ) : null}
 
-      {/* ---- 5. Verification ------------------------------------------ */}
+      {/* ---- Verification ------------------------------------------ */}
       <div className="flex flex-col gap-2">
-        <ReviewSectionHeading>Verification</ReviewSectionHeading>
         {missing.length > 0 ? (
           <p className="text-xs text-amber-400">
             {missing.length} field{missing.length === 1 ? "" : "s"} need{missing.length === 1 ? "s" : ""} your input before this item can be verified: {missing.join(", ")}.
           </p>
         ) : null}
+        {categoryConfirmationNeeded && !categoryDiscrepancyAcknowledged ? <p className="text-xs text-amber-400">Confirm the category difference above before verifying.</p> : null}
         {error ? <p className="text-sm text-red-400">{error}</p> : null}
         <div>
           <button
             type="button"
             onClick={handleVerify}
-            disabled={!canVerify || pending}
+            disabled={!canVerifyOverall || pending}
             className="rounded-full bg-emerald-500 px-6 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40"
           >
             {pending ? "Verifying item…" : "VERIFY ITEM"}
