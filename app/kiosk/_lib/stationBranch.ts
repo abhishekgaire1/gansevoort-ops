@@ -1,7 +1,10 @@
 /**
  * Pure station-branching logic (see docs/PRODUCT.md / CLAUDE.md "STATION
- * LOGIC" and the approved kiosk UI plan §2). Driven entirely by the
- * employee's station config, now returned directly by verifyPin.
+ * LOGIC" and the approved kiosk UI plan §2). Kiosk station assignment
+ * enforcement (20260811100130): driven entirely by the employee's CURRENT
+ * active station assignments, returned directly by verifyPin as
+ * StationAccess -- never a client-side guess and never "every
+ * organization station."
  *
  * The backend (record_inventory_withdrawal) is the actual authorization
  * boundary -- it independently re-validates the station on every submit
@@ -9,26 +12,19 @@
  * the employee sees; it must never be treated as a security control.
  */
 
-export interface StationConfig {
-  defaultStationId: string | null;
-  defaultStationName: string | null;
-  autoResolveStation: boolean;
-  canChangeStation: boolean;
-}
+import type { StationAccess } from "@/app/lib/auth/verifyPin";
 
 export type StationBranch =
-  | { kind: "locked"; stationId: string; stationName: string | null }
-  | { kind: "auto_changeable"; stationId: string; stationName: string | null }
+  | { kind: "blocked" }
+  | { kind: "locked"; stationId: string; stationName: string }
   | { kind: "must_pick" };
 
-export function resolveStationBranch(config: StationConfig): StationBranch {
-  if (config.autoResolveStation && config.defaultStationId) {
-    return config.canChangeStation
-      ? { kind: "auto_changeable", stationId: config.defaultStationId, stationName: config.defaultStationName }
-      : { kind: "locked", stationId: config.defaultStationId, stationName: config.defaultStationName };
+export function resolveStationBranch(stationAccess: StationAccess): StationBranch {
+  if (stationAccess.kind === "blocked") {
+    return { kind: "blocked" };
   }
-  // Also covers the defensive case of autoResolveStation=true with no
-  // defaultStationId -- shouldn't happen given the DB check constraint, but
-  // the UI should not trust a stale/cached config blindly.
+  if (stationAccess.kind === "single") {
+    return { kind: "locked", stationId: stationAccess.stationId, stationName: stationAccess.stationName };
+  }
   return { kind: "must_pick" };
 }

@@ -45,7 +45,7 @@ const adminStationsLib = vi.hoisted(() => ({
 }));
 vi.mock("@/app/lib/admin/stations", () => adminStationsLib);
 
-vi.mock("@/app/lib/kiosk/stations", () => ({ listActiveStationsForOrganization: vi.fn(async () => []) }));
+vi.mock("@/app/lib/kiosk/stations", () => ({ listAllActiveStationsForOrganization: vi.fn(async () => []) }));
 
 import {
   listAdminUsersAction,

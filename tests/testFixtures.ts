@@ -406,7 +406,7 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     employeeCode: string,
     firstName: string,
     pin: string,
-    opts: { defaultStationId: string | null; autoResolveStation: boolean; canChangeStation: boolean; isActive: boolean }
+    opts: { defaultStationId: string | null; autoResolveStation: boolean; canChangeStation: boolean; isActive: boolean; assignedStationIds?: string[] }
   ): Promise<string> {
     const employeeId = await findOrInsert(
       supabase,
@@ -423,6 +423,34 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
         status: opts.isActive ? "active" : "inactive",
       }
     );
+
+    // Kiosk station assignment enforcement (20260811100130):
+    // record_inventory_withdrawal now independently requires an ACTIVE
+    // employee_station_assignments row for the submitted station --
+    // default_station_id alone (still set above, for any code that reads
+    // it) no longer grants any withdrawal authorization at all. Every
+    // fixture employee this suite expects to successfully submit a
+    // withdrawal must have a real, active assignment row.
+    for (const stationId of opts.assignedStationIds ?? []) {
+      const { data: existingAssignment } = await supabase
+        .from("employee_station_assignments")
+        .select("id, is_active")
+        .eq("employee_id", employeeId)
+        .eq("station_id", stationId)
+        .maybeSingle();
+
+      if (existingAssignment) {
+        if (!existingAssignment.is_active) {
+          const { error } = await supabase.from("employee_station_assignments").update({ is_active: true, deactivated_at: null }).eq("id", existingAssignment.id);
+          if (error) throw error;
+        }
+      } else {
+        const { error } = await supabase
+          .from("employee_station_assignments")
+          .insert({ organization_id: organizationId, employee_id: employeeId, station_id: stationId, is_active: true });
+        if (error && error.code !== "23505") throw error;
+      }
+    }
 
     const existingAppUser = await findExisting(supabase, "app_users", { employee_id: employeeId });
     if (existingAppUser) return existingAppUser;
@@ -453,6 +481,9 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     autoResolveStation: true,
     canChangeStation: false,
     isActive: true,
+    // Kiosk station assignment enforcement (20260811100130): exactly one
+    // active assignment -- the "single" StationAccess / "locked" branch.
+    assignedStationIds: [stationId],
   });
 
   const changeableEmployeePin = "2222";
@@ -461,6 +492,11 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     autoResolveStation: true,
     canChangeStation: true,
     isActive: true,
+    // Two active assignments -- the "multiple" StationAccess / "must_pick"
+    // branch under the new model (can freely withdraw at either); used
+    // pervasively across this suite as "the normal acting employee" at
+    // fx.stationId, so it must remain authorized there.
+    assignedStationIds: [stationId, otherStationId],
   });
 
   const inactiveEmployeeAppUserId = await ensureEmployeeAppUser("TEST-RPC-INACTIVE", "TestInactive", "3333", {
@@ -476,6 +512,10 @@ export async function setupRpcTestFixtures(): Promise<RpcTestFixtures> {
     autoResolveStation: false,
     canChangeStation: false,
     isActive: true,
+    // Deliberately zero active assignments -- the "blocked" StationAccess
+    // branch. Never used to submit a real withdrawal in this suite (only
+    // as a distinct actor id in idempotency/reviewer tests) -- if a new
+    // test needs it to actually withdraw, assign it a station explicitly.
   });
 
   // Run-unique (see the module comment above) -- every call to

@@ -180,6 +180,22 @@ async function ensureEmployee(
     console.log(`  created employee: ${spec.firstName} ${spec.lastName} (${spec.employeeCode})`);
   }
 
+  // Kiosk station assignment enforcement (20260811100130): default_station_id
+  // alone no longer grants kiosk station access at all -- this seed script
+  // inserts employees directly (not through create_employee, the only RPC
+  // path that also writes an assignment), so it must seed
+  // employee_station_assignments itself or every seeded employee would be
+  // blocked at the kiosk despite having a configured default station.
+  if (defaultStationId) {
+    const { error: assignmentError } = await supabase
+      .from("employee_station_assignments")
+      .upsert(
+        { organization_id: organizationId, employee_id: employeeId, station_id: defaultStationId, is_active: true },
+        { onConflict: "employee_id,station_id" }
+      );
+    if (assignmentError) throw assignmentError;
+  }
+
   const { data: existingAppUser } = await supabase
     .from("app_users")
     .select("id")

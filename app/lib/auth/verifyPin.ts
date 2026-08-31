@@ -8,6 +8,7 @@ import {
   type PinRateLimitKeys,
 } from "@/app/lib/auth/rateLimit";
 import { issueKioskToken } from "@/app/lib/auth/kioskToken";
+import { listAssignedActiveStationsForEmployee } from "@/app/lib/kiosk/stations";
 
 /**
  * The actual PIN-verification business logic, separated from the
@@ -37,6 +38,21 @@ import { issueKioskToken } from "@/app/lib/auth/kioskToken";
  * attempt by response latency (account-enumeration timing side channel).
  */
 
+/**
+ * Kiosk station assignment enforcement (20260811100130): derived fresh, on
+ * every PIN verification, from the employee's CURRENT active station
+ * assignments -- never cached, never a stale default. "blocked" means zero
+ * active assignments (an unassigned, newly-created, or fully-unassigned
+ * employee); "single" auto-selects the one assignment with no picker;
+ * "multiple" means the kiosk must show the station picker, scoped to
+ * exactly this employee's assigned stations (never every organization
+ * station).
+ */
+export type StationAccess =
+  | { kind: "blocked" }
+  | { kind: "single"; stationId: string; stationName: string }
+  | { kind: "multiple" };
+
 export type VerifyPinResult =
   | {
       ok: true;
@@ -45,10 +61,7 @@ export type VerifyPinResult =
       employeeDisplayName: string;
       employeeFirstName: string;
       kioskToken: string;
-      defaultStationId: string | null;
-      defaultStationName: string | null;
-      autoResolveStation: boolean;
-      canChangeStation: boolean;
+      stationAccess: StationAccess;
     }
   | { ok: false; reason: "invalid_pin" | "rate_limited" };
 
@@ -114,9 +127,7 @@ export async function verifyPinCore(supabase: SupabaseClient, input: VerifyPinCo
 
   const { data: appUser, error: lookupError } = await supabase
     .from("app_users")
-    .select(
-      "id, pin_hash, employee_id, employees!inner(first_name, last_name, default_station_id, auto_resolve_station, can_change_station)"
-    )
+    .select("id, pin_hash, employee_id, employees!inner(first_name, last_name)")
     .eq("organization_id", organizationId)
     .eq("pin_lookup_hash", pinLookupHash)
     .eq("is_active", true)
@@ -188,27 +199,23 @@ export async function verifyPinCore(supabase: SupabaseClient, input: VerifyPinCo
   const employee = Array.isArray(appUser.employees) ? appUser.employees[0] : appUser.employees;
   const employeeDisplayName = employee ? `${employee.first_name} ${employee.last_name}` : "";
   const employeeFirstName = employee?.first_name ?? "";
-  const defaultStationId: string | null = employee?.default_station_id ?? null;
-  const autoResolveStation = employee?.auto_resolve_station ?? false;
-  const canChangeStation = employee?.can_change_station ?? false;
 
-  // Fetched only when there's a default station to name -- the locked and
-  // auto_changeable branches need a human-readable name to display without
-  // an extra client round trip to the station-list action; must_pick
-  // employees have no default station at all, so nothing to look up.
-  let defaultStationName: string | null = null;
-  if (defaultStationId) {
-    const { data: station, error: stationError } = await supabase
-      .from("stations")
-      .select("name")
-      .eq("id", defaultStationId)
-      .maybeSingle();
-
-    if (stationError) {
-      throw new Error(`default station lookup failed: ${stationError.message}`);
-    }
-    defaultStationName = (station?.name as string | undefined) ?? null;
-  }
+  // Kiosk station assignment enforcement (20260811100130): resolved fresh
+  // on every successful PIN verification, from the employee's CURRENT
+  // active station assignments -- so an assignment added or removed since
+  // the employee's last login always takes effect on this new login,
+  // never a stale value. Zero active assignments blocks kiosk access
+  // entirely (never falls back to "pick from every organization
+  // station"); exactly one auto-selects; two or more requires the picker,
+  // which itself only ever lists these same assigned stations (see
+  // app/actions/stations.ts).
+  const assignedStations = await listAssignedActiveStationsForEmployee(supabase, organizationId, appUser.employee_id);
+  const stationAccess: StationAccess =
+    assignedStations.length === 0
+      ? { kind: "blocked" }
+      : assignedStations.length === 1
+        ? { kind: "single", stationId: assignedStations[0]!.id, stationName: assignedStations[0]!.name }
+        : { kind: "multiple" };
 
   return {
     ok: true,
@@ -217,9 +224,6 @@ export async function verifyPinCore(supabase: SupabaseClient, input: VerifyPinCo
     employeeDisplayName,
     employeeFirstName,
     kioskToken,
-    defaultStationId,
-    defaultStationName,
-    autoResolveStation,
-    canChangeStation,
+    stationAccess,
   };
 }

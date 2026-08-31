@@ -2,18 +2,21 @@
 
 import { requireAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
-import { listActiveStationsForOrganization, type KioskStation } from "@/app/lib/kiosk/stations";
+import { listAllActiveStationsForOrganization, type KioskStation } from "@/app/lib/kiosk/stations";
 import {
   listAdminUsers,
   getAdminUser,
   createEmployee,
   updateEmployeeName,
   setEmployeeDefaultStation,
+  getEmployeeStationAssignments,
+  setEmployeeStationAssignments,
   setEmployeeStatus,
   setUserRole,
   setEmployeeKioskPin,
   AdminValidationError,
   type AdminUserSummary,
+  type EmployeeStationAssignment,
   type EmployeeStatus,
   type PrimaryRole,
 } from "@/app/lib/admin/users";
@@ -58,7 +61,7 @@ export async function listActiveStationsForAdminAction(): Promise<ListActiveStat
   const auth = await requireAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
-  const stations = await listActiveStationsForOrganization(getServiceRoleClient(), auth.manager.organizationId);
+  const stations = await listAllActiveStationsForOrganization(getServiceRoleClient(), auth.manager.organizationId);
   return { ok: true, stations };
 }
 
@@ -100,6 +103,22 @@ export async function createEmployeeAction(input: CreateEmployeeFormInput): Prom
       pin: input.pin,
       pinPepper: pinPepperEnv(),
     });
+
+    // Kiosk station assignment enforcement (20260811100130): create_employee
+    // itself only ever wrote the now-superseded default_station_id column,
+    // which the kiosk no longer reads at all -- a station picked at
+    // creation must ALSO become the employee's initial real assignment, or
+    // it would be silently ignored and the new employee would be blocked
+    // at the kiosk despite the Admin having picked a station. Best-effort:
+    // the employee record itself is already durably created above, so a
+    // failure here surfaces as a save error but never rolls back or
+    // duplicates the employee.
+    if (input.defaultStationId) {
+      await setEmployeeStationAssignments(getServiceRoleClient(), auth.manager.organizationId, auth.manager.appUserId, result.employeeId, [
+        input.defaultStationId,
+      ]);
+    }
+
     return { ok: true, employeeId: result.employeeId };
   } catch (err) {
     const mapped = toMutationResult(err);
@@ -126,6 +145,39 @@ export async function setEmployeeDefaultStationAction(employeeId: string, statio
 
   try {
     await setEmployeeDefaultStation(getServiceRoleClient(), auth.manager.organizationId, auth.manager.appUserId, employeeId, stationId);
+    return { ok: true };
+  } catch (err) {
+    return toMutationResult(err);
+  }
+}
+
+export type GetEmployeeStationAssignmentsResult = { ok: true; assignments: EmployeeStationAssignment[] } | AuthFailure;
+
+/** Kiosk station assignment enforcement (20260811100130): the employee
+ * detail page's pre-check state for the station-assignment multi-select --
+ * reads the exact same authoritative set the kiosk itself uses. */
+export async function getEmployeeStationAssignmentsAction(employeeId: string): Promise<GetEmployeeStationAssignmentsResult> {
+  const auth = await requireAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  const assignments = await getEmployeeStationAssignments(getServiceRoleClient(), auth.manager.organizationId, employeeId);
+  return { ok: true, assignments };
+}
+
+/** The ONE way an Admin's station-assignment save is persisted -- takes
+ * the complete desired set of station ids (never a single add/remove),
+ * so a save always leaves the assignment set in exactly the state the
+ * form displayed. Takes effect for the employee on their next kiosk
+ * login/session (verifyPinCore re-resolves assignments fresh every time),
+ * and immediately for any subsequent withdrawal attempt from an already-
+ * open kiosk session, since record_inventory_withdrawal independently
+ * re-checks the assignment on every submit. */
+export async function setEmployeeStationAssignmentsAction(employeeId: string, stationIds: string[]): Promise<AdminMutationResult> {
+  const auth = await requireAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  try {
+    await setEmployeeStationAssignments(getServiceRoleClient(), auth.manager.organizationId, auth.manager.appUserId, employeeId, stationIds);
     return { ok: true };
   } catch (err) {
     return toMutationResult(err);

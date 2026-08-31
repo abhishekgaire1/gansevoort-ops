@@ -62,17 +62,29 @@ const BASE_INPUT = {
   kioskTokenSecret: KIOSK_TOKEN_SECRET,
 };
 
+interface FakeAssignmentRow {
+  out_station_id: string;
+  out_station_name: string;
+  out_station_code: string | null;
+}
+
 interface FakeSupabaseOptions {
   lookupData: Record<string, unknown> | null;
   lookupError?: unknown;
-  /** Only consulted when lookupData's nested employees.default_station_id
-   * is non-null -- verifyPinCore issues a second lookup against "stations"
-   * only in that case. */
-  stationData?: Record<string, unknown> | null;
-  stationError?: unknown;
+  /** Kiosk station assignment enforcement (20260811100130): verifyPinCore
+   * now resolves station access via list_employee_station_assignments,
+   * never a "stations" table lookup. Defaults to exactly one assignment
+   * (the common case) so existing success-path tests that don't care
+   * about station branching still resolve to a "single" StationAccess
+   * without each needing to specify it. Pass an empty array for "blocked"
+   * or two-or-more rows for "multiple". */
+  assignmentRows?: FakeAssignmentRow[];
+  assignmentError?: unknown;
 }
 
-function createFakeSupabase({ lookupData, lookupError = null, stationData = null, stationError = null }: FakeSupabaseOptions) {
+const DEFAULT_ASSIGNMENT_ROWS: FakeAssignmentRow[] = [{ out_station_id: "station-1", out_station_name: "Grill", out_station_code: null }];
+
+function createFakeSupabase({ lookupData, lookupError = null, assignmentRows = DEFAULT_ASSIGNMENT_ROWS, assignmentError = null }: FakeSupabaseOptions) {
   const appUsersMaybeSingle = vi.fn().mockResolvedValue({ data: lookupData, error: lookupError });
   // Chain is .select(...).eq("organization_id", ...).eq("pin_lookup_hash", ...)
   //   .eq("is_active", true).eq("kiosk_pin_format_version", "FOUR_DIGIT")
@@ -86,26 +98,24 @@ function createFakeSupabase({ lookupData, lookupError = null, stationData = null
   const appUsersEq1 = vi.fn().mockReturnValue({ eq: appUsersEq2 });
   const appUsersSelect = vi.fn().mockReturnValue({ eq: appUsersEq1 });
 
-  const stationsMaybeSingle = vi.fn().mockResolvedValue({ data: stationData, error: stationError });
-  // Chain is .select("name").eq("id", ...).maybeSingle()
-  const stationsEq = vi.fn().mockReturnValue({ maybeSingle: stationsMaybeSingle });
-  const stationsSelect = vi.fn().mockReturnValue({ eq: stationsEq });
-
   const from = vi.fn((table: string) => {
     if (table === "app_users") return { select: appUsersSelect };
-    if (table === "stations") return { select: stationsSelect };
     throw new Error(`unexpected table: ${table}`);
   });
 
+  const rpc = vi.fn((fn: string) => {
+    if (fn === "list_employee_station_assignments") return Promise.resolve({ data: assignmentRows, error: assignmentError });
+    throw new Error(`unexpected rpc: ${fn}`);
+  });
+
   return {
-    client: { from } as unknown as SupabaseClient,
+    client: { from, rpc } as unknown as SupabaseClient,
     from,
+    rpc,
     appUsersEq3,
     appUsersEq4,
     appUsersEq5,
     appUsersEq6,
-    stationsSelect,
-    stationsEq,
   };
 }
 
@@ -330,24 +340,13 @@ describe("verifyPinCore rate-limit outcome recording", () => {
   });
 });
 
-describe("verifyPinCore station config fields on success", () => {
-  it("returns defaultStationId/defaultStationName/autoResolveStation/canChangeStation from the employee row, looking up the station name separately", async () => {
+describe("verifyPinCore stationAccess on success (kiosk station assignment enforcement, 20260811100130)", () => {
+  it("blocked: zero active station assignments -- never falls back to any station", async () => {
     const realPin = "4242";
     const realHash = await hashPinForStorage(realPin);
-    const { client, from } = createFakeSupabase({
-      lookupData: {
-        id: "app-user-1",
-        pin_hash: realHash,
-        employee_id: "emp-1",
-        employees: {
-          first_name: "Maria",
-          last_name: "G.",
-          default_station_id: "station-1",
-          auto_resolve_station: true,
-          can_change_station: false,
-        },
-      },
-      stationData: { name: "Grill" },
+    const { client, rpc } = createFakeSupabase({
+      lookupData: { id: "app-user-1", pin_hash: realHash, employee_id: "emp-1", employees: { first_name: "Sam", last_name: "T." } },
+      assignmentRows: [],
     });
 
     const result = await verifyPinCore(client, { ...BASE_INPUT, pin: realPin });
@@ -356,43 +355,46 @@ describe("verifyPinCore station config fields on success", () => {
       ok: true,
       appUserId: "app-user-1",
       organizationId: ORG_ID,
-      employeeDisplayName: "Maria G.",
-      employeeFirstName: "Maria",
+      employeeDisplayName: "Sam T.",
+      employeeFirstName: "Sam",
       kioskToken: expect.any(String),
-      defaultStationId: "station-1",
-      defaultStationName: "Grill",
-      autoResolveStation: true,
-      canChangeStation: false,
+      stationAccess: { kind: "blocked" },
     });
-    expect(from).toHaveBeenCalledWith("stations");
+    expect(rpc).toHaveBeenCalledWith("list_employee_station_assignments", { p_organization_id: ORG_ID, p_employee_id: "emp-1" });
   });
 
-  it("does not query the stations table at all when the employee has no default station (must_pick branch)", async () => {
+  it("single: exactly one active station assignment auto-selects it", async () => {
     const realPin = "4242";
     const realHash = await hashPinForStorage(realPin);
-    const { client, from } = createFakeSupabase({
-      lookupData: {
-        id: "app-user-1",
-        pin_hash: realHash,
-        employee_id: "emp-1",
-        employees: {
-          first_name: "Sam",
-          last_name: "T.",
-          default_station_id: null,
-          auto_resolve_station: false,
-          can_change_station: false,
-        },
-      },
+    const { client } = createFakeSupabase({
+      lookupData: { id: "app-user-1", pin_hash: realHash, employee_id: "emp-1", employees: { first_name: "Maria", last_name: "G." } },
+      assignmentRows: [{ out_station_id: "station-1", out_station_name: "Grill", out_station_code: null }],
     });
 
     const result = await verifyPinCore(client, { ...BASE_INPUT, pin: realPin });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.defaultStationId).toBeNull();
-      expect(result.defaultStationName).toBeNull();
-      expect(result.autoResolveStation).toBe(false);
+      expect(result.stationAccess).toEqual({ kind: "single", stationId: "station-1", stationName: "Grill" });
     }
-    expect(from).not.toHaveBeenCalledWith("stations");
+  });
+
+  it("multiple: two or more active station assignments require the picker -- the full list is fetched separately, not embedded here", async () => {
+    const realPin = "4242";
+    const realHash = await hashPinForStorage(realPin);
+    const { client } = createFakeSupabase({
+      lookupData: { id: "app-user-1", pin_hash: realHash, employee_id: "emp-1", employees: { first_name: "Jordan", last_name: "K." } },
+      assignmentRows: [
+        { out_station_id: "station-1", out_station_name: "Grill", out_station_code: null },
+        { out_station_id: "station-2", out_station_name: "Prep", out_station_code: null },
+      ],
+    });
+
+    const result = await verifyPinCore(client, { ...BASE_INPUT, pin: realPin });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.stationAccess).toEqual({ kind: "multiple" });
+    }
   });
 });

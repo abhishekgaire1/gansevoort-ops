@@ -4,13 +4,6 @@ import type { KioskUsageUnits } from "@/app/actions/withdrawalUnit";
 
 // CI-safe: pure reducer logic, no network, no database.
 
-const STATION_CONFIG = {
-  defaultStationId: "station-1",
-  defaultStationName: "Grill",
-  autoResolveStation: true,
-  canChangeStation: false,
-};
-
 // A one-unit item's usage units (primary only, no selector needed) --
 // stands in for the loader's result under the purchase-versus-usage unit
 // model (20260811100119/100120).
@@ -61,7 +54,7 @@ function pinVerifiedState(overrides: Partial<KioskState> = {}): KioskState {
     kioskToken: "token-1",
     employeeDisplayName: "Maria G.",
     employeeFirstName: "Maria",
-    stationConfig: STATION_CONFIG,
+    canChangeStation: false,
     nextStep: "station_resolving",
     autoSelectedStationId: "station-1",
     autoSelectedStationName: "Grill",
@@ -301,7 +294,7 @@ describe("kioskReducer", () => {
     expect(state.kioskToken).toBeNull();
     expect(state.employeeDisplayName).toBeNull();
     expect(state.employeeFirstName).toBeNull();
-    expect(state.stationConfig).toBeNull();
+    expect(state.canChangeStation).toBe(false);
     expect(state.selectedStationId).toBeNull();
     expect(state.selectedStationName).toBeNull();
     expect(state.selectedItem).toBeNull();

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   updateEmployeeNameAction,
-  setEmployeeDefaultStationAction,
+  setEmployeeStationAssignmentsAction,
   setEmployeeStatusAction,
   setUserRoleAction,
   resetEmployeeKioskPinAction,
@@ -33,18 +33,26 @@ const ROLE_LABEL: Record<PrimaryRole, string> = { employee: "Employee", manager:
 export function AdminUserDetailView({
   user,
   stations,
+  assignedStationIds,
   isSelf,
   authAccount,
 }: {
   user: AdminUserSummary;
   stations: KioskStation[];
+  /** Kiosk station assignment enforcement (20260811100130): the
+   * employee's CURRENT active station assignments -- the exact set the
+   * kiosk itself would show/authorize. Replaces the old single Default
+   * Station select; an employee may now be assigned to zero (blocked at
+   * the kiosk until an Admin assigns at least one), one (auto-selected),
+   * or several (must choose) active stations. */
+  assignedStationIds: string[];
   isSelf: boolean;
   authAccount: AuthAccountInfo | null;
 }) {
   const router = useRouter();
   const [firstName, setFirstName] = useState(user.firstName);
   const [lastName, setLastName] = useState(user.lastName);
-  const [defaultStationId, setDefaultStationId] = useState(user.defaultStationId ?? "");
+  const [selectedStationIds, setSelectedStationIds] = useState<string[]>(assignedStationIds);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
@@ -89,7 +97,13 @@ export function AdminUserDetailView({
   const resendSubmittingRef = useRef(false);
   const resetSubmittingRef = useRef(false);
 
-  const dirty = firstName !== user.firstName || lastName !== user.lastName || (defaultStationId || null) !== user.defaultStationId;
+  const stationAssignmentsChanged =
+    selectedStationIds.length !== assignedStationIds.length || selectedStationIds.some((id) => !assignedStationIds.includes(id));
+  const dirty = firstName !== user.firstName || lastName !== user.lastName || stationAssignmentsChanged;
+
+  function toggleStation(stationId: string) {
+    setSelectedStationIds((prev) => (prev.includes(stationId) ? prev.filter((id) => id !== stationId) : [...prev, stationId]));
+  }
   const isActive = user.employeeStatus === "active";
   const setupIncomplete = user.provisioningStatus === "invite_failed" || user.provisioningStatus === "invite_pending";
   // Kiosk Access only when genuinely kiosk-eligible (no Manager/Admin
@@ -133,8 +147,8 @@ export function AdminUserDetailView({
       }
     }
 
-    if ((defaultStationId || null) !== user.defaultStationId) {
-      const result = await setEmployeeDefaultStationAction(user.employeeId, defaultStationId || null);
+    if (stationAssignmentsChanged) {
+      const result = await setEmployeeStationAssignmentsAction(user.employeeId, selectedStationIds);
       if (!result.ok) {
         setSaving(false);
         setSaveError("message" in result ? result.message : "Unable to save user.");
@@ -269,21 +283,28 @@ export function AdminUserDetailView({
               <input value={lastName} onChange={(e) => setLastName(e.target.value)} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50" />
             </label>
           </div>
-          <label className="flex flex-col gap-1 text-xs text-zinc-400">
-            Default Station
-            <select
-              value={defaultStationId}
-              onChange={(e) => setDefaultStationId(e.target.value)}
-              className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
-            >
-              <option value="">None</option>
-              {stations.map((station) => (
-                <option key={station.id} value={station.id}>
-                  {station.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="flex flex-col gap-1.5 text-xs text-zinc-400">
+            <span className="flex items-center justify-between">
+              <span>Assigned Stations</span>
+              {selectedStationIds.length === 0 ? <span className="text-amber-400">No station assigned -- blocked at the kiosk</span> : null}
+            </span>
+            <div className="flex flex-col gap-1.5 rounded-lg border border-zinc-700 bg-zinc-950 p-3">
+              {stations.length === 0 ? (
+                <p className="text-zinc-500">No active stations exist yet.</p>
+              ) : (
+                stations.map((station) => (
+                  <label key={station.id} className="flex items-center gap-2 text-sm text-zinc-200">
+                    <input type="checkbox" checked={selectedStationIds.includes(station.id)} onChange={() => toggleStation(station.id)} />
+                    {station.name}
+                  </label>
+                ))
+              )}
+            </div>
+            <p className="text-[11px] text-zinc-500">
+              Zero stations blocks kiosk access entirely. Exactly one auto-selects at login. Two or more shows a station picker listing only these
+              stations.
+            </p>
+          </div>
         </div>
 
         {saveError ? <p className="mt-3 text-sm text-red-400">{saveError}</p> : null}

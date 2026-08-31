@@ -35,6 +35,10 @@ export const ADMIN_SQLSTATE = {
   VENDOR_NOT_FOUND: "GA054",
   INVENTORY_CATEGORY_HAS_ACTIVE_ITEMS: "GA055",
   SPEND_CATEGORY_HAS_ACTIVE_CHILDREN: "GA056",
+  /** Kiosk station assignment enforcement (20260811100130):
+   * manager_set_employee_station_assignments -- one or more requested
+   * station ids are not active stations in the caller's organization. */
+  INVALID_STATION_ASSIGNMENT: "GA074",
 } as const;
 
 /** One error shape for every Admin mutation -- `code` lets the action
@@ -108,6 +112,8 @@ export function mapAdminRpcError(error: { code?: string; message: string; detail
       return new AdminActionError("CATEGORY_HAS_DEPENDENTS", error.message, error.details ?? undefined);
     case ADMIN_SQLSTATE.SPEND_CATEGORY_HAS_ACTIVE_CHILDREN:
       return new AdminActionError("CATEGORY_HAS_DEPENDENTS", error.message, error.details ?? undefined);
+    case ADMIN_SQLSTATE.INVALID_STATION_ASSIGNMENT:
+      return new AdminActionError("INVALID_STATION_ASSIGNMENT", "One or more selected stations are not active. Refresh and try again.");
     default:
       return new AdminActionError("UNKNOWN", "Unable to save. Try again.");
   }

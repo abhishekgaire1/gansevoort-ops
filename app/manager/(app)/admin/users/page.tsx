@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { requireAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { listAdminUsers } from "@/app/lib/admin/users";
-import { listActiveStationsForOrganization } from "@/app/lib/kiosk/stations";
+import { listAllActiveStationsForOrganization } from "@/app/lib/kiosk/stations";
 import { PageHeader } from "@/app/components/manager/PageHeader";
 import { AdminUsersView } from "./_components/AdminUsersView";
 import { AddUserButton } from "./_components/AddUserButton";
@@ -25,7 +25,7 @@ export default async function AdminUsersPage() {
   const supabase = getServiceRoleClient();
   const [users, stations] = await Promise.all([
     listAdminUsers(supabase, { organizationId: auth.manager.organizationId }),
-    listActiveStationsForOrganization(supabase, auth.manager.organizationId),
+    listAllActiveStationsForOrganization(supabase, auth.manager.organizationId),
   ]);
 
   return (

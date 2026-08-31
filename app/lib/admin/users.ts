@@ -249,6 +249,55 @@ export async function setEmployeeDefaultStation(
   if (error) throw mapAdminRpcError(error);
 }
 
+export interface EmployeeStationAssignment {
+  stationId: string;
+  stationName: string;
+  stationCode: string | null;
+}
+
+/** Kiosk station assignment enforcement (20260811100130): the employee's
+ * CURRENT active station assignments -- the authoritative set the kiosk
+ * itself reads from (via a separate, employee-token-scoped path, see
+ * app/lib/kiosk/stations.ts). This admin-side read reuses the exact same
+ * RPC, so the detail page's pre-checked stations always match what the
+ * kiosk would actually show. */
+export async function getEmployeeStationAssignments(
+  supabase: SupabaseClient,
+  organizationId: string,
+  employeeId: string
+): Promise<EmployeeStationAssignment[]> {
+  const { data, error } = await supabase.rpc("list_employee_station_assignments", {
+    p_organization_id: organizationId,
+    p_employee_id: employeeId,
+  });
+  if (error) throw mapAdminRpcError(error);
+  return ((data ?? []) as { out_station_id: string; out_station_name: string; out_station_code: string | null }[]).map((row) => ({
+    stationId: row.out_station_id,
+    stationName: row.out_station_name,
+    stationCode: row.out_station_code,
+  }));
+}
+
+/** The ONE way an Admin's station-assignment save is persisted -- takes
+ * the complete desired set of station ids, never a single incremental
+ * add/remove, so a save always leaves the assignment set in exactly the
+ * state the form displayed. */
+export async function setEmployeeStationAssignments(
+  supabase: SupabaseClient,
+  organizationId: string,
+  actorAppUserId: string,
+  employeeId: string,
+  stationIds: string[]
+): Promise<void> {
+  const { error } = await supabase.rpc("manager_set_employee_station_assignments", {
+    p_organization_id: organizationId,
+    p_actor_app_user_id: actorAppUserId,
+    p_employee_id: employeeId,
+    p_station_ids: stationIds,
+  });
+  if (error) throw mapAdminRpcError(error);
+}
+
 /**
  * Identity + Access Management milestone -- the ONE authoritative path
  * for setting or resetting an employee's kiosk PIN (Part 43: create,

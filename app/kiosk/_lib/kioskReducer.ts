@@ -2,7 +2,6 @@ import type { KioskStation } from "@/app/actions/stations";
 import type { KioskInventoryItem } from "@/app/actions/inventoryItems";
 import type { KioskUsageUnits } from "@/app/actions/withdrawalUnit";
 import type { KioskLocationAvailability } from "@/app/actions/inventoryAvailability";
-import type { StationConfig } from "./stationBranch";
 
 /**
  * The entire kiosk flow is one client-side state machine, never a Next.js
@@ -14,6 +13,7 @@ import type { StationConfig } from "./stationBranch";
  */
 export type KioskStep =
   | "pin"
+  | "blocked"
   | "station_resolving"
   | "station_picker"
   | "item_select"
@@ -106,7 +106,12 @@ export interface KioskState {
   refreshing: boolean;
   employeeDisplayName: string | null;
   employeeFirstName: string | null;
-  stationConfig: StationConfig | null;
+  /** True only when this employee has 2+ active station assignments
+   * (StationBranch "must_pick") -- the only case where switching stations
+   * mid-session is offered at all. An employee with exactly one
+   * assignment (StationBranch "locked") never sees a change option, since
+   * there is nothing else to change to. */
+  canChangeStation: boolean;
   selectedStationId: string | null;
   selectedStationName: string | null;
   stations: KioskStation[] | null;
@@ -188,7 +193,7 @@ export function createInitialKioskState(): KioskState {
     refreshing: false,
     employeeDisplayName: null,
     employeeFirstName: null,
-    stationConfig: null,
+    canChangeStation: false,
     selectedStationId: null,
     selectedStationName: null,
     stations: null,
@@ -219,8 +224,8 @@ export type KioskAction =
       kioskToken: string;
       employeeDisplayName: string;
       employeeFirstName: string;
-      stationConfig: StationConfig;
-      nextStep: Extract<KioskStep, "station_resolving" | "station_picker">;
+      canChangeStation: boolean;
+      nextStep: Extract<KioskStep, "blocked" | "station_resolving" | "station_picker">;
       autoSelectedStationId: string | null;
       autoSelectedStationName: string | null;
     }
@@ -282,7 +287,7 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
         lastActivityAt: now,
         employeeDisplayName: action.employeeDisplayName,
         employeeFirstName: action.employeeFirstName,
-        stationConfig: action.stationConfig,
+        canChangeStation: action.canChangeStation,
         selectedStationId: action.autoSelectedStationId,
         selectedStationName: action.autoSelectedStationName,
       };

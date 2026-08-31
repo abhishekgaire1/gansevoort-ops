@@ -2,9 +2,9 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
-import { getAdminUser, getEmployeeAuthUserId } from "@/app/lib/admin/users";
+import { getAdminUser, getEmployeeAuthUserId, getEmployeeStationAssignments } from "@/app/lib/admin/users";
 import { getAuthAccountInfo } from "@/app/lib/admin/authAccounts";
-import { listActiveStationsForOrganization } from "@/app/lib/kiosk/stations";
+import { listAllActiveStationsForOrganization } from "@/app/lib/kiosk/stations";
 import { textLinkClass } from "@/app/components/manager/buttonStyles";
 import { AdminUserDetailView } from "./_components/AdminUserDetailView";
 
@@ -18,9 +18,10 @@ export default async function AdminUserDetailPage({ params }: { params: Promise<
 
   const { employeeId } = await params;
   const supabase = getServiceRoleClient();
-  const [user, stations] = await Promise.all([
+  const [user, stations, assignments] = await Promise.all([
     getAdminUser(supabase, auth.manager.organizationId, employeeId),
-    listActiveStationsForOrganization(supabase, auth.manager.organizationId),
+    listAllActiveStationsForOrganization(supabase, auth.manager.organizationId),
+    getEmployeeStationAssignments(supabase, auth.manager.organizationId, employeeId),
   ]);
 
   if (!user) {
@@ -43,7 +44,7 @@ export default async function AdminUserDetailPage({ params }: { params: Promise<
 
   return (
     <div className="mx-auto max-w-2xl">
-      <AdminUserDetailView user={user} stations={stations} isSelf={isSelf} authAccount={authAccount} />
+      <AdminUserDetailView user={user} stations={stations} assignedStationIds={assignments.map((a) => a.stationId)} isSelf={isSelf} authAccount={authAccount} />
     </div>
   );
 }

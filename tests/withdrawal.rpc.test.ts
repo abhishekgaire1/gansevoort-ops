@@ -226,7 +226,7 @@ describe("record_inventory_withdrawal", () => {
     ).rejects.toThrow();
   });
 
-  it("rejects a station other than the default for an employee locked to it (auto_resolve, cannot change)", async () => {
+  it("rejects a station the employee is not actively assigned to (kiosk station assignment enforcement)", async () => {
     await expect(
       recordInventoryWithdrawal(fx.supabase, {
         performedByAppUserId: fx.lockedEmployeeAppUserId,
@@ -240,7 +240,7 @@ describe("record_inventory_withdrawal", () => {
     ).rejects.toThrow();
   });
 
-  it("allows an employee with can_change_station=true to withdraw at a non-default active station", async () => {
+  it("allows an employee actively assigned to multiple stations to withdraw at either one", async () => {
     const result = await recordInventoryWithdrawal(fx.supabase, {
       performedByAppUserId: fx.changeableEmployeeAppUserId,
       stationId: fx.otherStationId,

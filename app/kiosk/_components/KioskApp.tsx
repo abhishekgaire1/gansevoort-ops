@@ -194,23 +194,17 @@ export function KioskApp() {
           return;
         }
 
-        const stationConfig = {
-          defaultStationId: result.defaultStationId,
-          defaultStationName: result.defaultStationName,
-          autoResolveStation: result.autoResolveStation,
-          canChangeStation: result.canChangeStation,
-        };
-        const branch = resolveStationBranch(stationConfig);
+        const branch = resolveStationBranch(result.stationAccess);
 
         dispatch({
           type: "PIN_VERIFIED",
           kioskToken: result.kioskToken,
           employeeDisplayName: result.employeeDisplayName,
           employeeFirstName: result.employeeFirstName,
-          stationConfig,
-          nextStep: branch.kind === "must_pick" ? "station_picker" : "station_resolving",
-          autoSelectedStationId: branch.kind === "must_pick" ? null : branch.stationId,
-          autoSelectedStationName: branch.kind === "must_pick" ? null : branch.stationName,
+          canChangeStation: branch.kind === "must_pick",
+          nextStep: branch.kind === "blocked" ? "blocked" : branch.kind === "must_pick" ? "station_picker" : "station_resolving",
+          autoSelectedStationId: branch.kind === "locked" ? branch.stationId : null,
+          autoSelectedStationName: branch.kind === "locked" ? branch.stationName : null,
         });
       } catch {
         if (!cancelled) dispatch({ type: "PIN_FAILED", message: GENERIC_NETWORK_ERROR });
@@ -594,11 +588,25 @@ export function KioskApp() {
         <NumericKeypad onDigit={handleDigit} onDelete={handleDeleteDigit} disabled={pinSubmitting} />
       </div>
     );
+  } else if (state.step === "blocked") {
+    content = (
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+        <p className="text-xl font-semibold text-kiosk-text">No station assigned</p>
+        <p className="max-w-xs text-base text-kiosk-text-muted">Please contact a manager.</p>
+        <button
+          type="button"
+          onClick={() => dispatch({ type: "START_OVER" })}
+          className="mt-2 rounded-full border border-kiosk-border px-6 py-3 text-base font-medium text-kiosk-text-muted transition hover:bg-kiosk-surface-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kiosk-amber"
+        >
+          Start Over
+        </button>
+      </div>
+    );
   } else if (state.step === "station_resolving") {
     content = (
       <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
         <p className="text-xl text-kiosk-text-muted">Setting up your station…</p>
-        {state.stationConfig?.canChangeStation ? (
+        {state.canChangeStation ? (
           <button
             type="button"
             onClick={() => dispatch({ type: "REQUEST_CHANGE_STATION" })}
@@ -970,7 +978,7 @@ export function KioskApp() {
           employeeFirstName={state.employeeFirstName!}
           stationName={state.selectedStationName}
           onStartOver={handleRequestStartOver}
-          canChangeStation={state.stationConfig?.canChangeStation ?? false}
+          canChangeStation={state.canChangeStation}
           onChangeStation={handleRequestChangeStation}
           screenLabel={state.step === "item_select" ? "Inventory" : undefined}
           cartCount={state.cart.length}
