@@ -5,7 +5,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getDocumentDownloadUrl } from "@/app/actions/documentAccess";
 import { openPendingTab, resolvePendingTab, closePendingTab } from "@/app/lib/browser/pendingTab";
-import { initiatePurchaseDocumentAmendment, getPurchaseDocumentReviewSummary, getReceiptHistoryForPurchaseDocument } from "@/app/actions/purchaseDocuments";
+import {
+  initiatePurchaseDocumentAmendment,
+  getPurchaseDocumentReviewSummary,
+  getReceiptHistoryForPurchaseDocument,
+  getPurchaseDocumentPreparationStatus,
+} from "@/app/actions/purchaseDocuments";
 import { ReceivingPanel } from "./ReceivingPanel";
 import { inventoryPostingBadgeLabel } from "@/app/lib/purchaseDocuments/getInventoryPostingStatus";
 import { postPurchaseDocumentToInventory, getPurchaseDocumentInventoryPosting } from "@/app/actions/inventory";
@@ -15,6 +20,7 @@ import { formatMoney } from "@/app/lib/formatMoney";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, RevisionSummary } from "@/app/lib/purchaseDocuments/types";
 import type { PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
 import type { ReceiptHistoryEntry } from "@/app/lib/purchaseDocuments/getReceiptHistory";
+import { lineLevelBlockers } from "@/app/lib/purchaseDocuments/preparationBlockers";
 
 /**
  * The VERIFIED page -- a READ-ONLY operational record of what Manager 1
@@ -107,6 +113,16 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
   const [postPending, setPostPending] = useState(false);
   const [postError, setPostError] = useState<string | null>(null);
   const [postBlockers, setPostBlockers] = useState<InventoryPostingBlocker[]>([]);
+  // Proactive re-check (fix for a confirmed defect: the manager used to
+  // discover a purchase-package mismatch for the first time here, only
+  // after every line was already approved through the four-step review).
+  // Every affected line SHOULD already have been caught during the
+  // four-step review itself -- this only fires when the vendor/SKU's
+  // purchase package configuration genuinely changed AFTER this document
+  // was verified (the same "unit configuration changed after the delivery
+  // was recorded" blocker getPreparationStatus already computes for Step
+  // 3/4, reused here rather than re-implemented).
+  const [packageMismatchBlockerDescriptions, setPackageMismatchBlockerDescriptions] = useState<string[]>([]);
 
   useEffect(() => {
     if (!props.isCurrentVerified) return;
@@ -115,11 +131,16 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
       getPurchaseDocumentReviewSummary(props.purchaseDocumentId),
       getReceiptHistoryForPurchaseDocument(props.purchaseDocumentId),
       getPurchaseDocumentInventoryPosting(props.purchaseDocumentId),
-    ]).then(([summaryResult, historyResult, postingResult]) => {
+      getPurchaseDocumentPreparationStatus(props.purchaseDocumentId),
+    ]).then(([summaryResult, historyResult, postingResult, preparationResult]) => {
       if (cancelled) return;
       if (summaryResult.ok) setSummary(summaryResult.summary);
       if (historyResult.ok) setHistory(historyResult.history);
       if (postingResult.ok) setPosting(postingResult.detail);
+      if (preparationResult.ok) {
+        const mismatchBlockers = lineLevelBlockers(preparationResult.status.blockers).filter((b) => /unit configuration changed/i.test(b.reason));
+        setPackageMismatchBlockerDescriptions(mismatchBlockers.map((b) => b.description ?? "Line"));
+      }
     });
     return () => {
       cancelled = true;
@@ -258,7 +279,35 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
             34) or if this document has no inventory lines at all (Part
             35) -- the card below still shows the read-only posting
             record either way. */}
-        {readyToPost ? (
+        {readyToPost && packageMismatchBlockerDescriptions.length > 0 ? (
+          // The information that changed since this document was verified
+          // -- never a surprise re-discovery of a mismatch every line had
+          // already cleared during review. "Review line" opens the one
+          // legitimate correction path for an already-VERIFIED document
+          // (Correct Verified Document -- a new DRAFT revision), never a
+          // silent overwrite.
+          <div className="mt-4 rounded-xl border border-red-800 bg-red-950/20 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-red-400">Purchase package needs review</p>
+            <p className="mt-1 text-sm text-zinc-300">This item&apos;s purchase-package configuration changed after review. Please return to the affected line.</p>
+            <ul className="mt-2 flex flex-col gap-1 text-xs text-zinc-400">
+              {packageMismatchBlockerDescriptions.map((description, index) => (
+                <li key={index}>• {description}</li>
+              ))}
+            </ul>
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setAmendReason("Purchase-package configuration changed after review -- correcting the affected line.");
+                  setShowAmendForm(true);
+                }}
+                className="rounded-full bg-red-400 px-5 py-2 text-sm font-semibold text-zinc-950"
+              >
+                Review line
+              </button>
+            </div>
+          </div>
+        ) : readyToPost ? (
           <div className="mt-4 rounded-xl border border-emerald-800 bg-emerald-950/20 p-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400">Ready to Post</p>
             <p className="mt-1 text-sm text-zinc-300">

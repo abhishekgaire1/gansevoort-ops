@@ -1,0 +1,42 @@
+-- Fix: upsert_vendor_item_purchase_unit's own "supersede" branch (added by
+-- 20260811100120) violates vendor_item_purchase_units_superseded_org_fk
+-- whenever a vendor/SKU that ALREADY has a confirmed purchase package is
+-- re-approved with a genuinely different one (a different purchase unit,
+-- receiving behavior, or conversion factor for the SAME vendor_item_mapping).
+--
+-- That function's supersede branch runs, in order:
+--   1. UPDATE the existing active row: superseded_by_purchase_unit_id = v_new_id
+--   2. INSERT the new row with id = v_new_id
+-- vendor_item_purchase_units_superseded_org_fk (foreign key
+-- (superseded_by_purchase_unit_id, organization_id) references
+-- vendor_item_purchase_units(id, organization_id)) was NOT deferrable, so
+-- step 1's UPDATE was checked immediately -- before the referenced row
+-- from step 2 existed -- and the whole call failed.
+--
+-- Reordering the two statements instead (insert-then-update) is NOT a safe
+-- alternative fix here: vendor_item_purchase_units_active_mapping_key (a
+-- partial unique index on (organization_id, vendor_item_mapping_id) where
+-- is_active) would then reject the new row's INSERT, since the old row is
+-- still active at that point. The old row must be deactivated before the
+-- new one is inserted -- which is exactly the original statement order --
+-- so the FK itself is what needs to change, not the function.
+--
+-- This was never exercised by any existing test or, apparently, any prior
+-- production correction: every previous vendor-package test either
+-- confirmed a package for the first time (no existing active row, so the
+-- UPDATE branch never ran) or registered a DIFFERENT vendor's package for
+-- the same item (a different vendor_item_mapping_id, so the lookup found
+-- nothing for that vendor). It is directly load-bearing for this fix's own
+-- "Review purchase package" corrective action (see the purchase-package
+-- mismatch review fix): a manager correcting an already-confirmed
+-- vendor/SKU package to the actual one is exactly this supersede path.
+--
+-- Fix: mark the FK DEFERRABLE INITIALLY DEFERRED, so it is checked at
+-- transaction commit rather than immediately after the UPDATE statement --
+-- by commit time, the function's own INSERT (later in the same
+-- transaction) has already created the row it points to. No other schema
+-- or business-rule change; the function body, its audit trail, and every
+-- other constraint on this table are untouched.
+alter table public.vendor_item_purchase_units
+  alter constraint vendor_item_purchase_units_superseded_org_fk
+  deferrable initially deferred;

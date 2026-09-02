@@ -33,6 +33,12 @@ function baseLine(overrides: Partial<LineClassificationRow>): LineClassification
     inventoryBaseUnitCode: "LB",
     inventoryItemCreatedVia: "MANUAL",
     spendCategoryId: null,
+    effectivePurchaseUnitCode: "LB",
+    effectivePurchaseUnitName: "Pound",
+    effectiveReceivingBehavior: "SAME_UNIT",
+    effectiveConversionFactor: null,
+    resolvedInvoiceUnitCode: "LB",
+    hasPackageMismatch: false,
     ...overrides,
   };
 }

@@ -31,6 +31,7 @@ import {
 } from "@/app/manager/(app)/_components/ItemClassificationForms";
 import { NewItemReviewModal, type NewItemReviewCandidate } from "@/app/manager/(app)/_components/NewItemReviewModal";
 import { flattenSpendCategoryPaths } from "@/app/lib/itemMaster/spendCategoryPaths";
+import { computeItemMappingProgress } from "@/app/lib/purchaseDocuments/itemMappingProgress";
 import { matchSourceLabel, formatSourceQuantity } from "@/app/lib/purchaseDocuments/matchSourcePresentation";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
 import { blockingIssueSummaryLabel, scrollToFirstIssue } from "@/app/components/receiving/blockingIssues";
@@ -87,6 +88,7 @@ export function ItemMappingPanel({
   onChange,
   onAllResolvedChange,
   onContinue,
+  onNavigateToStep1,
 }: {
   purchaseDocumentId: string;
   vendorName?: string | null;
@@ -101,12 +103,18 @@ export function ItemMappingPanel({
   onChange?: () => void;
   /** Fires whenever "every current line is CONFIRMED" changes -- the
    * wizard's own derived step-2-complete signal (never a separate stored
-   * flag). */
+   * flag). Requiring zero unresolved purchase-package mismatches too, so
+   * the wizard never treats a line with an open mismatch as done. */
   onAllResolvedChange?: (resolved: boolean) => void;
   /** Renders "Continue to Receiving" once every line is resolved -- only
    * passed by the Step 2 wizard wrapper, never in read-only/standalone
    * use. */
   onContinue?: () => void;
+  /** The "Correct invoice unit" corrective action on a purchase-package
+   * mismatch warning -- jumps back to Step 1 (Review Invoice), where the
+   * extracted package_unit text actually lives. Omitted in read-only
+   * (Manager 2) use, where the wizard itself is inert. */
+  onNavigateToStep1?: () => void;
 }) {
   const [lines, setLines] = useState<LineClassificationRow[] | null>(null);
   const [items, setItems] = useState<InventoryItemSummary[]>([]);
@@ -124,6 +132,12 @@ export function ItemMappingPanel({
   const [actionPendingLineKey, setActionPendingLineKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [overrideFormLineKey, setOverrideFormLineKey] = useState<string | null>(null);
+  // Which line's override form was opened via the "Review purchase
+  // package" corrective action (as opposed to "Choose Different Item") --
+  // pre-selects that line's already-correct item and auto-expands the
+  // package sub-form so the manager lands directly on the field that
+  // needs correction, without changing the default (empty) entry point.
+  const [packageReviewLineKey, setPackageReviewLineKey] = useState<string | null>(null);
   // A CONFIRMED line stays clean by default; while the document is still
   // DRAFT, Manager 1 can deliberately reopen it via [Edit Mapping] to
   // correct the canonical item/disposition before Send for Final Review.
@@ -170,7 +184,7 @@ export function ItemMappingPanel({
     ]);
     if (linesResult.ok) {
       setLines(linesResult.lines);
-      onAllResolvedChange?.(linesResult.lines.length > 0 && linesResult.lines.every((l) => l.status === "CONFIRMED"));
+      onAllResolvedChange?.(computeItemMappingProgress(linesResult.lines).allResolved);
     } else {
       setError(linesResult.message);
     }
@@ -355,6 +369,7 @@ export function ItemMappingPanel({
     }
     setOverrideFormLineKey(null);
     setEditingMappingLineKey(null);
+    setPackageReviewLineKey(null);
     await load();
   }
 
@@ -369,6 +384,7 @@ export function ItemMappingPanel({
       return;
     }
     setEditingMappingLineKey(null);
+    setPackageReviewLineKey(null);
     await load();
   }
 
@@ -453,11 +469,21 @@ export function ItemMappingPanel({
 
   const confirmedCount = lines.filter((l) => l.status === "CONFIRMED").length;
   const staleOrUnclassifiedCount = lines.filter((l) => l.status === "STALE" || l.status === "UNCLASSIFIED").length;
-  const allResolved = lines.length > 0 && confirmedCount === lines.length;
   const needsReviewLines = lines.filter((l) => l.status !== "CONFIRMED");
   const resolvedLines = lines.filter((l) => l.status === "CONFIRMED");
   const resolvedInventoryLines = resolvedLines.filter((l) => l.disposition === "INVENTORY");
   const resolvedNonInventoryLines = resolvedLines.filter((l) => l.disposition === "NON_INVENTORY");
+  // Purchase-package mismatch (fix for a confirmed defect: this used to
+  // only surface at "Ready to Post" time) -- a CONFIRMED inventory line
+  // whose invoice unit disagrees with its confirmed vendor/SKU purchase
+  // package is NOT fully resolved, even though its item match itself is
+  // correct. Never NON_INVENTORY (expense lines never post inventory).
+  // Shared with PreparationWizard's own step-2-complete signal -- see
+  // itemMappingProgress.ts.
+  const progress = computeItemMappingProgress(lines);
+  const mismatchedInventoryLines = resolvedInventoryLines.filter((l) => l.hasPackageMismatch);
+  const allResolved = progress.allResolved;
+  const totalUnresolvedCount = progress.unresolvedLineKeys.length;
   const spendCategoryPathById = new Map(flattenSpendCategoryPaths(spendCategories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId }))).map((p) => [p.id, p.path]));
 
   return (
@@ -484,6 +510,12 @@ export function ItemMappingPanel({
               <li className="text-amber-300">○ {bulkEligible.length} AI-suggested match{bulkEligible.length === 1 ? "" : "es"} awaiting confirmation</li>
             ) : null}
             {staleOrUnclassifiedCount > 0 ? <li className="text-amber-300">⚠ {staleOrUnclassifiedCount} line{staleOrUnclassifiedCount === 1 ? "" : "s"} need attention</li> : null}
+            {mismatchedInventoryLines.length > 0 ? (
+              <li className="text-red-400">
+                ⚠ {mismatchedInventoryLines.length} line{mismatchedInventoryLines.length === 1 ? "" : "s"} need{mismatchedInventoryLines.length === 1 ? "s" : ""} attention · purchase package
+                mismatch
+              </li>
+            ) : null}
           </ul>
         )}
 
@@ -556,17 +588,29 @@ export function ItemMappingPanel({
             {resolvedInventoryLines.map((line) => (
               <ResolvedLineRow
                 key={line.lineKey}
+                id={`classification-line-${line.lineKey}`}
                 line={line}
                 readOnly={readOnly}
                 items={items}
                 units={units}
                 editing={editingMappingLineKey === line.lineKey}
                 overrideFormOpen={overrideFormLineKey === line.lineKey}
+                reviewingPackage={packageReviewLineKey === line.lineKey}
                 onToggleEdit={() => {
                   setEditingMappingLineKey(editingMappingLineKey === line.lineKey ? null : line.lineKey);
                   setOverrideFormLineKey(null);
+                  setPackageReviewLineKey(null);
                 }}
-                onToggleOverrideForm={() => setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey)}
+                onToggleOverrideForm={() => {
+                  setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey);
+                  setPackageReviewLineKey(null);
+                }}
+                onReviewPackage={() => {
+                  setEditingMappingLineKey(line.lineKey);
+                  setOverrideFormLineKey(line.lineKey);
+                  setPackageReviewLineKey(line.lineKey);
+                }}
+                onNavigateToStep1={onNavigateToStep1}
                 onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
                 onMarkNonInventory={() => handleMarkNonInventory(line)}
                 actionPending={actionPendingLineKey === line.lineKey}
@@ -600,6 +644,7 @@ export function ItemMappingPanel({
                   setOverrideFormLineKey(null);
                 }}
                 onToggleOverrideForm={() => setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey)}
+                onReviewPackage={() => {}}
                 onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
                 onMarkNonInventory={() => handleMarkNonInventory(line)}
                 actionPending={actionPendingLineKey === line.lineKey}
@@ -626,11 +671,11 @@ export function ItemMappingPanel({
         // visible (disabled while blocked), never appearing only once
         // resolved, so the manager always knows where Continue lives.
         <WorkflowFooter
-          contextLabel={allResolved ? undefined : blockingIssueSummaryLabel(needsReviewLines.length, "line")}
+          contextLabel={allResolved ? undefined : blockingIssueSummaryLabel(totalUnresolvedCount, "line")}
           contextTone="warning"
           onContextClick={
-            !allResolved && needsReviewLines.length > 0
-              ? () => scrollToFirstIssue(needsReviewLines.map((l) => ({ id: `classification-line-${l.lineKey}`, reason: "" })))
+            !allResolved && totalUnresolvedCount > 0
+              ? () => scrollToFirstIssue([...needsReviewLines, ...mismatchedInventoryLines].map((l) => ({ id: `classification-line-${l.lineKey}`, reason: "" })))
               : undefined
           }
           primaryLabel="Continue to Confirm Receiving"
@@ -658,16 +703,73 @@ function SourceSide({ line }: { line: LineClassificationRow }) {
   );
 }
 
+/** Purchase-package mismatch warning content (fix for a confirmed defect:
+ * this used to only surface at "Ready to Post" time, after every line was
+ * already approved -- see packageUnitMismatch.ts). Formats the confirmed
+ * purchase package with its conversion detail when one exists, e.g.
+ * "CASE — 4 tubs per case", matching the task's required example exactly. */
+function formatPurchasePackageDescription(line: LineClassificationRow): string {
+  const unit = line.effectivePurchaseUnitCode ?? "—";
+  if (line.effectiveReceivingBehavior === "FIXED_CONVERSION" && line.effectiveConversionFactor && line.inventoryBaseUnitCode) {
+    const baseUnit = line.inventoryBaseUnitCode.toLowerCase();
+    const plural = line.effectiveConversionFactor === 1 ? baseUnit : `${baseUnit}s`;
+    return `${unit} — ${line.effectiveConversionFactor} ${plural} per ${unit.toLowerCase()}`;
+  }
+  return unit;
+}
+
+function PackageMismatchWarning({
+  line,
+  onCorrectInvoiceUnit,
+  onReviewPackage,
+  onReturnToVerification,
+}: {
+  line: LineClassificationRow;
+  onCorrectInvoiceUnit?: () => void;
+  onReviewPackage: () => void;
+  onReturnToVerification: () => void;
+}) {
+  return (
+    <div className="w-full rounded-xl border border-red-800 bg-red-950/20 p-3 sm:col-span-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-red-400">Purchase package needs review</p>
+      <p className="mt-1 text-sm text-zinc-200">
+        The invoice says <strong className="font-semibold text-zinc-50">{line.resolvedInvoiceUnitCode}</strong>, but this vendor/SKU is configured as{" "}
+        <strong className="font-semibold text-zinc-50">{formatPurchasePackageDescription(line)}</strong>.
+      </p>
+      <p className="mt-1 text-xs text-zinc-400">
+        Posting this line as received would record the wrong quantity of {line.inventoryItemName ?? "this item"} into inventory -- the two units aren&apos;t interchangeable.
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {onCorrectInvoiceUnit ? (
+          <button type="button" onClick={onCorrectInvoiceUnit} className="rounded-full border border-red-700 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-900/30">
+            Correct invoice unit
+          </button>
+        ) : null}
+        <button type="button" onClick={onReviewPackage} className="rounded-full border border-red-700 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-900/30">
+          Review purchase package
+        </button>
+        <button type="button" onClick={onReturnToVerification} className="rounded-full border border-red-700 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-900/30">
+          Return to item verification
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ResolvedLineRow({
+  id,
   line,
   readOnly,
   items,
   units,
   editing,
   overrideFormOpen,
+  reviewingPackage,
   spendCategoryPath,
   onToggleEdit,
   onToggleOverrideForm,
+  onReviewPackage,
+  onNavigateToStep1,
   onApproveExisting,
   onMarkNonInventory,
   actionPending,
@@ -677,15 +779,25 @@ function ResolvedLineRow({
   priceHistoryLoading,
   onTogglePriceHistory,
 }: {
+  id?: string;
   line: LineClassificationRow;
   readOnly?: boolean;
   items: InventoryItemSummary[];
   units: UnitSummary[];
   editing: boolean;
   overrideFormOpen: boolean;
+  /** True when the override form was opened via "Review purchase package"
+   * (as opposed to "Choose Different Item") -- pre-selects this line's
+   * already-correct item and auto-expands the package sub-form. */
+  reviewingPackage?: boolean;
   spendCategoryPath?: string;
   onToggleEdit: () => void;
   onToggleOverrideForm: () => void;
+  /** The mismatch warning's "Review purchase package" action -- opens the
+   * same edit/override machinery as "Change Match" + "Choose Different
+   * Item" together, pre-scoped to this line's own item. */
+  onReviewPackage: () => void;
+  onNavigateToStep1?: () => void;
   onApproveExisting: (itemId: string, vendorPackage?: ExistingItemVendorPackageInput | null) => void;
   onMarkNonInventory: () => void;
   /** True while THIS line's approve/mark-non-inventory request is in
@@ -702,9 +814,12 @@ function ResolvedLineRow({
 }) {
   const source = matchSourceLabel(line);
   return (
-    <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between">
+    <div id={id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between">
       <SourceSide line={line} />
       <div className="flex shrink-0 flex-col gap-2 sm:w-64 sm:items-end sm:text-right">
+        {line.hasPackageMismatch ? (
+          <span className="inline-block self-end rounded-full bg-red-500/20 px-2.5 py-0.5 text-xs font-semibold text-red-300">Needs attention</span>
+        ) : null}
         {line.disposition === "INVENTORY" ? (
           <div>
             {line.inventoryItemNumber ? <p className="font-mono text-[11px] text-zinc-500">{line.inventoryItemNumber}</p> : null}
@@ -740,8 +855,13 @@ function ResolvedLineRow({
         </div>
       ) : null}
 
+      {!readOnly && line.hasPackageMismatch && !editing ? (
+        <PackageMismatchWarning line={line} onCorrectInvoiceUnit={onNavigateToStep1} onReviewPackage={onReviewPackage} onReturnToVerification={onToggleEdit} />
+      ) : null}
+
       {editing ? (
         <div className="flex w-full flex-col gap-2 border-t border-zinc-800 pt-3 sm:col-span-2">
+          {line.hasPackageMismatch ? <PackageMismatchWarning line={line} onCorrectInvoiceUnit={onNavigateToStep1} onReviewPackage={onReviewPackage} onReturnToVerification={onToggleEdit} /> : null}
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 disabled:opacity-40">
               Choose Different Item
@@ -752,7 +872,16 @@ function ResolvedLineRow({
               </button>
             ) : null}
           </div>
-          {overrideFormOpen ? <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} /> : null}
+          {overrideFormOpen ? (
+            <ExistingItemOverrideForm
+              items={items}
+              units={units}
+              onCancel={onToggleOverrideForm}
+              onConfirm={onApproveExisting}
+              defaultItemId={reviewingPackage ? (line.inventoryItemId ?? undefined) : undefined}
+              defaultRegisteringPackage={reviewingPackage}
+            />
+          ) : null}
         </div>
       ) : null}
     </div>

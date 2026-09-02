@@ -11,6 +11,7 @@ import { ReceivingPanel } from "./ReceivingPanel";
 import { Step4ReviewSend } from "./Step4ReviewSend";
 import { deriveWizardProgress, type WizardStepId } from "@/app/lib/purchaseDocuments/deriveWizardProgress";
 import { lineLevelBlockers } from "@/app/lib/purchaseDocuments/preparationBlockers";
+import { computeItemMappingProgress } from "@/app/lib/purchaseDocuments/itemMappingProgress";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
 import { blockingIssueSummaryLabel, scrollToFirstIssue } from "@/app/components/receiving/blockingIssues";
 import { WIZARD_STEP_SLUGS, wizardStepFromSlug } from "@/app/lib/purchaseDocuments/wizardStepSlug";
@@ -151,7 +152,7 @@ export function PreparationWizard({
   // needs" pattern already used throughout this app.
   const refetchStep2Resolved = useCallback(async () => {
     const result = await getPurchaseDocumentLineClassifications(purchaseDocumentId);
-    if (result.ok) setStep2Resolved(result.lines.length > 0 && result.lines.every((l) => l.status === "CONFIRMED"));
+    if (result.ok) setStep2Resolved(computeItemMappingProgress(result.lines).allResolved);
   }, [purchaseDocumentId]);
 
   // Step 3 completes on LINE-LEVEL receiving completeness only.
@@ -315,6 +316,7 @@ export function PreparationWizard({
           onChange={refetchPreparationStatus}
           onAllResolvedChange={setStep2Resolved}
           onContinue={editable ? () => setRequestedStep(3) : undefined}
+          onNavigateToStep1={editable ? () => setRequestedStep(1) : undefined}
         />
       ) : null}
 

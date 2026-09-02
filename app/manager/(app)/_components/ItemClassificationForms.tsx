@@ -55,14 +55,26 @@ export function ExistingItemOverrideForm({
   units,
   onCancel,
   onConfirm,
+  defaultItemId,
+  defaultRegisteringPackage,
 }: {
   items: InventoryItemSummary[];
   units: UnitSummary[];
   onCancel: () => void;
   onConfirm: (itemId: string, vendorPackage: ExistingItemVendorPackageInput | null) => void;
+  /** Pre-selects the item that's already confirmed on this line, used by
+   * the "Review purchase package" corrective action for a purchase-package
+   * mismatch (the item match itself is correct -- only its vendor package
+   * needs attention). The default "Choose Different Item" entry point
+   * omits this and starts with an empty selection, unchanged. */
+  defaultItemId?: string;
+  /** Auto-expands the "This vendor's purchase package" sub-form so the
+   * manager lands directly on the field that needs correction, per the
+   * mismatch warning's "Review purchase package" action. */
+  defaultRegisteringPackage?: boolean;
 }) {
-  const [selected, setSelected] = useState("");
-  const [registeringPackage, setRegisteringPackage] = useState(false);
+  const [selected, setSelected] = useState(defaultItemId ?? "");
+  const [registeringPackage, setRegisteringPackage] = useState(defaultRegisteringPackage ?? false);
   const [purchaseUnitCode, setPurchaseUnitCode] = useState("");
   const [receivingBehavior, setReceivingBehavior] = useState<"FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY">("FIXED_CONVERSION");
   const [fixedConversionFactor, setFixedConversionFactor] = useState("");

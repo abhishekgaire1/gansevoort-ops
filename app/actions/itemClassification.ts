@@ -17,6 +17,7 @@ import {
   NonInventoryItemUsageUnitError,
 } from "@/app/lib/itemMaster/errors";
 import { NotPreparerError } from "@/app/lib/purchaseDocuments/errors";
+import { resolveLineMismatchFields, resolveUnitCode } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -83,6 +84,31 @@ export interface LineClassificationRow {
    * from the already-loaded spend-category list (flattenSpendCategoryPaths),
    * never a second server round trip. */
   spendCategoryId: string | null;
+  // ---- Purchase-package mismatch surfaced during review (fix for a
+  // confirmed defect: this used to only appear at "Ready to Post" time).
+  // Mirrors post_purchase_document_inventory's own blocker scan
+  // (20260811100123) exactly: the confirmed vendor/SKU purchase package
+  // (or the item's base unit, for SAME_UNIT) is resolved from THIS
+  // classification's own vendor_item_purchase_unit_id, never a shared
+  // per-item default.
+  /** The confirmed purchase package's unit code, or the base unit code
+   * when there is no distinct vendor package (SAME_UNIT). Null only when
+   * disposition isn't CONFIRMED INVENTORY yet. */
+  effectivePurchaseUnitCode: string | null;
+  effectivePurchaseUnitName: string | null;
+  effectiveReceivingBehavior: "SAME_UNIT" | "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY" | null;
+  effectiveConversionFactor: number | null;
+  /** The raw invoice-extracted packageUnit text, resolved against the real
+   * units table (case/whitespace-insensitive) -- null when it doesn't
+   * match any recognized unit code, in which case hasPackageMismatch is
+   * always false (an unrecognized unit is a different, separately-
+   * surfaced concern, never guessed into a false mismatch here). */
+  resolvedInvoiceUnitCode: string | null;
+  /** True exactly when the resolved invoice unit and the effective
+   * purchase package disagree -- see packageUnitMismatch.ts. The line
+   * stays CONFIRMED (its item match is correct) but must not count as
+   * fully resolved until this clears. */
+  hasPackageMismatch: boolean;
 }
 
 export type GetPurchaseDocumentLineClassificationsResult = { ok: true; lines: LineClassificationRow[] } | AuthFailure;
@@ -96,7 +122,7 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();
-  const [{ data: lines }, { data: classifications }] = await Promise.all([
+  const [{ data: lines }, { data: classifications }, { data: allUnits }] = await Promise.all([
     supabase
       .from("purchase_document_lines")
       .select("line_key, line_number, vendor_sku, description, package_quantity, package_unit, measured_quantity, measured_unit, line_total")
@@ -106,11 +132,20 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
     supabase
       .from("purchase_document_line_classifications")
       .select(
-        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, inventory_categories(name), units(code)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code))"
+        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, vendor_item_purchase_unit_id, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, base_unit_id, inventory_categories(name), units(code, name)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code)), vendor_item_purchase_units!purchase_document_line_classifications_vendor_package_org_fk(purchase_unit_id, conversion_factor, receiving_behavior, units(code, name))"
       )
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", auth.manager.organizationId),
+    // Units are a small, global (non-org-scoped) table -- fetched once so
+    // the raw invoice-extracted packageUnit TEXT can be resolved against a
+    // real recognized unit code before ever being compared to the
+    // confirmed purchase package, exactly mirroring how
+    // post_purchase_document_inventory itself resolves the received unit
+    // (never a raw string compare against unverified OCR text).
+    supabase.from("units").select("code"),
   ]);
+
+  const recognizedUnitCodes = new Set((allUnits ?? []).map((u) => (u.code as string).trim().toUpperCase()));
 
   const classificationByLineKey = new Map((classifications ?? []).map((c) => [c.line_key as string, c]));
 
@@ -144,6 +179,12 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
         inventoryBaseUnitCode: null,
         inventoryItemCreatedVia: null,
         spendCategoryId: null,
+        effectivePurchaseUnitCode: null,
+        effectivePurchaseUnitName: null,
+        effectiveReceivingBehavior: null,
+        effectiveConversionFactor: null,
+        resolvedInvoiceUnitCode: resolveUnitCode(line.package_unit as string | null, recognizedUnitCodes),
+        hasPackageMismatch: false,
       };
     }
 
@@ -153,6 +194,38 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
     const aiItem = Array.isArray(c.ai_item) ? c.ai_item[0] : c.ai_item;
     const aiItemUnit = aiItem ? (Array.isArray(aiItem.units) ? aiItem.units[0] : aiItem.units) : null;
     const isNewProposal = aiItem?.approval_status === "PENDING_REVIEW";
+
+    // Purchase-package mismatch (see packageUnitMismatch.ts): the
+    // effective purchase package comes from THIS classification's own
+    // resolved vendor_item_purchase_unit_id, falling back to the item's
+    // base unit for SAME_UNIT -- exactly coalesce(vpu.purchase_unit_id,
+    // ii.base_unit_id) in post_purchase_document_inventory.
+    const vendorPackageRow = Array.isArray(c.vendor_item_purchase_units) ? c.vendor_item_purchase_units[0] : c.vendor_item_purchase_units;
+    const vendorPackageUnit = vendorPackageRow ? (Array.isArray(vendorPackageRow.units) ? vendorPackageRow.units[0] : vendorPackageRow.units) : null;
+    const status = c.status as "PENDING_REVIEW" | "CONFIRMED" | "STALE";
+    const disposition = c.disposition as "INVENTORY" | "NON_INVENTORY" | "UNRESOLVED";
+    const {
+      effectivePurchaseUnitCode,
+      effectivePurchaseUnitName,
+      effectiveReceivingBehavior,
+      effectiveConversionFactor,
+      resolvedInvoiceUnitCode,
+      hasPackageMismatch,
+    } = resolveLineMismatchFields({
+      status,
+      disposition,
+      invoicePackageUnitText: line.package_unit as string | null,
+      vendorPackage: vendorPackageRow
+        ? {
+            unitCode: (vendorPackageUnit?.code as string | undefined) ?? null,
+            unitName: (vendorPackageUnit?.name as string | undefined) ?? null,
+            receivingBehavior: vendorPackageRow.receiving_behavior as "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY",
+            conversionFactor: vendorPackageRow.conversion_factor as number | null,
+          }
+        : null,
+      itemBaseUnit: itemUnit ? { code: (itemUnit.code as string | undefined) ?? null, name: (itemUnit.name as string | undefined) ?? null } : null,
+      recognizedUnitCodes,
+    });
 
     return {
       classificationId: c.id as string,
@@ -180,6 +253,12 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
       inventoryBaseUnitCode: (itemUnit?.code as string | undefined) ?? null,
       inventoryItemCreatedVia: (item?.created_via as "MANUAL" | "AI_PROPOSED" | null | undefined) ?? null,
       spendCategoryId: (c.spend_category_id as string | null | undefined) ?? null,
+      effectivePurchaseUnitCode,
+      effectivePurchaseUnitName,
+      effectiveReceivingBehavior,
+      effectiveConversionFactor,
+      resolvedInvoiceUnitCode,
+      hasPackageMismatch,
       aiNewItemProposal: isNewProposal
         ? {
             disposition: (aiItem?.disposition as "INVENTORY" | "NON_INVENTORY" | undefined) ?? "INVENTORY",
