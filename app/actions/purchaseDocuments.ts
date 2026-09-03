@@ -23,6 +23,10 @@ import {
   findPossibleDuplicatePurchaseDocuments,
   type PossibleDuplicatePurchaseDocument,
 } from "@/app/lib/purchaseDocuments/duplicateDetection";
+import { validatePurchaseDocumentDraft } from "@/app/lib/purchaseDocuments/validatePurchaseDocumentDraft";
+import { postPurchaseDocumentSoleApproverRpc } from "@/app/lib/purchaseDocuments/soleApproverPostingRpc";
+import { userHasPermission, SOLE_APPROVER_PERMISSION_KEY } from "@/app/lib/auth/permissions";
+import type { SoleApproverReasonCode } from "@/app/lib/purchaseDocuments/soleApproverReason";
 import {
   NotPreparerError,
   CannotSelfVerifyError,
@@ -33,7 +37,10 @@ import {
   ReviewProposalsConflictError,
   ReviewProposalsOwnedElsewhereError,
   StaleReviewProposalsError,
+  SoleApproverPermissionDeniedError,
+  SoleApproverReasonRequiredError,
 } from "@/app/lib/purchaseDocuments/errors";
+import { InventoryPostingBlockedError, AmendmentLineageAlreadyPostedError, type InventoryPostingBlocker } from "@/app/lib/inventory/errors";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 
 /** Manager-facing only -- never the raw RPC error text. */
@@ -55,6 +62,12 @@ function safeMessage(err: unknown): string {
   if (err instanceof StaleReviewProposalsError) {
     return "This review belongs to an earlier submission. Reload the current submission.";
   }
+  if (err instanceof SoleApproverPermissionDeniedError) {
+    return "You do not have permission to post without a second reviewer.";
+  }
+  if (err instanceof SoleApproverReasonRequiredError) {
+    return "A reason is required for single-manager approval.";
+  }
   return "Something went wrong. Try again.";
 }
 
@@ -72,7 +85,9 @@ function isKnownPurchaseDocumentError(err: unknown): boolean {
     err instanceof PreparationIncompleteError ||
     err instanceof ReviewProposalsConflictError ||
     err instanceof ReviewProposalsOwnedElsewhereError ||
-    err instanceof StaleReviewProposalsError
+    err instanceof StaleReviewProposalsError ||
+    err instanceof SoleApproverPermissionDeniedError ||
+    err instanceof SoleApproverReasonRequiredError
   );
 }
 
@@ -573,6 +588,231 @@ export async function getAmendmentAlreadyPosted(purchaseDocumentId: string): Pro
   }
   const alreadyPosted = await hasSiblingRevisionAlreadyPosted(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
   return { ok: true, alreadyPosted };
+}
+
+export type CanUseSoleApproverPostingResult = { ok: true; eligible: boolean } | { ok: false; reason: "not_authorized"; message: string };
+
+/** Whether the CURRENT caller holds purchase_documents.post_without_
+ * second_review -- read-only, decides whether Step 3 offers "Post Now as
+ * Sole Approver" at all. Never the enforcement boundary itself: the RPC
+ * re-checks this same permission authoritatively regardless of what this
+ * returns. */
+export async function canUseSoleApproverPosting(): Promise<CanUseSoleApproverPostingResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+  const eligible = await userHasPermission(getServiceRoleClient(), {
+    appUserId: auth.manager.appUserId,
+    organizationId: auth.manager.organizationId,
+    permissionKey: SOLE_APPROVER_PERMISSION_KEY,
+  });
+  return { ok: true, eligible };
+}
+
+export interface PostPurchaseDocumentSoleApproverInput {
+  purchaseDocumentId: string;
+  expectedVersion: number;
+  reason: SoleApproverReasonCode;
+  notes: string | null;
+  idempotencyKey: string;
+}
+
+export type PostPurchaseDocumentSoleApproverResult =
+  | {
+      ok: true;
+      status: string;
+      verifiedAt: string;
+      postingStatus: "POSTED" | "ALREADY_POSTED";
+      postedLineCount: number;
+      inventoryValue: number;
+      inventoryLineCount: number;
+      expenseLineCount: number;
+    }
+  | { ok: false; reason: "not_authorized" | "not_eligible"; message: string }
+  | { ok: false; reason: "reason_required"; message: string }
+  | { ok: false; reason: "duplicate"; message: string; duplicates: PossibleDuplicatePurchaseDocument[] }
+  | { ok: false; reason: "total_discrepancy"; message: string }
+  | { ok: false; reason: "blocked"; message: string; blockers: InventoryPostingBlocker[] }
+  | { ok: false; reason: "preparation_incomplete" | "stale" | "already_posted" | "misconfigured"; message: string };
+
+/**
+ * The single-manager approval action: takes a fully-valid DRAFT straight
+ * to VERIFIED (as sole approver) and POSTED, in one call. Every
+ * non-overridable blocker is re-checked here, server-side, before the RPC
+ * is ever called -- "hiding the button in the UI is not sufficient":
+ *
+ *   1. Permission (purchase_documents.post_without_second_review) --
+ *      re-checked authoritatively inside the RPC too (defense in depth).
+ *   2. Reason/acknowledgment -- the modal's own client-side gate
+ *      (soleApproverReason.ts) is UX only; the reason is required again
+ *      here and by the RPC itself (GA078).
+ *   3. Possible duplicate -- the SAME (vendor, type, number) match
+ *      findPossibleDuplicatePurchaseDocuments already computes for the
+ *      Step 1 warning banner, but here it BLOCKS rather than merely
+ *      warns: single-manager approval may never proceed past an
+ *      unresolved duplicate, unlike the normal second-review path.
+ *   4. Invoice-total discrepancy -- the SAME check
+ *      validatePurchaseDocumentDraft already runs for Step 1's review
+ *      flags (TOTAL_MISMATCH / TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE), also
+ *      elevated from a warning to a hard block for this path only.
+ *   5. Amendment lineage already posted, item mapping/receiving
+ *      completeness, delivery verifier, plausible date, and the full
+ *      inventory-posting blocker scan -- all enforced authoritatively by
+ *      the RPC itself (post_purchase_document_sole_approver /
+ *      post_purchase_document_inventory, unmodified).
+ *
+ * Never re-implements #5's checks here -- reused as the sole authority,
+ * exactly as required.
+ */
+export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocumentSoleApproverInput): Promise<PostPurchaseDocumentSoleApproverResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  const eligible = await userHasPermission(getServiceRoleClient(), {
+    appUserId: auth.manager.appUserId,
+    organizationId: auth.manager.organizationId,
+    permissionKey: SOLE_APPROVER_PERMISSION_KEY,
+  });
+  if (!eligible) {
+    return { ok: false, reason: "not_eligible", message: "You do not have permission to post without a second reviewer." };
+  }
+
+  if (!input.reason) {
+    return { ok: false, reason: "reason_required", message: "Select a reason for single-manager approval." };
+  }
+  if (input.reason === "OTHER" && !input.notes?.trim()) {
+    return { ok: false, reason: "reason_required", message: "Notes are required when Other is selected." };
+  }
+
+  const supabase = getServiceRoleClient();
+
+  const alreadyPosted = await hasSiblingRevisionAlreadyPosted(supabase, input.purchaseDocumentId, auth.manager.organizationId);
+  if (alreadyPosted) {
+    return {
+      ok: false,
+      reason: "already_posted",
+      message: "Inventory was already posted from the original revision. This amendment cannot post it again.",
+    };
+  }
+
+  const { data: document } = await supabase
+    .from("purchase_documents")
+    .select("vendor_id, document_type, document_number, document_date, po_number, delivery_date, subtotal, tax, fees, total, currency, revision_group_id")
+    .eq("id", input.purchaseDocumentId)
+    .eq("organization_id", auth.manager.organizationId)
+    .maybeSingle();
+  if (!document) {
+    return { ok: false, reason: "misconfigured", message: "This document could not be found." };
+  }
+
+  const duplicates = await findPossibleDuplicatePurchaseDocuments(supabase, {
+    organizationId: auth.manager.organizationId,
+    vendorId: document.vendor_id as string | null,
+    documentType: document.document_type as PurchaseDocumentType | null,
+    documentNumber: document.document_number as string | null,
+    excludePurchaseDocumentId: input.purchaseDocumentId,
+    excludeRevisionGroupId: (document.revision_group_id as string | null) ?? undefined,
+  });
+  if (duplicates.length > 0) {
+    return {
+      ok: false,
+      reason: "duplicate",
+      message: "A possible duplicate of this invoice exists. Resolve it before posting without a second reviewer.",
+      duplicates,
+    };
+  }
+
+  const { data: lineRows } = await supabase
+    .from("purchase_document_lines")
+    .select("vendor_sku, description, package_quantity, package_unit, measured_quantity, measured_unit, unit_price, price_basis_unit, line_total")
+    .eq("purchase_document_id", input.purchaseDocumentId)
+    .eq("organization_id", auth.manager.organizationId);
+
+  const draftFlags = validatePurchaseDocumentDraft({
+    vendorId: document.vendor_id as string | null,
+    documentType: document.document_type as PurchaseDocumentType | null,
+    documentNumber: document.document_number as string | null,
+    documentDate: document.document_date as string | null,
+    poNumber: document.po_number as string | null,
+    deliveryDate: document.delivery_date as string | null,
+    subtotal: document.subtotal as number | null,
+    tax: document.tax as number | null,
+    fees: document.fees as number | null,
+    total: document.total as number | null,
+    currency: document.currency as string | null,
+    lines: (lineRows ?? []).map((line) => ({
+      vendorSku: line.vendor_sku as string | null,
+      description: line.description as string | null,
+      packageQuantity: line.package_quantity as number | null,
+      packageUnit: line.package_unit as string | null,
+      measuredQuantity: line.measured_quantity as number | null,
+      measuredUnit: line.measured_unit as string | null,
+      unitPrice: line.unit_price as number | null,
+      priceBasisUnit: line.price_basis_unit as string | null,
+      lineTotal: line.line_total as number | null,
+      rawLineText: null,
+    })),
+  });
+  if (draftFlags.some((f) => f.code === "TOTAL_MISMATCH" || f.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE")) {
+    return {
+      ok: false,
+      reason: "total_discrepancy",
+      message: "This invoice's line totals, tax, and fees do not match the entered total. Resolve the discrepancy before posting without a second reviewer.",
+    };
+  }
+
+  try {
+    const result = await postPurchaseDocumentSoleApproverRpc(supabase, {
+      purchaseDocumentId: input.purchaseDocumentId,
+      organizationId: auth.manager.organizationId,
+      appUserId: auth.manager.appUserId,
+      expectedVersion: input.expectedVersion,
+      reason: input.reason,
+      notes: input.notes,
+      idempotencyKey: input.idempotencyKey,
+    });
+    return {
+      ok: true,
+      status: result.status,
+      verifiedAt: result.verifiedAt,
+      postingStatus: result.postingStatus,
+      postedLineCount: result.postedLineCount,
+      inventoryValue: result.inventoryValue,
+      inventoryLineCount: result.inventoryLineCount,
+      expenseLineCount: result.expenseLineCount,
+    };
+  } catch (err) {
+    const isKnownInventoryError = err instanceof InventoryPostingBlockedError || err instanceof AmendmentLineageAlreadyPostedError;
+    if (!isKnownInventoryError) {
+      logIfUnexpected("postPurchaseDocumentSoleApprover", err, { purchaseDocumentId: input.purchaseDocumentId, expectedVersion: input.expectedVersion });
+    }
+    if (err instanceof InventoryPostingBlockedError) {
+      return { ok: false, reason: "blocked", message: "Cannot post inventory yet.", blockers: err.blockers };
+    }
+    if (err instanceof AmendmentLineageAlreadyPostedError) {
+      return {
+        ok: false,
+        reason: "already_posted",
+        message: "Inventory was already posted from the original revision. This amendment cannot post it again.",
+      };
+    }
+    if (err instanceof SoleApproverPermissionDeniedError) {
+      return { ok: false, reason: "not_eligible", message: "You do not have permission to post without a second reviewer." };
+    }
+    if (err instanceof SoleApproverReasonRequiredError) {
+      return { ok: false, reason: "reason_required", message: "A reason is required for single-manager approval." };
+    }
+    if (err instanceof PreparationIncompleteError) {
+      return { ok: false, reason: "preparation_incomplete", message: safeMessage(err) };
+    }
+    if (err instanceof StaleVersionError) {
+      return { ok: false, reason: "stale", message: "This document was updated elsewhere. Reload to see the latest version." };
+    }
+    return { ok: false, reason: "misconfigured", message: isKnownPurchaseDocumentError(err) ? safeMessage(err) : "We couldn't post this invoice. Please try again." };
+  }
 }
 
 export type GetPurchaseDocumentReviewSummaryResult =

@@ -333,6 +333,7 @@ export function PreparationWizard({
           header={header}
           lines={lines}
           documentStatus={documentStatus}
+          version={version}
           vendorName={vendorName}
           preparationStatus={preparationStatus}
           deliveryVerifiedByName={deliveryVerifiedByName}
@@ -346,6 +347,7 @@ export function PreparationWizard({
           sendError={sendError}
           onNavigateToStep={setRequestedStep}
           onPreparationStatusChange={refetchPreparationStatus}
+          onPostedSoleApprover={onSubmitted}
         />
       ) : null}
     </div>

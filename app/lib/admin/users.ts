@@ -49,6 +49,11 @@ export interface AdminUserSummary {
    * transition). Never true for an employee with no PIN at all. */
   kioskPinResetRequired: boolean;
   roles: string[];
+  /** True when this user individually holds the "purchase_sole_approver"
+   * role (20260811100133) -- granting purchase_documents.post_without_
+   * second_review. Never implied by primaryRole/manager/admin alone; an
+   * Admin grants or revokes it per person via setSoleApproverPermissionAction. */
+  canPostWithoutSecondReview: boolean;
   /** The role that is actually GRANTED (usable for authorization) --
    * never influenced by an in-progress or failed invitation. */
   primaryRole: PrimaryRole;
@@ -104,6 +109,7 @@ function mapUserRow(row: AdminUserRow): AdminUserSummary {
     hasPin: row.out_has_pin,
     kioskPinResetRequired: row.out_kiosk_pin_reset_required,
     roles,
+    canPostWithoutSecondReview: roles.includes("purchase_sole_approver"),
     primaryRole,
     intendedRole: row.out_intended_role,
     provisioningStatus: row.out_provisioning_status,
@@ -353,6 +359,22 @@ export async function setUserRole(
     p_actor_app_user_id: actorAppUserId,
     p_app_user_id: appUserId,
     p_role_name: role,
+  });
+  if (error) throw mapAdminRpcError(error);
+}
+
+/** Grants or revokes purchase_documents.post_without_second_review for
+ * ONE specific app_user (20260811100133) -- via the dedicated
+ * "purchase_sole_approver" role, independent of their primary Manager/
+ * Admin role and never touched by setUserRole above. Admin-only,
+ * enforced both by the caller (requireAdmin()) and again inside the RPC
+ * itself. */
+export async function setSoleApproverPermission(supabase: SupabaseClient, organizationId: string, actorAppUserId: string, appUserId: string, granted: boolean): Promise<void> {
+  const { error } = await supabase.rpc("set_purchase_sole_approver_permission", {
+    p_app_user_id: appUserId,
+    p_organization_id: organizationId,
+    p_actor_app_user_id: actorAppUserId,
+    p_granted: granted,
   });
   if (error) throw mapAdminRpcError(error);
 }

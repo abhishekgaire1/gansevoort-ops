@@ -8,6 +8,7 @@ import {
   setEmployeeStationAssignmentsAction,
   setEmployeeStatusAction,
   setUserRoleAction,
+  setSoleApproverPermissionAction,
   resetEmployeeKioskPinAction,
   inviteManagerOrAdminAction,
   resendInvitationAction,
@@ -61,6 +62,9 @@ export function AdminUserDetailView({
   const [roleConfirmOpen, setRoleConfirmOpen] = useState(false);
   const [roleSaving, setRoleSaving] = useState(false);
   const [roleError, setRoleError] = useState<string | null>(null);
+
+  const [soleApproverSaving, setSoleApproverSaving] = useState(false);
+  const [soleApproverError, setSoleApproverError] = useState<string | null>(null);
 
   const [statusConfirmOpen, setStatusConfirmOpen] = useState(false);
   const [statusSaving, setStatusSaving] = useState(false);
@@ -172,6 +176,19 @@ export function AdminUserDetailView({
       return;
     }
     setRoleConfirmOpen(false);
+    router.refresh();
+  }
+
+  async function handleToggleSoleApprover() {
+    if (soleApproverSaving || !user.appUserId) return;
+    setSoleApproverSaving(true);
+    setSoleApproverError(null);
+    const result = await setSoleApproverPermissionAction(user.appUserId, !user.canPostWithoutSecondReview);
+    setSoleApproverSaving(false);
+    if (!result.ok) {
+      setSoleApproverError("message" in result ? result.message : "Unable to update this permission.");
+      return;
+    }
     router.refresh();
   }
 
@@ -444,6 +461,28 @@ export function AdminUserDetailView({
         </div>
       ) : isSelf ? (
         <p className="text-xs text-zinc-600">You cannot change your own role.</p>
+      ) : null}
+
+      {user.appUserId && user.hasAuthAccount ? (
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Permissions</p>
+          <div className="mt-3 flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-zinc-100">Post without second review</p>
+              <p className="mt-0.5 text-xs text-zinc-400">Can post validated invoices without an independent second reviewer</p>
+            </div>
+            <label className="flex shrink-0 items-center gap-2 text-xs text-zinc-300">
+              <input
+                type="checkbox"
+                checked={user.canPostWithoutSecondReview}
+                disabled={soleApproverSaving}
+                onChange={handleToggleSoleApprover}
+              />
+              {soleApproverSaving ? "Saving…" : user.canPostWithoutSecondReview ? "Granted" : "Not granted"}
+            </label>
+          </div>
+          {soleApproverError ? <p className="mt-2 text-sm text-red-400">{soleApproverError}</p> : null}
+        </div>
       ) : null}
 
       <div className="flex flex-col items-start gap-2">

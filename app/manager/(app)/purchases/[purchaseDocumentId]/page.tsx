@@ -36,7 +36,7 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
   const { data: purchaseDocument } = await serviceClient
     .from("purchase_documents")
     .select(
-      "id, source_document_id, source_extraction_id, vendor_id, document_type, document_number, document_date, po_number, delivery_date, subtotal, tax, fees, total, currency, status, version, created_by_app_user_id, verified_by_app_user_id, verified_at, last_returned_reason, last_returned_at, revision_group_id, revision_number, previous_revision_id, amendment_reason, discarded_by_app_user_id, discarded_at, discard_reason, updated_at"
+      "id, source_document_id, source_extraction_id, vendor_id, document_type, document_number, document_date, po_number, delivery_date, subtotal, tax, fees, total, currency, status, version, created_by_app_user_id, verified_by_app_user_id, verified_at, last_returned_reason, last_returned_at, revision_group_id, revision_number, previous_revision_id, amendment_reason, discarded_by_app_user_id, discarded_at, discard_reason, updated_at, verification_method, sole_approver_reason, sole_approver_notes"
     )
     .eq("id", purchaseDocumentId)
     .eq("organization_id", auth.manager.organizationId)
@@ -295,6 +295,9 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
         amendmentReason={purchaseDocument.amendment_reason}
         isCurrentVerified={purchaseDocument.revision_number === currentVerifiedRevisionNumber}
         revisions={revisions}
+        verificationMethod={purchaseDocument.verification_method}
+        soleApproverReason={purchaseDocument.sole_approver_reason}
+        soleApproverNotes={purchaseDocument.sole_approver_notes}
       />
     );
   }

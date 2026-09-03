@@ -15,6 +15,14 @@ export const PURCHASE_DOCUMENT_SQLSTATE = {
   REVIEW_PROPOSALS_CONFLICT: "GA018",
   REVIEW_PROPOSALS_OWNED_ELSEWHERE: "GA019",
   STALE_REVIEW_PROPOSALS: "GA020",
+  /** post_purchase_document_sole_approver refused: the caller does not
+   * hold the purchase_documents.post_without_second_review permission
+   * (20260811100133) -- checked authoritatively in the database, never
+   * only by hiding the button in the UI. */
+  SOLE_APPROVER_PERMISSION_DENIED: "GA076",
+  /** post_purchase_document_sole_approver refused: no reason was supplied
+   * for single-manager approval. */
+  SOLE_APPROVER_REASON_REQUIRED: "GA078",
 } as const;
 
 /** The purchase document's version didn't match, or it wasn't in the
@@ -103,6 +111,24 @@ export class StaleReviewProposalsError extends Error {
   }
 }
 
+/** The caller does not hold purchase_documents.post_without_second_review
+ * -- a manager/admin title alone never implies it; only an Admin can
+ * grant it (Admin -> Users -> that manager -> Permissions). */
+export class SoleApproverPermissionDeniedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SoleApproverPermissionDeniedError";
+  }
+}
+
+/** Post Now as Sole Approver was attempted with no reason selected. */
+export class SoleApproverReasonRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SoleApproverReasonRequiredError";
+  }
+}
+
 export function mapPurchaseDocumentRpcError(error: { code?: string; message: string }): Error {
   switch (error.code) {
     case PURCHASE_DOCUMENT_SQLSTATE.STALE_OR_WRONG_STATUS:
@@ -123,6 +149,10 @@ export function mapPurchaseDocumentRpcError(error: { code?: string; message: str
       return new NotPreparerError(error.message);
     case PURCHASE_DOCUMENT_SQLSTATE.PREPARATION_INCOMPLETE:
       return new PreparationIncompleteError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.SOLE_APPROVER_PERMISSION_DENIED:
+      return new SoleApproverPermissionDeniedError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.SOLE_APPROVER_REASON_REQUIRED:
+      return new SoleApproverReasonRequiredError(error.message);
     default:
       return new Error(error.message);
   }

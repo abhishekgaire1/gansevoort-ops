@@ -13,6 +13,7 @@ import {
 } from "@/app/actions/purchaseDocuments";
 import { ReceivingPanel } from "./ReceivingPanel";
 import { inventoryPostingBadgeLabel } from "@/app/lib/purchaseDocuments/getInventoryPostingStatus";
+import { SOLE_APPROVER_REASON_OPTIONS } from "@/app/lib/purchaseDocuments/soleApproverReason";
 import { postPurchaseDocumentToInventory, getPurchaseDocumentInventoryPosting } from "@/app/actions/inventory";
 import type { InventoryPostingDetail } from "@/app/lib/inventory/getInventoryPostingDetail";
 import type { InventoryPostingBlocker } from "@/app/lib/inventory/errors";
@@ -80,6 +81,12 @@ interface Props {
   amendmentReason: string | null;
   isCurrentVerified: boolean;
   revisions: RevisionSummary[];
+  /** "SOLE_APPROVER" when this revision was verified+posted via Post Now
+   * as Sole Approver (20260811100133) -- never "independently reviewed"
+   * language for this case. Null for the normal second-review path. */
+  verificationMethod: string | null;
+  soleApproverReason: string | null;
+  soleApproverNotes: string | null;
 }
 
 function quantityUnit(quantity: number | null, unit: string | null): string {
@@ -243,9 +250,18 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
           </div>
           <div className="flex flex-col items-end gap-1">
             <span className="rounded-full bg-emerald-400/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-300">
-              {!props.isCurrentVerified ? "Verified · Superseded" : inventoryPostingBadgeLabel(posting?.status ?? "NOT_POSTED")}
+              {!props.isCurrentVerified
+                ? "Verified · Superseded"
+                : props.verificationMethod === "SOLE_APPROVER"
+                  ? "Posted · Single-manager approval"
+                  : inventoryPostingBadgeLabel(posting?.status ?? "NOT_POSTED")}
               {props.isCurrentVerified && props.revisionNumber > 1 ? ` · Rev ${props.revisionNumber}` : ""}
             </span>
+            {props.isCurrentVerified && props.verificationMethod === "SOLE_APPROVER" ? (
+              <span className="text-xs text-amber-400">
+                Sole approver: {props.verifiedByName ?? "—"} · {props.verifiedAt ? new Date(props.verifiedAt).toLocaleString() : "—"}
+              </span>
+            ) : null}
             {!props.isCurrentVerified ? <span className="text-xs text-amber-400">A newer revision is current -- see Revision History below.</span> : null}
           </div>
         </div>
@@ -426,9 +442,25 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
             <DetailField label="Uploaded by" value={props.uploadedByName} />
             <DetailField label="Prepared by" value={props.preparedByName} />
             <DetailField label="Delivery verified by" value={props.deliveryVerifiedByName} />
-            <DetailField label="Final review verified by" value={props.verifiedByName} />
-            <DetailField label="Final review verified at" value={props.verifiedAt ? new Date(props.verifiedAt).toLocaleString() : null} />
+            {/* Never "Final review verified by/at" for a sole-approver posting --
+                that label implies an independent second reviewer, which never
+                happened here (Do not label it as independently reviewed). */}
+            <DetailField label={props.verificationMethod === "SOLE_APPROVER" ? "Posted by (sole approver)" : "Final review verified by"} value={props.verifiedByName} />
+            <DetailField
+              label={props.verificationMethod === "SOLE_APPROVER" ? "Posted at" : "Final review verified at"}
+              value={props.verifiedAt ? new Date(props.verifiedAt).toLocaleString() : null}
+            />
           </div>
+          {props.verificationMethod === "SOLE_APPROVER" ? (
+            <div className="mt-3 rounded-lg border border-amber-800 bg-amber-950/20 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">Single-manager approval</p>
+              <p className="mt-1 text-sm text-amber-100">
+                Reason: {SOLE_APPROVER_REASON_OPTIONS.find((o) => o.code === props.soleApproverReason)?.label ?? props.soleApproverReason ?? "—"}
+              </p>
+              {props.soleApproverNotes ? <p className="mt-1 text-xs text-amber-200">Notes: {props.soleApproverNotes}</p> : null}
+              <p className="mt-1 text-xs text-zinc-400">Not independently reviewed by a second manager.</p>
+            </div>
+          ) : null}
           {props.amendmentReason ? (
             <p className="mt-3 text-xs text-amber-400">
               Amendment reason (Rev {props.revisionNumber}): {props.amendmentReason}

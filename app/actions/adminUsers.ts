@@ -13,6 +13,7 @@ import {
   setEmployeeStationAssignments,
   setEmployeeStatus,
   setUserRole,
+  setSoleApproverPermission,
   setEmployeeKioskPin,
   AdminValidationError,
   type AdminUserSummary,
@@ -202,6 +203,22 @@ export async function setUserRoleAction(appUserId: string, role: PrimaryRole): P
 
   try {
     await setUserRole(getServiceRoleClient(), auth.manager.organizationId, auth.manager.appUserId, appUserId, role);
+    return { ok: true };
+  } catch (err) {
+    return toMutationResult(err);
+  }
+}
+
+/** Grants or revokes purchase_documents.post_without_second_review for
+ * one specific user -- Admin-only (requireAdmin(), same as every other
+ * admin mutation in this file). Manager/Admin title alone never implies
+ * this permission; only this action, invoked by an Admin, does. */
+export async function setSoleApproverPermissionAction(appUserId: string, granted: boolean): Promise<AdminMutationResult> {
+  const auth = await requireAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  try {
+    await setSoleApproverPermission(getServiceRoleClient(), auth.manager.organizationId, auth.manager.appUserId, appUserId, granted);
     return { ok: true };
   } catch (err) {
     return toMutationResult(err);

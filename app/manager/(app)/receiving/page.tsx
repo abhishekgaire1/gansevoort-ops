@@ -285,6 +285,7 @@ export default async function ReceivingQueuePage({
                     {item.documentDate ? `${item.documentDate} · ` : ""}
                     Uploaded by {item.uploadedByName} on {new Date(item.createdAt).toLocaleDateString()}
                     {item.verifiedByName ? ` · Verified by ${item.verifiedByName}` : ""}
+                    {item.verificationMethod === "SOLE_APPROVER" ? " · Single-manager approval" : ""}
                   </p>
                   {/* Status Language -- Verification: viewer-relative context
                       line, never a fabricated "sent at" time (the queue's own

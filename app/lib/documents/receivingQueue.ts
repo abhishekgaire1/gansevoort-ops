@@ -72,6 +72,10 @@ export interface ReceivingQueueItem {
    * rather than crashing the queue). See receivingStatusPresentation for
    * how this becomes "Ready to Post"/"Partially Posted"/"Posted". */
   postingStatus: { status: "NOT_POSTED" | "PARTIALLY_POSTED" | "POSTED"; requiredLineCount: number } | null;
+  /** "SOLE_APPROVER" when this revision was verified+posted via Post Now
+   * as Sole Approver (20260811100133), never independently reviewed --
+   * null for the normal second-review path. */
+  verificationMethod: string | null;
 }
 
 interface EmployeeNameRow {
@@ -105,6 +109,7 @@ interface SearchReceivingQueueRow {
   out_revision_number: number | null;
   out_current_verified_revision_number: number | null;
   out_created_by_app_user_id: string | null;
+  out_verification_method: string | null;
 }
 
 /**
@@ -226,6 +231,7 @@ export async function getReceivingQueue(organizationId: string, filters: Receivi
       createdByAppUserId: row.out_created_by_app_user_id,
       createdByName: row.out_created_by_app_user_id ? (nameByAppUserId.get(row.out_created_by_app_user_id) ?? null) : null,
       postingStatus: row.out_purchase_document_id ? (postingStatusByPurchaseDocumentId.get(row.out_purchase_document_id) ?? null) : null,
+      verificationMethod: row.out_verification_method,
     };
   });
 }

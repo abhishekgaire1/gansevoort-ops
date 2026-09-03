@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getPurchaseDocumentReviewSummary } from "@/app/actions/purchaseDocuments";
+import { getPurchaseDocumentReviewSummary, canUseSoleApproverPosting, postPurchaseDocumentSoleApprover, getAmendmentAlreadyPosted } from "@/app/actions/purchaseDocuments";
 import { listActiveEmployees, correctDocumentDeliveryVerifier, type EmployeeSummary } from "@/app/actions/receiving";
 import type { PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
 import type { PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine } from "@/app/lib/purchaseDocuments/types";
 import { buildFinalReviewRows, type FinalReviewRow } from "@/app/lib/purchaseDocuments/finalReviewTable";
 import { deriveSendActionState } from "@/app/lib/purchaseDocuments/sendActionState";
+import type { SoleApproverReasonCode } from "@/app/lib/purchaseDocuments/soleApproverReason";
 import { formatMoney } from "@/app/lib/formatMoney";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
+import { SoleApproverPostModal } from "./SoleApproverPostModal";
 
 /**
  * Redesign: this is now Step 3 ("Review & Post") of the 3-step wizard --
@@ -55,6 +57,7 @@ export function Step4ReviewSend({
   header,
   lines,
   documentStatus,
+  version,
   vendorName,
   preparationStatus,
   deliveryVerifiedByName,
@@ -68,6 +71,7 @@ export function Step4ReviewSend({
   sendError,
   onNavigateToStep,
   onPreparationStatusChange,
+  onPostedSoleApprover,
 }: {
   header: PurchaseDocumentHeaderDraft;
   /** The current draft lines exactly as they will be submitted -- the
@@ -78,6 +82,11 @@ export function Step4ReviewSend({
    * "✓ Sent" state (Withdraw Submission is the separate explicit action
    * to take it back). The submit RPC remains the integrity boundary. */
   documentStatus: "DRAFT" | "READY_FOR_VERIFICATION";
+  /** The document's current optimistic-concurrency version -- required by
+   * Post Now as Sole Approver (post_purchase_document_sole_approver's own
+   * p_expected_version lock), the same version Send for Second Review
+   * already submits via onSend upstream. */
+  version: number;
   vendorName: string | null;
   preparationStatus: PreparationStatus | null;
   deliveryVerifiedByName: string | null;
@@ -101,6 +110,10 @@ export function Step4ReviewSend({
    * step -- every non-invoice-date blocker routes back there, never to a
    * separate receiving step (that step no longer exists). */
   onNavigateToStep: (step: 1 | 2) => void;
+  /** Fires after a successful Post Now as Sole Approver -- the parent
+   * refreshes, same as onSend's own success path, so the page re-renders
+   * as the now-VERIFIED/POSTED document. */
+  onPostedSoleApprover: () => void;
   /** Refetches preparationStatus (and deliveryVerifiedByName) after the
    * inline "Set Delivery Verifier" resolution below succeeds. */
   onPreparationStatusChange: () => void;
@@ -110,6 +123,12 @@ export function Step4ReviewSend({
   const [verifierChoice, setVerifierChoice] = useState("");
   const [verifierPending, setVerifierPending] = useState(false);
   const [verifierError, setVerifierError] = useState<string | null>(null);
+
+  const [soleApproverEligible, setSoleApproverEligible] = useState(false);
+  const [soleApproverModalOpen, setSoleApproverModalOpen] = useState(false);
+  const [soleApproverPending, setSoleApproverPending] = useState(false);
+  const [soleApproverError, setSoleApproverError] = useState<string | null>(null);
+  const [amendmentAlreadyPosted, setAmendmentAlreadyPosted] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -121,6 +140,42 @@ export function Step4ReviewSend({
       cancelled = true;
     };
   }, [purchaseDocumentId]);
+
+  useEffect(() => {
+    if (!editable) return;
+    let cancelled = false;
+    canUseSoleApproverPosting().then((result) => {
+      if (cancelled || !result.ok) return;
+      setSoleApproverEligible(result.eligible);
+    });
+    getAmendmentAlreadyPosted(purchaseDocumentId).then((result) => {
+      if (cancelled || !result.ok) return;
+      setAmendmentAlreadyPosted(result.alreadyPosted);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [editable, purchaseDocumentId]);
+
+  async function handleConfirmSoleApprover({ reason, notes }: { reason: SoleApproverReasonCode; notes: string }) {
+    if (soleApproverPending) return;
+    setSoleApproverPending(true);
+    setSoleApproverError(null);
+    const result = await postPurchaseDocumentSoleApprover({
+      purchaseDocumentId,
+      expectedVersion: version,
+      reason,
+      notes: notes || null,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    setSoleApproverPending(false);
+    if (!result.ok) {
+      setSoleApproverError(result.message);
+      return;
+    }
+    setSoleApproverModalOpen(false);
+    onPostedSoleApprover();
+  }
 
   const ready = preparationStatus?.ready ?? false;
   const blockers = preparationStatus?.blockers ?? [];
@@ -157,6 +212,16 @@ export function Step4ReviewSend({
   const exceptionCount = summary?.exceptions.length ?? 0;
   const rows = buildFinalReviewRows({ lines, summary, blockers });
   const sendAction = deriveSendActionState({ status: documentStatus, editable, ready });
+
+  // Preview only, for the sole-approver confirmation modal -- the server
+  // independently recomputes and records the authoritative figures in
+  // the audit trail; this never needs to match to the cent for the modal
+  // itself to be useful.
+  const inventoryLineKeys = new Set((summary?.items ?? []).filter((i) => i.disposition === "INVENTORY").map((i) => i.lineKey));
+  const soleApproverInventoryValue = lines.reduce((sum, line) => (line.lineKey && inventoryLineKeys.has(line.lineKey) ? sum + (line.lineTotal ?? 0) : sum), 0);
+  const soleApproverInventoryLineCount = summary ? summary.items.filter((i) => i.disposition === "INVENTORY").length : 0;
+  const soleApproverExpenseLineCount = summary ? summary.nonInventory.length : 0;
+  const soleApproverLocations = Array.from(new Set((summary?.receiving ?? []).map((r) => r.locationName).filter((name): name is string => Boolean(name))));
 
   return (
     <div className="mt-4 flex flex-col gap-4">
@@ -335,23 +400,52 @@ export function Step4ReviewSend({
         </div>
       ) : null}
 
-      {/* ============ ACTIONS ============ */}
+      {/* ============ ACTIONS -- two clearly separated routes ============ */}
       {sendAction.kind === "send" ? (
         <>
           {sendError ? <p className="text-sm text-red-400">{sendError}</p> : null}
-          <WorkflowFooter
-            onBack={() => onNavigateToStep(2)}
-            backLabel="Back to Confirm Items & Receiving"
-            contextLabel={!sendAction.enabled ? "Resolve the items above before sending" : undefined}
-            contextTone="warning"
-            primaryLabel="Send for Final Review"
-            onPrimary={onSend}
-            primaryDisabled={!sendAction.enabled}
-            primaryPending={sendPending}
-            primaryPendingLabel="Sending for Final Review…"
-            primaryTitle={!sendAction.enabled ? "Resolve the items above before sending for final review." : undefined}
-            sticky={false}
-          />
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-400">Recommended</p>
+            <WorkflowFooter
+              onBack={() => onNavigateToStep(2)}
+              backLabel="Back to Confirm Items & Receiving"
+              contextLabel={!sendAction.enabled ? "Resolve the items above before sending" : undefined}
+              contextTone="warning"
+              primaryLabel="Send for Second Review"
+              onPrimary={onSend}
+              primaryDisabled={!sendAction.enabled}
+              primaryPending={sendPending}
+              primaryPendingLabel="Sending for Second Review…"
+              primaryTitle={!sendAction.enabled ? "Resolve the items above before sending for second review." : undefined}
+              sticky={false}
+            />
+            <p className="mt-1.5 text-xs text-zinc-500">Another authorized manager independently confirms the invoice before inventory is posted.</p>
+          </div>
+
+          {soleApproverEligible ? (
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Authorized manager option</p>
+              {amendmentAlreadyPosted ? (
+                <p className="text-sm text-amber-300">Inventory was already posted from the original revision. This amendment cannot post it again.</p>
+              ) : (
+                <>
+                  <p className="text-sm text-zinc-300">Post immediately with your approval recorded in the audit history.</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSoleApproverError(null);
+                      setSoleApproverModalOpen(true);
+                    }}
+                    disabled={!sendAction.enabled}
+                    title={!sendAction.enabled ? "Resolve the items above before posting." : undefined}
+                    className="mt-2 rounded-full border border-zinc-600 px-4 py-1.5 text-xs font-semibold text-zinc-200 hover:border-zinc-400 disabled:opacity-40"
+                  >
+                    Post Now as Sole Approver
+                  </button>
+                </>
+              )}
+            </div>
+          ) : null}
         </>
       ) : sendAction.kind === "sent" ? (
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-zinc-800 bg-zinc-950/95 px-4 py-3">
@@ -372,6 +466,23 @@ export function Step4ReviewSend({
             </span>
           </div>
         </div>
+      ) : null}
+
+      {soleApproverModalOpen ? (
+        <SoleApproverPostModal
+          vendorName={vendorName}
+          documentNumber={header.documentNumber}
+          invoiceTotal={header.total}
+          currency={header.currency}
+          inventoryLineCount={soleApproverInventoryLineCount}
+          expenseLineCount={soleApproverExpenseLineCount}
+          inventoryValue={soleApproverInventoryValue}
+          locations={soleApproverLocations}
+          pending={soleApproverPending}
+          error={soleApproverError}
+          onCancel={() => setSoleApproverModalOpen(false)}
+          onConfirm={handleConfirmSoleApprover}
+        />
       ) : null}
     </div>
   );
