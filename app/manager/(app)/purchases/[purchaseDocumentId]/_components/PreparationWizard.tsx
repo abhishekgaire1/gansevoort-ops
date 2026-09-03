@@ -3,17 +3,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { savePurchaseDocumentDraft, submitPurchaseDocumentForVerification, getPurchaseDocumentPreparationStatus } from "@/app/actions/purchaseDocuments";
-import { getPurchaseDocumentLineClassifications } from "@/app/actions/itemClassification";
 import { Stepper } from "./Stepper";
 import { Step1ReviewInvoice, emptyStep1Line } from "./Step1ReviewInvoice";
-import { ItemMappingPanel } from "./ItemMappingPanel";
-import { ReceivingPanel } from "./ReceivingPanel";
+import { ItemsAndReceivingPanel } from "./ItemsAndReceivingPanel";
 import { Step4ReviewSend } from "./Step4ReviewSend";
 import { deriveWizardProgress, type WizardStepId } from "@/app/lib/purchaseDocuments/deriveWizardProgress";
 import { lineLevelBlockers } from "@/app/lib/purchaseDocuments/preparationBlockers";
-import { computeItemMappingProgress } from "@/app/lib/purchaseDocuments/itemMappingProgress";
-import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
-import { blockingIssueSummaryLabel, scrollToFirstIssue } from "@/app/components/receiving/blockingIssues";
 import { WIZARD_STEP_SLUGS, wizardStepFromSlug } from "@/app/lib/purchaseDocuments/wizardStepSlug";
 import { continueFromStep1 } from "@/app/lib/purchaseDocuments/continueFromStep1";
 import type { PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
@@ -23,19 +18,25 @@ import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumen
 import type { VendorSummary } from "@/app/actions/vendors";
 
 /**
- * The four-step manager preparation workflow (this replaces the previous
+ * The three-step manager preparation workflow (this replaces the previous
  * single long page that stacked PDF review, item mapping, receiving, and
- * blockers all at once). One primary task dominates the screen at a time;
- * the Stepper stays visible so the manager always knows where they are,
- * what's done, and what remains.
+ * blockers all at once -- and, in a later redesign, the previous 4-step
+ * wizard's separate Confirm Items / Confirm Receiving steps, now combined
+ * into one "Confirm Items & Receiving" step so a manager reviews what the
+ * invoice says, which item it matches, and what was received together,
+ * not across two screens). One primary task dominates the screen at a
+ * time; the Stepper stays visible so the manager always knows where they
+ * are, what's done, and what remains.
  *
  * Every step's completion is DERIVED from the same backend data the rest
  * of this codebase already treats as authoritative -- no second,
  * independently-persisted workflow-state system:
  *   - Step 1: validatePurchaseDocumentDraft's error-severity flags.
- *   - Step 2: every current line's classification is CONFIRMED
- *     (ItemMappingPanel's own onAllResolvedChange).
- *   - Step 3/4: the existing first-manager completion gate's own preview
+ *   - Step 2: every current line is ready for inventory, a correctly
+ *     classified expense, or explicitly rejected/damaged
+ *     (ItemsAndReceivingPanel's own onAllResolvedChange, backed by
+ *     combinedLineReadiness.ts).
+ *   - Step 3: the existing first-manager completion gate's own preview
  *     (getPreparationStatus, backed by the same RPC-enforced rule
  *     submit_purchase_document_for_verification already uses
  *     authoritatively).
@@ -141,34 +142,23 @@ export function PreparationWizard({
 
   const refetchPreparationStatus = useCallback(async () => {
     const result = await getPurchaseDocumentPreparationStatus(purchaseDocumentId);
-    if (result.ok) setPreparationStatus(result.status);
+    if (result.ok) {
+      setPreparationStatus(result.status);
+      // Eager, approximate combined-step-2 completion (independent of
+      // whether Step 2 is actually the active step) so a manager who
+      // refreshes the page while on Step 3 resumes there directly, rather
+      // than flashing through Step 2 while ItemsAndReceivingPanel's own
+      // (authoritative) fetch loads -- getPreparationStatus's own
+      // per-line blockers already cover both classification and receiving
+      // completeness, the SAME two facts the combined step's own
+      // completion depends on, so no separate fetch is duplicated here.
+      setStep2Resolved(lineLevelBlockers(result.status.blockers).length === 0);
+    }
   }, [purchaseDocumentId]);
-
-  // Fetched eagerly (independent of whether Step 2 is actually the active
-  // step) so a manager who refreshes the page while on Step 3/4 resumes
-  // there directly, rather than flashing through Step 2 while it loads --
-  // ItemMappingPanel fetches this same data again for its own detailed UI
-  // once mounted, the same established "each section fetches what it
-  // needs" pattern already used throughout this app.
-  const refetchStep2Resolved = useCallback(async () => {
-    const result = await getPurchaseDocumentLineClassifications(purchaseDocumentId);
-    if (result.ok) setStep2Resolved(computeItemMappingProgress(result.lines).allResolved);
-  }, [purchaseDocumentId]);
-
-  // Step 3 completes on LINE-LEVEL receiving completeness only.
-  // Document-level requirements (delivery verifier, plausible date) are
-  // Step 4's job -- their controls live there, and the authoritative
-  // submit RPC still enforces the full gate regardless. Gating Step 3's
-  // Continue on the full `ready` deadlocked the wizard: Step 4 was
-  // unreachable until a delivery verifier was set, and the verifier can
-  // only be set on Step 4.
-  const receivingComplete = preparationStatus ? preparationStatus.receivingComplete : null;
-  const receivingBlockers = preparationStatus ? lineLevelBlockers(preparationStatus.blockers) : [];
 
   const { steps, activeStep, furthestReachableStep } = deriveWizardProgress({
     step1Complete,
     step2Complete: step2Resolved,
-    step3Complete: receivingComplete,
     requestedStep,
   });
 
@@ -253,13 +243,13 @@ export function PreparationWizard({
   }
 
   useEffect(() => {
-    // Deliberate fetch-on-mount for the completion-gate preview and the
-    // step-2 resolution summary, same pattern already used across this
-    // app's section-level panels.
+    // Deliberate fetch-on-mount for the completion-gate preview (which
+    // also seeds the eager, approximate step-2 resolution summary --
+    // see refetchPreparationStatus above), same pattern already used
+    // across this app's section-level panels.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refetchPreparationStatus();
-    refetchStep2Resolved();
-  }, [refetchPreparationStatus, refetchStep2Resolved]);
+  }, [refetchPreparationStatus]);
 
   useEffect(() => {
     // Keeps local step-navigation state in sync with the URL after a
@@ -309,7 +299,7 @@ export function PreparationWizard({
       ) : null}
 
       {activeStep === 2 ? (
-        <ItemMappingPanel
+        <ItemsAndReceivingPanel
           purchaseDocumentId={purchaseDocumentId}
           vendorName={vendorName}
           readOnly={!editable}
@@ -321,36 +311,6 @@ export function PreparationWizard({
       ) : null}
 
       {activeStep === 3 ? (
-        <div className="mt-4 flex flex-col gap-4">
-          <ReceivingPanel purchaseDocumentId={purchaseDocumentId} readOnly={!editable} collapseWhenReceived onChange={refetchPreparationStatus} />
-          {editable ? (
-            // Never a detached list of every blocked line (ReceivingPanel's
-            // own rows already show "⚠ Needs input" + the exact reason
-            // inline, right where the problem is) -- the footer only
-            // summarizes a count, and clicking it scrolls to/focuses the
-            // first unresolved line rather than doing nothing.
-            <WorkflowFooter
-              contextLabel={receivingComplete === false ? blockingIssueSummaryLabel(receivingBlockers.length, "line") : undefined}
-              contextTone="warning"
-              onContextClick={
-                receivingBlockers.length > 0
-                  ? () =>
-                      scrollToFirstIssue(
-                        receivingBlockers.map((b) => ({ id: `receiving-line-${b.lineKey}`, description: b.description, reason: b.reason }))
-                      )
-                  : undefined
-              }
-              primaryLabel="Continue to Review & Send"
-              onPrimary={() => setRequestedStep(4)}
-              primaryDisabled={!receivingComplete}
-              primaryTitle={!receivingComplete ? "Finish receiving every inventory line before continuing." : undefined}
-              sticky={false}
-            />
-          ) : null}
-        </div>
-      ) : null}
-
-      {activeStep === 4 ? (
         <Step4ReviewSend
           header={header}
           lines={lines}

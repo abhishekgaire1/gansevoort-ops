@@ -5,8 +5,11 @@ describe("wizardStepFromSlug", () => {
   it("maps each known slug back to its step id", () => {
     expect(wizardStepFromSlug("invoice")).toBe(1);
     expect(wizardStepFromSlug("items")).toBe(2);
-    expect(wizardStepFromSlug("receiving")).toBe(3);
-    expect(wizardStepFromSlug("review")).toBe(4);
+    expect(wizardStepFromSlug("review")).toBe(3);
+  });
+
+  it("test 13: an old Step 3 (receiving) link redirects safely to the new combined step, never a cold restart", () => {
+    expect(wizardStepFromSlug("receiving")).toBe(2);
   });
 
   it("returns null for an unknown or missing slug, never guessing a step", () => {

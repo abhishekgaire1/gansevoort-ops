@@ -12,7 +12,13 @@ import { formatMoney } from "@/app/lib/formatMoney";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
 
 /**
- * Step 4 -- Manager 1's final check before submission. Three layers, each
+ * Redesign: this is now Step 3 ("Review & Post") of the 3-step wizard --
+ * only its position/label changed (it was Step 4, "Review & Send," when
+ * the wizard had a separate Confirm Items and Confirm Receiving step; the
+ * component itself was already a pure summary of decisions made upstream,
+ * so its own content needed no changes).
+ *
+ * Manager 1's final check before submission. Three layers, each
  * shown exactly ONCE (the previous layout repeated every line name across
  * separate Items/Receiving/Non-Inventory sections):
  *   1. A compact readiness strip -- driven ENTIRELY by preparationStatus,
@@ -91,7 +97,10 @@ export function Step4ReviewSend({
   onSend: () => void;
   sendPending: boolean;
   sendError: string | null;
-  onNavigateToStep: (step: 1 | 2 | 3) => void;
+  /** Redesign: step 2 is now the combined "Confirm Items & Receiving"
+   * step -- every non-invoice-date blocker routes back there, never to a
+   * separate receiving step (that step no longer exists). */
+  onNavigateToStep: (step: 1 | 2) => void;
   /** Refetches preparationStatus (and deliveryVerifiedByName) after the
    * inline "Set Delivery Verifier" resolution below succeeds. */
   onPreparationStatusChange: () => void;
@@ -317,22 +326,10 @@ export function Step4ReviewSend({
           {blockers.some((b) => !/delivery verified/i.test(b.reason)) ? (
             <button
               type="button"
-              onClick={() =>
-                onNavigateToStep(
-                  blockers.some((b) => /invoice date/i.test(b.reason))
-                    ? 1
-                    : blockers.some((b) => /classification|matching|approval|re-review/i.test(b.reason))
-                      ? 2
-                      : 3
-                )
-              }
+              onClick={() => onNavigateToStep(blockers.some((b) => /invoice date/i.test(b.reason)) ? 1 : 2)}
               className="mt-3 rounded-full border border-amber-700 px-4 py-1.5 text-xs font-semibold text-amber-200"
             >
-              {blockers.some((b) => /invoice date/i.test(b.reason))
-                ? "Go to Review Invoice"
-                : blockers.some((b) => /classification|matching|approval|re-review/i.test(b.reason))
-                  ? "Go to Confirm Items"
-                  : "Go to Confirm Receiving"}
+              {blockers.some((b) => /invoice date/i.test(b.reason)) ? "Go to Review Invoice" : "Go to Confirm Items & Receiving"}
             </button>
           ) : null}
         </div>
@@ -343,8 +340,8 @@ export function Step4ReviewSend({
         <>
           {sendError ? <p className="text-sm text-red-400">{sendError}</p> : null}
           <WorkflowFooter
-            onBack={() => onNavigateToStep(3)}
-            backLabel="Back to Confirm Receiving"
+            onBack={() => onNavigateToStep(2)}
+            backLabel="Back to Confirm Items & Receiving"
             contextLabel={!sendAction.enabled ? "Resolve the items above before sending" : undefined}
             contextTone="warning"
             primaryLabel="Send for Final Review"
@@ -358,8 +355,8 @@ export function Step4ReviewSend({
         </>
       ) : sendAction.kind === "sent" ? (
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-zinc-800 bg-zinc-950/95 px-4 py-3">
-          <button type="button" onClick={() => onNavigateToStep(3)} className="text-xs text-zinc-400 underline">
-            ← Back to Confirm Receiving
+          <button type="button" onClick={() => onNavigateToStep(2)} className="text-xs text-zinc-400 underline">
+            ← Back to Confirm Items & Receiving
           </button>
           <div className="flex flex-col items-end gap-0.5">
             {/* Status Language -- Verification, Part "SUCCESS MESSAGE": this

@@ -1,18 +1,28 @@
 /**
- * The 4-step manager preparation wizard's progress is entirely DERIVED from
- * existing backend state -- never a second, independently-persisted
+ * The 3-step manager preparation wizard's progress is entirely DERIVED
+ * from existing backend state -- never a second, independently-persisted
  * workflow-state system. Step 1 completeness comes from
- * validatePurchaseDocumentDraft's error-severity flags (header/vendor/type/
- * total), step 2 from whether every current line's classification is
- * CONFIRMED (getPurchaseDocumentLineClassifications), and step 3/4 from the
- * existing first-manager completion gate's own preview
- * (getPreparationStatus, backed by the same RPC-enforced rule
- * submit_purchase_document_for_verification already uses authoritatively).
- * Refreshing the page re-derives the same progress from the same data --
- * there is nothing to lose.
+ * validatePurchaseDocumentDraft's error-severity flags (header/vendor/
+ * type/total), step 2 (Confirm Items & Receiving) from the SAME combined
+ * per-line readiness the step's own footer/card badges use
+ * (combinedLineReadiness.ts's summarizeCombinedStep). Refreshing the page
+ * re-derives the same progress from the same data -- there is nothing to
+ * lose.
+ *
+ * Step 3 (Review & Post) is terminal -- like the old 4-step wizard's own
+ * Step 4, it never shows its own completion checkmark (there is no
+ * further step to unlock by completing it); Step4ReviewSend/
+ * VerifiedPurchaseDocumentSummary show its own "Sent"/"Posted" state
+ * inline instead.
+ *
+ * Redesign: the previous 4-step wizard's separate "Confirm Items" and
+ * "Confirm Receiving" steps are now ONE step (item matching, purchase
+ * package, and receiving are reviewed together per line) -- step2Complete
+ * below is the combined completion fact for that one step, not just item
+ * matching.
  */
 
-export type WizardStepId = 1 | 2 | 3 | 4;
+export type WizardStepId = 1 | 2 | 3;
 export type WizardStepState = "complete" | "current" | "not_started" | "needs_attention";
 
 export interface WizardStepStatus {
@@ -24,17 +34,17 @@ export interface DeriveWizardProgressInput {
   /** True once the header has no error-severity review flags (vendor,
    * document type/number/date, total all present). */
   step1Complete: boolean;
-  /** True once every CURRENT line's classification is CONFIRMED. Null
-   * while classification data hasn't loaded yet -- treated as incomplete,
-   * never falsely marked complete before we actually know. */
+  /** True once every current line is ready for inventory, a correctly
+   * classified expense, or explicitly rejected/damaged -- the combined
+   * Confirm Items & Receiving step's own completion (see
+   * combinedLineReadiness.ts). Null while classification/receiving data
+   * hasn't loaded yet -- treated as incomplete, never falsely marked
+   * complete before we actually know. */
   step2Complete: boolean | null;
-  /** True once the existing completion-gate preview reports ready (which,
-   * once step 2 is complete, can only still be blocked by receiving). Null
-   * while not yet loaded. */
-  step3Complete: boolean | null;
-  /** True if any line has a STALE classification or an AI proposal
-   * awaiting the manager's review -- surfaces "needs_attention" instead of
-   * plain "current"/"not_started" for step 2. */
+  /** True if any line has a STALE classification, an AI proposal awaiting
+   * the manager's review, or any other unresolved issue -- surfaces
+   * "needs_attention" instead of plain "current"/"not_started" for step
+   * 2. */
   step2NeedsAttention?: boolean;
   /** The manager's own explicit navigation choice (a Continue click, a
    * Stepper click, or the ?step= URL param they navigated to/refreshed
@@ -67,22 +77,16 @@ export interface WizardProgress {
  * and enables its Continue button -- but the manager stays exactly where
  * they are (step1Complete=true, furthestReachable=2, activeStep=1 is a
  * valid, stable state) until they deliberately click Continue/the
- * Stepper. Previously `activeStep` defaulted to `furthestReachable`
- * whenever no explicit request existed, so the instant the last required
- * Step 1 field became valid (live validation runs per keystroke) the
- * wizard auto-jumped to Step 2 -- and async completions (AI matching
- * finishing, a receipt recording) auto-jumped Steps 2/3 the same way.
+ * Stepper.
  */
 export function deriveWizardProgress(input: DeriveWizardProgressInput): WizardProgress {
   const step2Known = input.step2Complete === true;
-  const step3Known = input.step3Complete === true;
 
-  // Reachability: the first not-yet-complete step (or 4 when everything
+  // Reachability: the first not-yet-complete step (or 3 when everything
   // upstream is done).
   let furthestReachable: WizardStepId = 1;
   if (input.step1Complete) furthestReachable = 2;
   if (input.step1Complete && step2Known) furthestReachable = 3;
-  if (input.step1Complete && step2Known && step3Known) furthestReachable = 4;
 
   // Active step: explicit navigation only, clamped by reachability. No
   // explicit navigation yet = step 1. (Refresh keeps the manager's place
@@ -111,8 +115,9 @@ export function deriveWizardProgress(input: DeriveWizardProgressInput): WizardPr
   const steps: WizardStepStatus[] = [
     { id: 1, state: stateFor(1, input.step1Complete) },
     { id: 2, state: stateFor(2, input.step1Complete && step2Known) },
-    { id: 3, state: stateFor(3, input.step1Complete && step2Known && step3Known) },
-    { id: 4, state: stateFor(4, false) },
+    // Terminal step -- never shows its own completion checkmark, matching
+    // the old 4-step wizard's Step 4 (there is no further step to unlock).
+    { id: 3, state: stateFor(3, false) },
   ];
 
   return { steps, activeStep, furthestReachableStep: furthestReachable };

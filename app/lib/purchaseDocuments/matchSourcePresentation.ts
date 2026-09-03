@@ -2,9 +2,10 @@ import type { LineClassificationRow } from "@/app/actions/itemClassification";
 
 /**
  * Receiving UX pass, Part 12-16: pure, framework-free presentation logic
- * for Confirm Items' inline resolved-line display -- separated from
- * ItemMappingPanel.tsx (same "pure logic in app/lib, rendering in the
- * component" split already used throughout this codebase, e.g.
+ * for Confirm Items & Receiving's inline resolved-line display --
+ * separated from ItemsAndReceivingPanel.tsx (same "pure logic in app/lib,
+ * rendering in the component" split already used throughout this
+ * codebase, e.g.
  * classificationMatchingOutcome.ts, receivingPresentation.ts) so it's
  * directly unit-testable without mounting the component or touching a
  * database/AI call.

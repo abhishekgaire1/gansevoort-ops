@@ -5,6 +5,7 @@ import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { classifyPurchaseDocumentLines } from "@/app/lib/itemMaster/classifyPurchaseDocumentLines";
 import { getPreparationStatus, type PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
+import { hasSiblingRevisionAlreadyPosted } from "@/app/lib/purchaseDocuments/amendmentPostingStatus";
 import { getPurchaseDocumentReviewSummary as getReviewSummary, type PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
 import { getReceiptHistory, type ReceiptHistoryEntry } from "@/app/lib/purchaseDocuments/getReceiptHistory";
 import { initializePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/initializePurchaseDocumentDraftRpc";
@@ -554,6 +555,24 @@ export async function getPurchaseDocumentPreparationStatus(purchaseDocumentId: s
 
   const status = await getPreparationStatus(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
   return { ok: true, status };
+}
+
+export type GetAmendmentAlreadyPostedResult = { ok: true; alreadyPosted: boolean } | { ok: false; reason: "not_authorized"; message: string };
+
+/** True when a SIBLING revision in this document's own amendment lineage
+ * already posted inventory -- mirrors migration 20260811100132's own
+ * server-side guard (post_purchase_document_inventory refuses a second
+ * posting per lineage). Surfaced on the combined Confirm Items &
+ * Receiving step so a manager reopening an already-posted invoice for
+ * amendment is told up front, never discovering it only after reaching
+ * the final screen. */
+export async function getAmendmentAlreadyPosted(purchaseDocumentId: string): Promise<GetAmendmentAlreadyPostedResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+  const alreadyPosted = await hasSiblingRevisionAlreadyPosted(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
+  return { ok: true, alreadyPosted };
 }
 
 export type GetPurchaseDocumentReviewSummaryResult =
