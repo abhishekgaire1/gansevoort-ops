@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getReceivingLines } from "@/app/lib/receiving/getReceivingLines";
 
 import { lineLevelBlockers, type PreparationBlocker } from "@/app/lib/purchaseDocuments/preparationBlockers";
+import { getPackageMismatchByLineKey } from "@/app/lib/purchaseDocuments/lineMismatchLookup";
 
 export type { PreparationBlocker };
 
@@ -48,6 +49,13 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
   const classificationByLineKey = new Map((classifications ?? []).map((c) => [c.line_key as string, c]));
 
   const receivingLines = await getReceivingLines(supabase, purchaseDocumentId, organizationId);
+  // The SAME purchase-package-mismatch fact combinedLineReadiness.ts (Step
+  // 2's own authoritative per-line model) already checks -- without this,
+  // a line with an unresolved vendor/SKU package mismatch could read as
+  // "ready" here even though Step 2 correctly still calls it needs_
+  // attention, letting Send for Second Review enable (and the Stepper
+  // mark Step 2 done) despite the genuine unresolved mismatch.
+  const packageMismatchByLineKey = await getPackageMismatchByLineKey(supabase, purchaseDocumentId, organizationId);
 
   const { data: effectiveReceipts } = await supabase.rpc("effective_receipts_for_purchase_document", {
     p_purchase_document_id: purchaseDocumentId,
@@ -136,6 +144,18 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
         description: line.description,
         reason: "Receiving needs review -- this item's unit configuration changed after the delivery was recorded. Re-confirm the line via Edit Receiving.",
       });
+      continue;
+    }
+
+    // The SAME purchase-package-mismatch fact combinedLineReadiness.ts
+    // (Step 2's own authoritative model) checks -- checked LAST, after
+    // every receipt-specific reason above, so a line whose ALREADY-
+    // RECORDED receipt is merely stale relative to a newer item
+    // configuration keeps that more specific, more actionable message
+    // (which one blocker to show is otherwise ambiguous when both
+    // conditions are genuinely true at once, e.g. right after a remap).
+    if (packageMismatchByLineKey.get(line.lineKey)) {
+      blockers.push({ lineKey: line.lineKey, description: line.description, reason: "Purchase package needs review -- the invoice unit does not match this vendor/SKU's confirmed package." });
     }
   }
 

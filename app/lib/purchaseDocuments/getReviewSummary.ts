@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getReceivingLines } from "@/app/lib/receiving/getReceivingLines";
 import { computeReceivingPrefill } from "@/app/lib/receiving/computeReceivingPrefill";
+import { getPackageMismatchByLineKey } from "@/app/lib/purchaseDocuments/lineMismatchLookup";
 
 export interface ReviewSummaryItemLine {
   lineKey: string;
@@ -34,6 +35,11 @@ export interface ReviewSummaryReceivingLine {
   inventoryQuantity: number | null;
   locationName: string | null;
   conditionStatus: string | null;
+  /** The SAME purchase-package-mismatch fact combinedLineReadiness.ts
+   * checks -- a mismatched line is never counted "receiving complete"
+   * here, even if its quantity/location/measurement are otherwise filled
+   * in (matching Step 2's own classifyLineOutcome ordering). */
+  hasPackageMismatch: boolean;
 }
 
 export interface ReviewSummaryNonInventoryLine {
@@ -102,7 +108,7 @@ export async function getPurchaseDocumentReviewSummary(
   purchaseDocumentId: string,
   organizationId: string
 ): Promise<PurchaseDocumentReviewSummary> {
-  const [{ data: lines }, { data: classifications }, receivingLines, { data: categories }, { data: spendCategories }] = await Promise.all([
+  const [{ data: lines }, { data: classifications }, receivingLines, { data: categories }, { data: spendCategories }, packageMismatchByLineKey] = await Promise.all([
     supabase
       .from("purchase_document_lines")
       .select("line_key, line_number, vendor_sku, description, line_total")
@@ -117,6 +123,11 @@ export async function getPurchaseDocumentReviewSummary(
     getReceivingLines(supabase, purchaseDocumentId, organizationId),
     supabase.from("inventory_categories").select("id, name").eq("organization_id", organizationId),
     supabase.from("spend_categories").select("id, parent_id, name").eq("organization_id", organizationId),
+    // The SAME purchase-package-mismatch fact combinedLineReadiness.ts
+    // (Step 2's own authoritative model) checks -- without this, a line
+    // with an unresolved mismatch could count as "receiving complete"
+    // here while Step 2 still correctly calls it needs_attention.
+    getPackageMismatchByLineKey(supabase, purchaseDocumentId, organizationId),
   ]);
 
   const classificationByLineKey = new Map((classifications ?? []).map((c) => [c.line_key as string, c]));
@@ -226,6 +237,7 @@ export async function getPurchaseDocumentReviewSummary(
       inventoryQuantity: isPackagingUnit ? (receivedQuantity as number) * (receivingInfo.fixedConversionFactor as number) : null,
       locationName: receiptLine?.location_id ? (locationNameById.get(receiptLine.location_id as string) ?? null) : null,
       conditionStatus,
+      hasPackageMismatch: packageMismatchByLineKey.get(lineKey) ?? false,
     });
 
     if (conditionStatus && conditionStatus !== "RECEIVED_AS_INVOICED") {
@@ -246,7 +258,7 @@ export async function getPurchaseDocumentReviewSummary(
 
   const itemsConfirmedCount = items_.filter((i) => i.status === "CONFIRMED").length;
   const receivingCompleteCount = receiving.filter(
-    (r) => r.receivedQuantity !== null && r.locationName !== null && (!r.requiresVerifiedMeasurement || r.verifiedQuantity !== null)
+    (r) => !r.hasPackageMismatch && r.receivedQuantity !== null && r.locationName !== null && (!r.requiresVerifiedMeasurement || r.verifiedQuantity !== null)
   ).length;
 
   return {

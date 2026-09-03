@@ -69,6 +69,7 @@ const RECEIVED_LINE = {
   inventoryQuantity: null,
   locationName: "Central Walk-In",
   conditionStatus: "RECEIVED_AS_INVOICED",
+  hasPackageMismatch: false,
 };
 
 describe("buildFinalReviewRows", () => {

@@ -147,7 +147,7 @@ export function ItemsAndReceivingPanel({
   onAllResolvedChange?: (resolved: boolean) => void;
   /** Fires after every load with the authoritative counts -- feeds the
    * Stepper's own "7 of 9 reviewed" status text, never recomputed there. */
-  onProgressChange?: (progress: { readyCount: number; totalLines: number; expenseCount: number }) => void;
+  onProgressChange?: (progress: { readyCount: number; totalLines: number; expenseCount: number; needsAttentionCount: number }) => void;
   onContinue?: () => void;
   /** The "Correct invoice unit" corrective action on a purchase-package
    * mismatch warning -- jumps back to Step 1. */
@@ -237,7 +237,6 @@ export function ItemsAndReceivingPanel({
         getAmendmentAlreadyPosted(purchaseDocumentId),
       ]);
 
-    let combinedResolved = false;
     if (linesResult.ok) setLines(linesResult.lines);
     else setError(linesResult.message);
     if (itemsResult.ok) setItems(itemsResult.items);
@@ -249,35 +248,23 @@ export function ItemsAndReceivingPanel({
     if (locationsResult.ok) setLocations(locationsResult.locations);
     if (amendmentPostedResult.ok) setAlreadyPostedElsewhere(amendmentPostedResult.alreadyPosted);
 
-    let nextReceivingState: ReceivingLineDraft[] = [];
     if (receivingResult.ok) {
       const soleLocationId = locationsResult.ok && locationsResult.locations.length === 1 ? locationsResult.locations[0].id : "";
       setBulkLocationId((current) => current || soleLocationId);
       const loadedLocations = locationsResult.ok ? locationsResult.locations : [];
-      setReceivingLineState((prev) => {
-        nextReceivingState = mergeReceivingLineState(receivingResult.lines, loadedLocations, prev);
-        return nextReceivingState;
-      });
+      setReceivingLineState((prev) => mergeReceivingLineState(receivingResult.lines, loadedLocations, prev));
     }
-
-    if (linesResult.ok) {
-      const receivingByLineKey = new Map(nextReceivingState.map((l) => [l.lineKey, l]));
-      const outcomes = linesResult.lines.map((line) => {
-        const receiving = receivingByLineKey.get(line.lineKey);
-        const receivingReady = line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null;
-        return classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady });
-      });
-      const stepSummary = summarizeCombinedStep(outcomes);
-      combinedResolved = stepSummary.allResolved;
-      onProgressChange?.({ readyCount: stepSummary.readyCount, totalLines: stepSummary.totalLines, expenseCount: stepSummary.expenseCount });
-    }
-    onAllResolvedChange?.(combinedResolved);
 
     setLoading(false);
     onChange?.();
-    // onAllResolvedChange/onProgressChange/onChange are stable callbacks
-    // from the parent.
-  }, [purchaseDocumentId, onChange, onAllResolvedChange, onProgressChange]);
+    // onChange is a stable callback from the parent. Progress/resolved
+    // reporting to the parent (onProgressChange/onAllResolvedChange) is
+    // handled by the effect below, from the SAME live summary the render
+    // itself uses -- never recomputed here from this load's own snapshot,
+    // which is exactly what let the parent's reported progress go stale
+    // the instant a manager edited a field without triggering another
+    // load() (the "2 of 9 reviewed" vs "ALL 9 LINES REVIEWED" defect).
+  }, [purchaseDocumentId, onChange]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -580,6 +567,37 @@ export function ItemsAndReceivingPanel({
     onContinue();
   }
 
+  // ============ THE authoritative per-line/step readiness model ============
+  // Computed unconditionally, every render, from CURRENT lines/receiving
+  // state (never a stale snapshot from the last load()) -- the single
+  // source every consumer of Step 2 completion reads from: this render's
+  // own JSX below, AND the parent (via the effect immediately after) for
+  // the Stepper's sublabel and the step's own completion gate. Two
+  // separately-updated copies of this exact computation (one live here,
+  // one refreshed only on load()) is what previously let the Stepper show
+  // "2 of 9 reviewed" while this same panel's own completion banner said
+  // "ALL 9 LINES REVIEWED" -- there is now exactly one.
+  const receivingByLineKey = new Map(receivingLineState.map((l) => [l.lineKey, l]));
+  const combinedLines = (lines ?? []).map((line) => {
+    const receiving = receivingByLineKey.get(line.lineKey) ?? null;
+    const receivingReady = line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null;
+    const outcome = classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady });
+    return { line, receiving, outcome };
+  });
+  const summary = summarizeCombinedStep(combinedLines.map((c) => c.outcome));
+
+  useEffect(() => {
+    if (lines === null) return; // nothing loaded yet -- never report a premature "0 of 0"
+    onProgressChange?.({ readyCount: summary.readyCount, totalLines: summary.totalLines, expenseCount: summary.expenseCount, needsAttentionCount: summary.needsAttentionCount });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines === null, summary.readyCount, summary.totalLines, summary.expenseCount, summary.needsAttentionCount, onProgressChange]);
+
+  useEffect(() => {
+    if (lines === null) return;
+    onAllResolvedChange?.(summary.allResolved);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines === null, summary.allResolved, onAllResolvedChange]);
+
   if (loading || lines === null) {
     return (
       <div aria-busy="true" className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
@@ -615,17 +633,8 @@ export function ItemsAndReceivingPanel({
       </div>
     ) : null;
 
-  const receivingByLineKey = new Map(receivingLineState.map((l) => [l.lineKey, l]));
   const spendCategoryPathById = new Map(flattenSpendCategoryPaths(spendCategories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId }))).map((p) => [p.id, p.path]));
 
-  const combinedLines = lines.map((line) => {
-    const receiving = receivingByLineKey.get(line.lineKey) ?? null;
-    const receivingReady = line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null;
-    const outcome = classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady });
-    return { line, receiving, outcome };
-  });
-
-  const summary = summarizeCombinedStep(combinedLines.map((c) => c.outcome));
   const filtered = combinedLines.filter((c) => {
     if (filter === "all") return true;
     if (filter === "needs_attention") return c.outcome === "needs_attention";
@@ -916,7 +925,10 @@ function CompletionPanel({
   if (summary.allResolved) {
     return (
       <div className="rounded-2xl border-2 border-emerald-600 bg-emerald-950/30 p-4">
-        <p className="text-lg font-bold text-emerald-300">✓ ALL {summary.totalLines} LINES REVIEWED</p>
+        {/* "Complete," never "reviewed" -- readiness is a persisted fact
+            (every line is either ready or a classified expense), but no
+            "review" event is actually recorded here. */}
+        <p className="text-lg font-bold text-emerald-300">✓ ALL {summary.totalLines} LINES COMPLETE</p>
         <ul className="mt-2 flex flex-col gap-0.5 text-sm font-medium text-emerald-100">
           <li>
             {inventoryReady} inventory item{inventoryReady === 1 ? "" : "s"} ready

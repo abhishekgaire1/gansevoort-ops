@@ -127,7 +127,7 @@ export function PreparationWizard({
   // ItemsAndReceivingPanel itself (the authoritative source, same
   // combinedLineReadiness.ts summary the panel's own footer uses), never
   // recomputed separately here. Null until the panel has loaded once.
-  const [step2Progress, setStep2Progress] = useState<{ readyCount: number; totalLines: number; expenseCount: number } | null>(null);
+  const [step2Progress, setStep2Progress] = useState<{ readyCount: number; totalLines: number; expenseCount: number; needsAttentionCount: number } | null>(null);
   const [preparationStatus, setPreparationStatus] = useState<PreparationStatus | null>(null);
 
   const setRequestedStep = useCallback(
@@ -164,6 +164,7 @@ export function PreparationWizard({
   const { steps, activeStep, furthestReachableStep } = deriveWizardProgress({
     step1Complete,
     step2Complete: step2Resolved,
+    step2NeedsAttention: (step2Progress?.needsAttentionCount ?? 0) > 0,
     requestedStep,
   });
 
@@ -269,10 +270,16 @@ export function PreparationWizard({
     }
   }, [searchParams]);
 
+  // Language matters here: "reviewed" implies a persisted review event
+  // that doesn't exist -- what's actually true is READINESS (every line
+  // is either ready for inventory or a classified expense), so the
+  // sublabel says exactly that, never a stale/mismatched word.
   const step2StatusText = step2Progress
-    ? step2Progress.readyCount + step2Progress.expenseCount >= step2Progress.totalLines
-      ? "Complete — ready to continue"
-      : `${step2Progress.readyCount + step2Progress.expenseCount} of ${step2Progress.totalLines} reviewed`
+    ? step2Progress.needsAttentionCount > 0
+      ? `${step2Progress.needsAttentionCount} issue${step2Progress.needsAttentionCount === 1 ? "" : "s"} remaining`
+      : step2Progress.readyCount + step2Progress.expenseCount >= step2Progress.totalLines && step2Progress.totalLines > 0
+        ? `${step2Progress.totalLines} of ${step2Progress.totalLines} complete`
+        : `${step2Progress.readyCount + step2Progress.expenseCount} of ${step2Progress.totalLines} lines complete`
     : undefined;
 
   return (

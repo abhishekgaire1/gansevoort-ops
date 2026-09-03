@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { setupRpcTestFixtures, type RpcTestFixtures } from "./testFixtures";
-import { createDraftPurchaseDocumentWithLines, getLineKeys, findOrCreateThrowawaySpendCategory } from "./itemMasterTestHelpers";
+import { createDraftPurchaseDocumentWithLines, getLineKeys, findOrCreateThrowawaySpendCategory, findOrCreateNamedEmployee } from "./itemMasterTestHelpers";
 import { createVerifiedPostingDocument } from "./inventoryPostingTestHelpers";
 import { approveLineClassificationNewItemRpc } from "@/app/lib/itemMaster/approveLineClassificationNewItemRpc";
 import { approveLineClassificationExistingItemRpc } from "@/app/lib/itemMaster/approveLineClassificationExistingItemRpc";
 import { postPurchaseDocumentInventoryRpc } from "@/app/lib/inventory/postingRpcs";
 import { InventoryPostingBlockedError } from "@/app/lib/inventory/errors";
 import { getPreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
+import { recordReceiptRpc } from "@/app/lib/receiving/recordReceiptRpc";
+import { correctDocumentDeliveryVerifierRpc } from "@/app/lib/itemMaster/correctDocumentDeliveryVerifierRpc";
 import { lineLevelBlockers } from "@/app/lib/purchaseDocuments/preparationBlockers";
 import { resolveLineMismatchFields, type LineMismatchResolutionInput } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
 
@@ -149,6 +151,86 @@ describe("purchase-package mismatch surfaces during Step 2 (real classification/
     const afterInvoiceFix = await fetchMismatchFieldsForLine(purchaseDocumentId, lineKey);
     expect(afterInvoiceFix.hasPackageMismatch).toBe(false);
     expect(afterInvoiceFix.resolvedInvoiceUnitCode).toBe("CASE");
+  });
+
+  it("test 8 (Part 1): a live purchase-package mismatch blocks getPreparationStatus -- the same gate Send for Second Review and the Stepper's step-2-complete signal both read from, never a second, laxer check that lets a mismatch through", async () => {
+    const runTag = randomUUID().slice(0, 8);
+    const { purchaseDocumentId } = await createDraftPurchaseDocumentWithLines(fx.supabase, {
+      organizationId: fx.organizationId,
+      vendorId: fx.vendorId,
+      uploadedByAppUserId: fx.changeableEmployeeAppUserId,
+      lines: [{ vendorSku: `PKG-GATE-${runTag}`, description: `Package Mismatch Gate Test ${runTag}`, packageUnit: "PACK" }],
+    });
+    const [lineKey] = await getLineKeys(fx.supabase, purchaseDocumentId);
+
+    await approveLineClassificationNewItemRpc(fx.supabase, {
+      purchaseDocumentId,
+      lineKey,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      finalName: `Package Mismatch Gate Item ${runTag}`,
+      disposition: "INVENTORY",
+      categoryId,
+      spendCategoryId,
+      baseUnitCode: "BOTTLE",
+      purchaseUnitCode: "CASE",
+      receivingBehavior: "FIXED_CONVERSION",
+      fixedConversionFactor: 4,
+      rememberVendorMapping: false,
+    });
+
+    // Fully received (quantity/location/measurement all present) so the
+    // ONLY remaining issue is the mismatch itself -- proving it blocks
+    // even when receiving is otherwise complete, exactly like Step 2's
+    // own combinedLineReadiness.ts already requires.
+    await recordReceiptRpc(fx.supabase, {
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      receiptKind: "DELIVERY",
+      purchaseDocumentId,
+      lines: [
+        {
+          lineNumberSnapshot: 1,
+          matchedLineKey: lineKey,
+          vendorSkuSnapshot: `PKG-GATE-${runTag}`,
+          descriptionSnapshot: `Package Mismatch Gate Test ${runTag}`,
+          // invoicePackageUnit is just a snapshot of the raw invoice text
+          // (still "PACK", never corrected) -- actualReceivedPackageUnit is
+          // what the manager actually entered/received, matching the
+          // confirmed CASE package so record_receipt's own validation
+          // passes. hasPackageMismatch compares the FORMER against the
+          // confirmed package, which is exactly what stays wrong here.
+          invoicePackageQuantity: 2,
+          invoicePackageUnit: "PACK",
+          invoiceMeasuredQuantity: null,
+          invoiceMeasuredUnit: null,
+          actualReceivedPackageQuantity: 2,
+          actualReceivedPackageUnit: "CASE",
+          actualVerifiedBaseQuantity: null,
+          actualVerifiedBaseUnitId: null,
+          locationId,
+        },
+      ],
+    });
+    const deliveryVerifierEmployeeId = await findOrCreateNamedEmployee(fx.supabase, fx.organizationId, "TEST Package Mismatch Gate Verifier");
+    const { data: doc } = await fx.supabase.from("purchase_documents").select("source_document_id").eq("id", purchaseDocumentId).single();
+    await correctDocumentDeliveryVerifierRpc(fx.supabase, {
+      documentId: doc!.source_document_id as string,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      newEmployeeId: deliveryVerifierEmployeeId,
+    });
+
+    const blocked = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(blocked.ready).toBe(false);
+    expect(blocked.blockers.some((b) => b.lineKey === lineKey && /purchase package needs review/i.test(b.reason))).toBe(true);
+
+    // test 9 (Part 1): correcting the mismatch updates the gate immediately.
+    const { error: updateError } = await fx.supabase.from("purchase_document_lines").update({ package_unit: "CASE" }).eq("purchase_document_id", purchaseDocumentId).eq("line_key", lineKey);
+    expect(updateError).toBeNull();
+
+    const afterFix = await getPreparationStatus(fx.supabase, purchaseDocumentId, fx.organizationId);
+    expect(afterFix.blockers.some((b) => b.lineKey === lineKey && /purchase package needs review/i.test(b.reason))).toBe(false);
   });
 
   it("correctly updating the vendor/SKU purchase package (through the existing verified approval workflow) clears the issue, and other lines/classifications are untouched", async () => {
