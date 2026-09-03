@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { defaultExpandedForOutcome, isCardExpanded, receivingLineIsReady, applyLocationToAll, applyConditionToAll } from "@/app/lib/purchaseDocuments/itemsAndReceivingCardState";
+import {
+  defaultExpandedForOutcome,
+  isCardExpanded,
+  receivingLineIsReady,
+  applyLocationToAll,
+  applyConditionToAll,
+  summarizeBulkLocations,
+  missingReceivingReason,
+} from "@/app/lib/purchaseDocuments/itemsAndReceivingCardState";
 
 /**
  * Redesign: pure card expand/collapse and bulk-receiving-action logic for
@@ -76,5 +84,39 @@ describe("applyLocationToAll / applyConditionToAll (bulk actions)", () => {
     const result = applyLocationToAll(lines, "loc");
     expect(result[0].itemId).toBe("item-1");
     expect(result[0].purchaseUnitCode).toBe("CASE");
+  });
+});
+
+describe("summarizeBulkLocations", () => {
+  it("test 10: reports Multiple locations when eligible lines disagree, instead of a misleadingly blank Select", () => {
+    expect(summarizeBulkLocations(["loc-a", "loc-b"])).toEqual({ kind: "multiple", locationId: null });
+  });
+
+  it("reports the shared location when every eligible line agrees", () => {
+    expect(summarizeBulkLocations(["loc-a", "loc-a", "loc-a"])).toEqual({ kind: "single", locationId: "loc-a" });
+  });
+
+  it("ignores lines with no location set yet when determining agreement", () => {
+    expect(summarizeBulkLocations(["loc-a", null, "loc-a"])).toEqual({ kind: "single", locationId: "loc-a" });
+  });
+
+  it("reports none when nothing is set anywhere", () => {
+    expect(summarizeBulkLocations([null, null])).toEqual({ kind: "none", locationId: null });
+  });
+});
+
+describe("missingReceivingReason", () => {
+  const base = { receivedQuantity: "2", verifiedQuantity: "", locationId: "loc-1", info: { requiresVerifiedMeasurement: false, baseUnitCode: "LB" } };
+
+  it("test 5: identifies a missing received quantity as the incomplete check", () => {
+    expect(missingReceivingReason({ ...base, receivedQuantity: "" })).toBe("Enter the received quantity.");
+  });
+
+  it("test 5: identifies a missing required verified measurement, naming the specific unit", () => {
+    expect(missingReceivingReason({ ...base, info: { requiresVerifiedMeasurement: true, baseUnitCode: "LB" } })).toBe("Enter the verified LB.");
+  });
+
+  it("test 5: identifies a missing storage location once quantity (and any required measurement) is present", () => {
+    expect(missingReceivingReason({ ...base, locationId: "" })).toBe("Choose a storage location.");
   });
 });

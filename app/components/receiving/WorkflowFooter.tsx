@@ -62,7 +62,11 @@ export function WorkflowFooter({
   const contextClass = contextTone === "warning" ? "text-amber-400" : "text-zinc-500";
   return (
     <div
-      className={`flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 bg-zinc-950/95 px-4 py-3 backdrop-blur ${
+      // pr reserves space clear of the floating "Ask Gansevoort" launcher
+      // (fixed bottom-right, z-40, roughly 11rem wide including its own
+      // offset) -- without this, the launcher renders on top of this
+      // footer's own primary action in the same bottom-right corner.
+      className={`flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 bg-zinc-950/95 px-4 py-3 pr-4 backdrop-blur sm:pr-44 ${
         sticky ? "sticky bottom-0 z-10 -mx-4 sm:mx-0 sm:rounded-b-2xl" : "rounded-2xl border"
       }`}
     >

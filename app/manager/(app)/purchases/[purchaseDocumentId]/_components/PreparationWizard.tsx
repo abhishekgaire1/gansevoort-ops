@@ -123,6 +123,11 @@ export function PreparationWizard({
   // of genuinely incomplete work.
   const [requestedStep, setRequestedStepState] = useState<WizardStepId | null>(() => wizardStepFromSlug(searchParams.get("step")));
   const [step2Resolved, setStep2Resolved] = useState<boolean | null>(null);
+  // The Stepper's own "7 of 9 reviewed" status text -- reported by
+  // ItemsAndReceivingPanel itself (the authoritative source, same
+  // combinedLineReadiness.ts summary the panel's own footer uses), never
+  // recomputed separately here. Null until the panel has loaded once.
+  const [step2Progress, setStep2Progress] = useState<{ readyCount: number; totalLines: number; expenseCount: number } | null>(null);
   const [preparationStatus, setPreparationStatus] = useState<PreparationStatus | null>(null);
 
   const setRequestedStep = useCallback(
@@ -264,9 +269,21 @@ export function PreparationWizard({
     }
   }, [searchParams]);
 
+  const step2StatusText = step2Progress
+    ? step2Progress.readyCount + step2Progress.expenseCount >= step2Progress.totalLines
+      ? "Complete — ready to continue"
+      : `${step2Progress.readyCount + step2Progress.expenseCount} of ${step2Progress.totalLines} reviewed`
+    : undefined;
+
   return (
     <div className="mt-4 flex flex-col gap-4">
-      <Stepper steps={steps} activeStep={activeStep} furthestReachableStep={furthestReachableStep} onNavigate={setRequestedStep} />
+      <Stepper
+        steps={steps}
+        activeStep={activeStep}
+        furthestReachableStep={furthestReachableStep}
+        onNavigate={setRequestedStep}
+        stepStatusText={step2StatusText ? { 2: step2StatusText } : undefined}
+      />
 
       {activeStep === 1 ? (
         <Step1ReviewInvoice
@@ -305,6 +322,7 @@ export function PreparationWizard({
           readOnly={!editable}
           onChange={refetchPreparationStatus}
           onAllResolvedChange={setStep2Resolved}
+          onProgressChange={setStep2Progress}
           onContinue={editable ? () => setRequestedStep(3) : undefined}
           onNavigateToStep1={editable ? () => setRequestedStep(1) : undefined}
         />

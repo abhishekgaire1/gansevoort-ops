@@ -39,6 +39,10 @@ function baseLine(overrides: Partial<LineClassificationRow>): LineClassification
     effectiveConversionFactor: null,
     resolvedInvoiceUnitCode: "LB",
     hasPackageMismatch: false,
+    resolvedByName: null,
+    resolvedAt: null,
+    changedInAmendment: false,
+    previousOrderedSummary: null,
     ...overrides,
   };
 }

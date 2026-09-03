@@ -54,6 +54,38 @@ export function applyLocationToAll<T extends { locationId: string }>(lines: T[],
   return lines.map((l) => (l.locationId ? l : { ...l, locationId }));
 }
 
+export interface BulkLocationSummary {
+  kind: "none" | "single" | "multiple";
+  /** The one shared location, only when kind is "single". */
+  locationId: string | null;
+}
+
+/** What the bulk-location control should show for the CURRENT set of
+ * eligible inventory lines: their own already-set location when every
+ * eligible line agrees, "Multiple locations" (never a misleadingly blank
+ * Select) when they disagree, or "none" when nothing is set yet. */
+export function summarizeBulkLocations(locationIds: (string | null)[]): BulkLocationSummary {
+  const distinct = Array.from(new Set(locationIds.filter((id): id is string => Boolean(id))));
+  if (distinct.length === 0) return { kind: "none", locationId: null };
+  if (distinct.length === 1) return { kind: "single", locationId: distinct[0] };
+  return { kind: "multiple", locationId: null };
+}
+
+/** What the Receiving checklist panel should say is still missing on a
+ * needs-attention line -- the exact incomplete field, in the same order
+ * receivingLineIsReady itself checks them, so the message always matches
+ * why the line isn't ready rather than a generic warning. */
+export function missingReceivingReason(l: {
+  receivedQuantity: string;
+  verifiedQuantity: string;
+  locationId: string;
+  info: Pick<ReceivingLineDraft["info"], "requiresVerifiedMeasurement" | "baseUnitCode">;
+}): string {
+  if (l.receivedQuantity.trim() === "") return "Enter the received quantity.";
+  if (l.info.requiresVerifiedMeasurement && l.verifiedQuantity.trim() === "") return `Enter the verified ${l.info.baseUnitCode ?? "measurement"}.`;
+  return "Choose a storage location.";
+}
+
 /** "Apply condition to all" -- a deliberate bulk action, so (unlike
  * location) it overwrites every line's condition, but ONLY lines the
  * manager has actually started receiving (a non-blank quantity) -- a line

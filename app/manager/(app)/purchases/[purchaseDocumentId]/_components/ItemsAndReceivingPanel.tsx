@@ -23,22 +23,26 @@ import {
   type SpendCategorySummary,
   type UnitSummary,
 } from "@/app/actions/itemMaster";
-import {
-  CLASSIFICATION_STATUS_LABEL as STATUS_LABEL,
-  ExistingItemOverrideForm,
-  type ExistingItemVendorPackageInput,
-} from "@/app/manager/(app)/_components/ItemClassificationForms";
+import { ExistingItemOverrideForm, type ExistingItemVendorPackageInput } from "@/app/manager/(app)/_components/ItemClassificationForms";
 import { NewItemReviewModal, type NewItemReviewCandidate } from "@/app/manager/(app)/_components/NewItemReviewModal";
 import { flattenSpendCategoryPaths } from "@/app/lib/itemMaster/spendCategoryPaths";
 import { formatSourceQuantity } from "@/app/lib/purchaseDocuments/matchSourcePresentation";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
-import { blockingIssueSummaryLabel, scrollToFirstIssue } from "@/app/components/receiving/blockingIssues";
+import { scrollToFirstIssue } from "@/app/components/receiving/blockingIssues";
 import { getPriceComparisons } from "@/app/actions/priceComparison";
 import type { PriceComparisonResult } from "@/app/lib/purchasing/priceComparison";
 import { priceChangeTone } from "@/app/lib/purchasing/priceChangePresentation";
 import { formatPackageConfirmation } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
-import { classifyLineOutcome, summarizeCombinedStep, type LineOutcome } from "@/app/lib/purchaseDocuments/combinedLineReadiness";
-import { isCardExpanded, receivingLineIsReady, applyLocationToAll, applyConditionToAll } from "@/app/lib/purchaseDocuments/itemsAndReceivingCardState";
+import { classifyLineOutcome, summarizeCombinedStep, checklistCompletion, type LineOutcome } from "@/app/lib/purchaseDocuments/combinedLineReadiness";
+import {
+  isCardExpanded,
+  receivingLineIsReady,
+  applyLocationToAll,
+  applyConditionToAll,
+  summarizeBulkLocations,
+  missingReceivingReason,
+} from "@/app/lib/purchaseDocuments/itemsAndReceivingCardState";
+import { deriveLineProvenance } from "@/app/lib/purchaseDocuments/lineProvenance";
 import { getAmendmentAlreadyPosted } from "@/app/actions/purchaseDocuments";
 import {
   recordReceipt,
@@ -52,36 +56,28 @@ import {
 import type { ReceivingLineEdit } from "@/app/lib/receiving/effectiveReceivingEdit";
 import { computeReceivingPrefill, recomputeFixedConversionVerifiedQuantity } from "@/app/lib/receiving/computeReceivingPrefill";
 import { mergeReceivingLineState, type ReceivingLineDraft } from "@/app/lib/receiving/mergeReceivingLineState";
-import { InlineValidationMessage } from "@/app/components/receiving/InlineValidationMessage";
 
 /**
- * Redesign: the combined "Confirm Items & Receiving" step -- what used to
- * be two separate steps/screens (item matching on the far right of Step
- * 2, physical receiving on an entirely different Step 3 screen) are now
- * ONE cohesive card per invoice line, so a manager understands what the
- * invoice says, which item it matches, how the vendor sells it, how the
- * purchase converts into inventory, and how much was actually received
- * all together, without holding facts across two screens.
+ * Redesign: the combined "Confirm Items & Receiving" step -- a visible
+ * verification CHECKLIST per invoice line (Item Match / Purchase Package /
+ * Receiving), always shown, never hidden behind an accordion. A manager
+ * looks at a card for two seconds and sees exactly what's been completed,
+ * where it came from (provenance -- never falsely attributed), and what,
+ * if anything, still needs attention. Only the raw EDITING controls
+ * collapse; the completed verification summary itself never does.
  *
- * Ready lines (a confirmed match, a matching purchase package, and
- * complete receiving) collapse to a compact one/two-row summary; a line
- * needing ANY attention (no match, a new item, a package mismatch, a
- * missing measurement/location/quantity) auto-expands. Item-matching
- * actions remain per-line, immediate RPC calls (approve/mark-non-
- * inventory/etc, unchanged from the previous Step 2); receiving fields
- * are a local draft, submitted together as one receipt when the manager
- * continues (recordReceipt, unchanged from the previous Step 3) -- once a
- * delivery receipt already exists, further edits to that line go through
- * the append-only receiving correction instead (correctEffectiveReceiving,
- * also unchanged), never a second competing delivery event.
+ * Item-matching actions remain per-line, immediate RPC calls (approve/
+ * mark-non-inventory/etc, unchanged); receiving fields are a local draft,
+ * submitted together as one receipt when the manager continues
+ * (recordReceipt, unchanged) -- once a delivery receipt already exists,
+ * further edits to that line go through the append-only receiving
+ * correction instead (correctEffectiveReceiving, also unchanged), never a
+ * second competing delivery event.
  *
- * Shared with the /manager/items/review cross-document recovery queue's
- * own approve RPCs -- both surfaces call the exact same authoritative
- * classification RPCs, never a parallel implementation. The purchase-
- * package mismatch/confirmation logic (packageUnitMismatch.ts) and the
- * combined readiness decision (combinedLineReadiness.ts) are the SAME
- * pure functions used everywhere else this fix touches -- never
- * duplicated here.
+ * The combined per-line readiness decision (combinedLineReadiness.ts) is
+ * the ONE shared source for the card badge, the checklist's own "complete"
+ * marks, the page-level completion panel, and the step's completion gate
+ * -- never recomputed separately here.
  */
 
 function lineToCandidate(line: LineClassificationRow, vendorName: string | null, documentNumber: string | null): NewItemReviewCandidate | null {
@@ -135,6 +131,7 @@ export function ItemsAndReceivingPanel({
   readOnly,
   onChange,
   onAllResolvedChange,
+  onProgressChange,
   onContinue,
   onNavigateToStep1,
 }: {
@@ -148,6 +145,9 @@ export function ItemsAndReceivingPanel({
    * or a correctly classified expense) changes -- the wizard's derived
    * step-2-complete signal. */
   onAllResolvedChange?: (resolved: boolean) => void;
+  /** Fires after every load with the authoritative counts -- feeds the
+   * Stepper's own "7 of 9 reviewed" status text, never recomputed there. */
+  onProgressChange?: (progress: { readyCount: number; totalLines: number; expenseCount: number }) => void;
   onContinue?: () => void;
   /** The "Correct invoice unit" corrective action on a purchase-package
    * mismatch warning -- jumps back to Step 1. */
@@ -168,7 +168,6 @@ export function ItemsAndReceivingPanel({
   const [error, setError] = useState<string | null>(null);
   const [overrideFormLineKey, setOverrideFormLineKey] = useState<string | null>(null);
   const [packageReviewLineKey, setPackageReviewLineKey] = useState<string | null>(null);
-  const [editingMappingLineKey, setEditingMappingLineKey] = useState<string | null>(null);
   const [showNewItemModal, setShowNewItemModal] = useState(false);
   const [autoOpened, setAutoOpened] = useState(false);
   const [priceComparisons, setPriceComparisons] = useState<Record<string, PriceComparisonResult>>({});
@@ -176,18 +175,31 @@ export function ItemsAndReceivingPanel({
   const matchingRunToken = useRef(0);
   const hasAutoAttempted = useRef(false);
 
-  // Manager-toggled overrides against each line's DEFAULT expand/collapse
-  // state (needs_attention/expense start expanded... actually only
-  // needs_attention defaults open; ready and expense default collapsed --
-  // see isExpanded below). Toggling a card flips it relative to its own
-  // default, so a manager who collapses a problem card to work on
-  // something else can still reopen it, and a ready card they inspect
-  // stays open until they collapse it again.
+  // Manager-toggled overrides against each line's DEFAULT editing-controls
+  // visibility (needs_attention starts with editing controls open; ready
+  // and expense start closed -- the CHECKLIST summary itself is always
+  // visible regardless, only the raw controls collapse). Toggling flips a
+  // card relative to its own default.
   const [toggledLineKeys, setToggledLineKeys] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<Filter>("all");
   const [bulkLocationId, setBulkLocationId] = useState("");
   const [bulkConditionValue, setBulkConditionValue] = useState<ReceivingLineDraft["conditionStatus"]>("RECEIVED_AS_INVOICED");
   const [continuePending, setContinuePending] = useState(false);
+  const [moreActionsOpen, setMoreActionsOpen] = useState(false);
+  const [rerunConfirmOpen, setRerunConfirmOpen] = useState(false);
+  // Brief "Saved" confirmation after an edit -- cleared automatically, and
+  // never blocks the manager from continuing to work on the same card.
+  const [savedFlashLineKey, setSavedFlashLineKey] = useState<string | null>(null);
+  const savedFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function flashSaved(lineKey: string) {
+    setSavedFlashLineKey(lineKey);
+    if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
+    savedFlashTimer.current = setTimeout(() => setSavedFlashLineKey(null), 2500);
+  }
+  useEffect(() => () => {
+    if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
+  }, []);
 
   // Per-line receiving correction (once a delivery receipt already
   // exists) -- a SEPARATE, append-only path (correctEffectiveReceiving)
@@ -255,14 +267,17 @@ export function ItemsAndReceivingPanel({
         const receivingReady = line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null;
         return classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady });
       });
-      combinedResolved = summarizeCombinedStep(outcomes).allResolved;
+      const stepSummary = summarizeCombinedStep(outcomes);
+      combinedResolved = stepSummary.allResolved;
+      onProgressChange?.({ readyCount: stepSummary.readyCount, totalLines: stepSummary.totalLines, expenseCount: stepSummary.expenseCount });
     }
     onAllResolvedChange?.(combinedResolved);
 
     setLoading(false);
     onChange?.();
-    // onAllResolvedChange/onChange are stable callbacks from the parent.
-  }, [purchaseDocumentId, onChange, onAllResolvedChange]);
+    // onAllResolvedChange/onProgressChange/onChange are stable callbacks
+    // from the parent.
+  }, [purchaseDocumentId, onChange, onAllResolvedChange, onProgressChange]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -351,6 +366,8 @@ export function ItemsAndReceivingPanel({
   }, [newItemCandidates.length, autoOpened, readOnly]);
 
   async function handleRunMatching() {
+    setRerunConfirmOpen(false);
+    setMoreActionsOpen(false);
     setRunningMatch(true);
     setError(null);
     const result = await runItemMatchingNow(purchaseDocumentId);
@@ -380,8 +397,8 @@ export function ItemsAndReceivingPanel({
       return;
     }
     setOverrideFormLineKey(null);
-    setEditingMappingLineKey(null);
     setPackageReviewLineKey(null);
+    flashSaved(lineKey);
     await load();
   }
 
@@ -395,8 +412,8 @@ export function ItemsAndReceivingPanel({
       setError(result.message);
       return;
     }
-    setEditingMappingLineKey(null);
     setPackageReviewLineKey(null);
+    flashSaved(line.lineKey);
     await load();
   }
 
@@ -522,7 +539,7 @@ export function ItemsAndReceivingPanel({
   }
 
   async function handleSaveCorrection() {
-    if (!correctionDraft || correctionPending) return;
+    if (!correctionDraft || correctionPending || !correctingLineKey) return;
     setCorrectionPending(true);
     setCorrectionError(null);
     const edits: ReceivingLineEdit[] = [
@@ -541,6 +558,7 @@ export function ItemsAndReceivingPanel({
       setCorrectionError(result.message);
       return;
     }
+    flashSaved(correctingLineKey);
     setCorrectingLineKey(null);
     setCorrectionDraft(null);
     await load();
@@ -565,7 +583,7 @@ export function ItemsAndReceivingPanel({
   if (loading || lines === null) {
     return (
       <div aria-busy="true" className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-        <p className="text-sm text-zinc-500">Loading…</p>
+        <p className="text-sm text-zinc-300">Loading…</p>
       </div>
     );
   }
@@ -574,19 +592,19 @@ export function ItemsAndReceivingPanel({
     matchingPhase === "blocking" ? (
       <div aria-busy="true" className="rounded-2xl border border-amber-800 bg-amber-950/10 p-4">
         <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">Matching Items</p>
-        <p className="mt-1 text-sm text-zinc-300">Checking vendor mappings and matching invoice lines against your item master. This will update automatically.</p>
+        <p className="mt-1 text-sm text-zinc-200">Checking vendor mappings and matching invoice lines against your item master. This will update automatically.</p>
       </div>
     ) : matchingPhase === "stillActive" || matchingPhase === "failed" || matchingPhase === "stuck" ? (
       <div className="rounded-2xl border border-amber-800 bg-amber-950/10 p-4">
         <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">
           {matchingPhase === "stillActive" ? "Item Matching Is Taking Longer Than Expected" : "Automatic Matching Unavailable"}
         </p>
-        <p className="mt-1 text-sm text-zinc-300">
+        <p className="mt-1 text-sm text-zinc-200">
           {matchingPhase === "stillActive"
             ? "A classification run is still active -- we'll keep checking rather than starting a new one."
             : "Your invoice and extracted lines are safe. You can retry matching or continue reviewing manually below."}
         </p>
-        {error ? <p className="mt-1 text-sm text-red-400">{error}</p> : null}
+        {error ? <p className="mt-1 text-sm text-red-300">{error}</p> : null}
         <button
           type="button"
           onClick={matchingPhase === "stillActive" ? handleCheckAgain : handleRetryUnresolvedMatching}
@@ -615,10 +633,10 @@ export function ItemsAndReceivingPanel({
     return c.outcome === "expense";
   });
 
-  function isExpanded(lineKey: string, outcome: LineOutcome): boolean {
+  function isEditingOpen(lineKey: string, outcome: LineOutcome): boolean {
     return isCardExpanded(outcome, toggledLineKeys.has(lineKey));
   }
-  function toggleExpanded(lineKey: string) {
+  function toggleEditingOpen(lineKey: string) {
     setToggledLineKeys((prev) => {
       const next = new Set(prev);
       if (next.has(lineKey)) next.delete(lineKey);
@@ -627,113 +645,173 @@ export function ItemsAndReceivingPanel({
     });
   }
 
+  const bulkLocationSummary = summarizeBulkLocations(receivingLineState.map((l) => l.locationId || null));
+  const bulkEligibleForCondition = receivingLineState.filter((l) => l.receivedQuantity.trim() !== "").length;
+
   return (
-    <div className="mx-auto mt-4 flex max-w-3xl flex-col gap-4">
+    <div className="mx-auto mt-4 flex max-w-4xl flex-col gap-4">
       {matchingBanner}
-      {error && !matchingBanner ? <p className="text-sm text-red-400">{error}</p> : null}
+      {error && !matchingBanner ? <p className="rounded-xl border border-red-800 bg-red-950/20 p-3 text-sm text-red-300">{error}</p> : null}
 
       {alreadyPostedElsewhere ? (
-        <div className="rounded-2xl border border-sky-800 bg-sky-950/40 p-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-sky-300">Inventory already posted</p>
-          <p className="mt-1 text-sm text-sky-100">
-            Inventory was already posted from the original revision. This amendment will not post it again.
-          </p>
+        <div className="rounded-2xl border-2 border-sky-600 bg-sky-950/40 p-4">
+          <p className="text-xs font-bold uppercase tracking-wide text-sky-300">Inventory already posted</p>
+          <p className="mt-1 text-sm font-medium text-sky-50">Inventory was already posted from the original revision. This amendment will not post it again.</p>
         </div>
       ) : null}
 
-      {/* ============ PAGE-LEVEL SUMMARY ============ */}
+      {/* ============ PAGE-LEVEL COMPLETION PANEL ============ */}
+      <CompletionPanel
+        summary={summary}
+        onGoToFirstIssue={() =>
+          scrollToFirstIssue(combinedLines.filter((c) => c.outcome === "needs_attention").map((c) => ({ id: `classification-line-${c.line.lineKey}`, reason: "" })))
+        }
+      />
+
+      {/* ============ TOOLBAR ============ */}
       <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold text-zinc-100">Confirm Items &amp; Receiving</h2>
-          <p className="text-xs text-zinc-500">Confirm each item match, purchase package, received quantity and destination.</p>
-        </div>
-        <div className="mt-3 flex flex-wrap gap-4 text-xs text-zinc-400">
-          <span>{summary.totalLines} lines</span>
-          <span className="text-emerald-400">{summary.readyCount} ready</span>
-          <span className={summary.needsAttentionCount > 0 ? "text-amber-400" : "text-zinc-500"}>{summary.needsAttentionCount} need attention</span>
-          <span>{summary.expenseCount} expenses</span>
-        </div>
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {(["all", "needs_attention", "ready", "expenses"] as Filter[]).map((f) => (
-            <button
-              key={f}
-              type="button"
-              onClick={() => setFilter(f)}
-              className={`rounded-full border px-3 py-1 text-xs ${filter === f ? "border-amber-500 bg-amber-950/30 text-amber-300" : "border-zinc-700 text-zinc-400 hover:text-zinc-200"}`}
-            >
-              {f === "all" ? "All" : f === "needs_attention" ? "Needs attention" : f === "ready" ? "Ready" : "Expenses"}
-            </button>
-          ))}
-        </div>
-
-        {!readOnly ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {newItemCandidates.length > 0 ? (
-              <button type="button" onClick={() => setShowNewItemModal(true)} className="rounded-full bg-emerald-500 px-4 py-1.5 text-xs font-semibold text-zinc-950">
-                Review New Items ({newItemCandidates.length})
-              </button>
-            ) : null}
-            {bulkEligible.length > 0 ? (
+          <h2 className="text-base font-semibold text-white">Confirm Items &amp; Receiving</h2>
+          {!readOnly ? (
+            <div className="relative">
               <button
                 type="button"
-                onClick={handleConfirmAllMatches}
-                disabled={bulkConfirmPending}
-                className="rounded-full border border-emerald-700 px-4 py-1.5 text-xs font-semibold text-emerald-300 disabled:opacity-40"
+                onClick={() => setMoreActionsOpen((v) => !v)}
+                className="rounded-full border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 hover:border-zinc-400"
               >
-                {bulkConfirmPending ? "Confirming…" : `Confirm All Matches (${bulkEligible.length})`}
+                More actions ▾
               </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={handleRunMatching}
-              disabled={runningMatch}
-              className="rounded-full border border-zinc-700 px-4 py-1.5 text-xs text-zinc-200 disabled:opacity-40"
-            >
-              {runningMatch ? "Matching…" : "Re-run Matching"}
-            </button>
+              {moreActionsOpen ? (
+                <div className="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-zinc-700 bg-zinc-900 p-2 shadow-xl">
+                  <button
+                    type="button"
+                    onClick={() => setRerunConfirmOpen(true)}
+                    disabled={runningMatch}
+                    className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+                  >
+                    {runningMatch ? "Matching…" : "Re-run Matching"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <p className="mt-1 text-sm text-zinc-300">Confirm each item match, purchase package, received quantity and destination.</p>
+
+        {rerunConfirmOpen ? (
+          <div className="mt-3 rounded-xl border border-amber-700 bg-amber-950/20 p-3">
+            <p className="text-sm font-medium text-amber-100">
+              Re-running matching may replace existing AI suggestions for lines you haven&apos;t confirmed yet. Already-confirmed lines are never touched.
+            </p>
+            <div className="mt-2 flex gap-2">
+              <button type="button" onClick={handleRunMatching} className="rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950">
+                Re-run matching
+              </button>
+              <button type="button" onClick={() => setRerunConfirmOpen(false)} className="rounded-full border border-zinc-600 px-4 py-1.5 text-xs text-zinc-200">
+                Cancel
+              </button>
+            </div>
           </div>
         ) : null}
 
+        {/* ============ FILTERS -- compact, secondary ============ */}
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap gap-1.5">
+            {(["all", "needs_attention", "ready", "expenses"] as Filter[]).map((f) => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => setFilter(f)}
+                className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+                  filter === f ? "border-amber-500 bg-amber-950/30 text-amber-200" : "border-zinc-700 text-zinc-300 hover:text-zinc-100"
+                }`}
+              >
+                {f === "all"
+                  ? `All (${summary.totalLines})`
+                  : f === "needs_attention"
+                    ? `Needs attention (${summary.needsAttentionCount})`
+                    : f === "ready"
+                      ? `Ready (${summary.readyCount})`
+                      : `Expenses (${summary.expenseCount})`}
+              </button>
+            ))}
+          </div>
+          {!readOnly ? (
+            <div className="flex flex-wrap gap-2">
+              {newItemCandidates.length > 0 ? (
+                <button type="button" onClick={() => setShowNewItemModal(true)} className="rounded-full bg-emerald-500 px-3 py-1 text-[11px] font-semibold text-zinc-950">
+                  Review New Items ({newItemCandidates.length})
+                </button>
+              ) : null}
+              {bulkEligible.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={handleConfirmAllMatches}
+                  disabled={bulkConfirmPending}
+                  className="rounded-full border border-emerald-600 px-3 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
+                >
+                  {bulkConfirmPending ? "Confirming…" : `Confirm All Matches (${bulkEligible.length})`}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
         {/* ============ BULK RECEIVING ACTIONS -- never mapping/units/conversions ============ */}
         {!readOnly ? (
-          <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-zinc-800 pt-3">
-            <label className="flex flex-col gap-1 text-xs text-zinc-400">
-              Location
-              <select value={bulkLocationId} onChange={(e) => setBulkLocationId(e.target.value)} className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100">
-                <option value="">Select…</option>
-                {locations.map((loc) => (
-                  <option key={loc.id} value={loc.id}>
-                    {loc.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" onClick={handleApplyLocationToAll} disabled={!bulkLocationId} className="rounded-full border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 disabled:opacity-40">
-              Apply location to all inventory items
-            </button>
-            <label className="flex flex-col gap-1 text-xs text-zinc-400">
-              Condition
-              <select
-                value={bulkConditionValue}
-                onChange={(e) => setBulkConditionValue(e.target.value as ReceivingLineDraft["conditionStatus"])}
-                className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100"
+          <div className="mt-3 rounded-xl border border-zinc-700 bg-zinc-950/50 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-200">Apply receiving details to multiple items</p>
+            <div className="mt-2 flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1 text-xs text-zinc-300">
+                Location
+                <select value={bulkLocationId} onChange={(e) => setBulkLocationId(e.target.value)} className="rounded-lg border border-zinc-600 bg-zinc-950 px-2 py-1.5 text-xs text-white">
+                  <option value="">{bulkLocationSummary.kind === "multiple" ? "Multiple locations" : "Select…"}</option>
+                  {locations.map((loc) => (
+                    <option key={loc.id} value={loc.id}>
+                      {loc.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={handleApplyLocationToAll}
+                disabled={!bulkLocationId}
+                title={!bulkLocationId ? "Choose a location above first" : undefined}
+                className="rounded-full border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 disabled:opacity-40"
               >
-                {CONDITION_OPTIONS.map((c) => (
-                  <option key={c.value} value={c.value}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" onClick={handleApplyConditionToAll} className="rounded-full border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200">
-              Apply condition to all
-            </button>
+                Apply location to all inventory items
+              </button>
+              <label className="flex flex-col gap-1 text-xs text-zinc-300">
+                Condition
+                <select
+                  value={bulkConditionValue}
+                  onChange={(e) => setBulkConditionValue(e.target.value as ReceivingLineDraft["conditionStatus"])}
+                  className="rounded-lg border border-zinc-600 bg-zinc-950 px-2 py-1.5 text-xs text-white"
+                >
+                  {CONDITION_OPTIONS.map((c) => (
+                    <option key={c.value} value={c.value}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={handleApplyConditionToAll}
+                disabled={bulkEligibleForCondition === 0}
+                title={bulkEligibleForCondition === 0 ? "No lines have a received quantity entered yet" : undefined}
+                className="rounded-full border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 disabled:opacity-40"
+              >
+                Apply condition to all
+              </button>
+            </div>
           </div>
         ) : null}
       </div>
 
       {/* ============ ONE CARD PER LINE ============ */}
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-3">
         {filtered.map(({ line, receiving, outcome }) => (
           <LineCard
             key={line.lineKey}
@@ -741,30 +819,24 @@ export function ItemsAndReceivingPanel({
             outcome={outcome}
             line={line}
             receiving={receiving}
-            expanded={isExpanded(line.lineKey, outcome)}
-            onToggleExpand={() => toggleExpanded(line.lineKey)}
+            editingOpen={isEditingOpen(line.lineKey, outcome)}
+            onToggleEditing={() => toggleEditingOpen(line.lineKey)}
             readOnly={readOnly}
             items={items}
             units={units}
             locations={locations}
             spendCategoryPath={line.spendCategoryId ? spendCategoryPathById.get(line.spendCategoryId) : undefined}
             priceComparison={priceComparisons[line.lineKey]}
-            editing={editingMappingLineKey === line.lineKey}
             overrideFormOpen={overrideFormLineKey === line.lineKey}
             reviewingPackage={packageReviewLineKey === line.lineKey}
-            onToggleEdit={() => {
-              setEditingMappingLineKey(editingMappingLineKey === line.lineKey ? null : line.lineKey);
-              setOverrideFormLineKey(null);
-              setPackageReviewLineKey(null);
-            }}
             onToggleOverrideForm={() => {
               setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey);
               setPackageReviewLineKey(null);
             }}
             onReviewPackage={() => {
-              setEditingMappingLineKey(line.lineKey);
               setOverrideFormLineKey(line.lineKey);
               setPackageReviewLineKey(line.lineKey);
+              setToggledLineKeys((prev) => new Set(prev).add(line.lineKey));
             }}
             onNavigateToStep1={onNavigateToStep1}
             onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
@@ -787,9 +859,10 @@ export function ItemsAndReceivingPanel({
             onReceivingChange={(patch) => updateReceivingLine(line.lineKey, patch)}
             onReceivedQtyOrUnitChange={(patch) => updateReceivedQuantityOrUnit(line.lineKey, patch)}
             onInvoiceUnitChoice={(unit) => handleInvoiceUnitChoice(line.lineKey, unit)}
+            savedFlash={savedFlashLineKey === line.lineKey}
           />
         ))}
-        {filtered.length === 0 ? <p className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-500">No lines match this filter.</p> : null}
+        {filtered.length === 0 ? <p className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-300">No lines match this filter.</p> : null}
       </div>
 
       {!readOnly && showNewItemModal ? (
@@ -806,12 +879,8 @@ export function ItemsAndReceivingPanel({
 
       {onContinue ? (
         <WorkflowFooter
-          contextLabel={
-            summary.allResolved
-              ? `${summary.readyCount} of ${summary.totalLines - summary.expenseCount} lines ready · ${summary.expenseCount} expenses · 0 issues`
-              : blockingIssueSummaryLabel(summary.needsAttentionCount, "item")
-          }
-          contextTone={summary.allResolved ? "neutral" : "warning"}
+          contextLabel={summary.allResolved ? undefined : `${summary.needsAttentionCount} line${summary.needsAttentionCount === 1 ? "" : "s"} need attention`}
+          contextTone="warning"
           onContextClick={
             !summary.allResolved && summary.needsAttentionCount > 0
               ? () => scrollToFirstIssue(combinedLines.filter((c) => c.outcome === "needs_attention").map((c) => ({ id: `classification-line-${c.line.lineKey}`, reason: "" })))
@@ -831,26 +900,127 @@ export function ItemsAndReceivingPanel({
 }
 
 // ============================================================
-// LineCard -- the one cohesive card per invoice line
+// Page-level completion panel
 // ============================================================
+
+function CompletionPanel({
+  summary,
+  onGoToFirstIssue,
+}: {
+  summary: ReturnType<typeof summarizeCombinedStep>;
+  onGoToFirstIssue: () => void;
+}) {
+  if (summary.totalLines === 0) return null;
+  const inventoryReady = summary.readyCount;
+
+  if (summary.allResolved) {
+    return (
+      <div className="rounded-2xl border-2 border-emerald-600 bg-emerald-950/30 p-4">
+        <p className="text-lg font-bold text-emerald-300">✓ ALL {summary.totalLines} LINES REVIEWED</p>
+        <ul className="mt-2 flex flex-col gap-0.5 text-sm font-medium text-emerald-100">
+          <li>
+            {inventoryReady} inventory item{inventoryReady === 1 ? "" : "s"} ready
+          </li>
+          <li>
+            {summary.expenseCount} expense{summary.expenseCount === 1 ? "" : "s"} classified
+          </li>
+          <li>0 issues remaining</li>
+        </ul>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border-2 border-amber-500 bg-amber-950/30 p-4">
+      <p className="text-lg font-bold text-amber-300">
+        {summary.needsAttentionCount} LINE{summary.needsAttentionCount === 1 ? "" : "S"} NEED ATTENTION
+      </p>
+      <p className="mt-1 text-sm font-medium text-amber-100">
+        {inventoryReady} ready · {summary.expenseCount} expense{summary.expenseCount === 1 ? "" : "s"} classified · {summary.needsAttentionCount} still need
+        {summary.needsAttentionCount === 1 ? "s" : ""} an item match, purchase package, or receiving detail.
+      </p>
+      <button type="button" onClick={onGoToFirstIssue} className="mt-3 rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950">
+        Go to first issue
+      </button>
+    </div>
+  );
+}
+
+// ============================================================
+// LineCard -- the visible verification checklist per line
+// ============================================================
+
+interface CorrectionDraft {
+  receiptLineId: string;
+  receivedQuantity: string;
+  receivedUnit: string;
+  verifiedQuantity: string;
+  locationId: string;
+  conditionStatus: ReceivingLineDraft["conditionStatus"];
+}
+
+function AmendmentChangedBadge({ previous }: { previous: string | null }) {
+  return (
+    <span className="inline-flex flex-wrap items-baseline gap-1.5 rounded-full border border-sky-600 bg-sky-950/40 px-2 py-0.5 text-[11px] font-semibold text-sky-200">
+      Changed in amendment
+      {previous ? <span className="font-normal text-sky-300">(was {previous})</span> : null}
+    </span>
+  );
+}
+
+function ProvenanceLine({ provenance }: { provenance: ReturnType<typeof deriveLineProvenance> }) {
+  return (
+    <p className="mt-1 text-xs font-medium text-zinc-300">
+      Status: <span className="font-semibold text-zinc-100">{provenance.label}</span>
+      {provenance.resolvedByName ? (
+        <span className="block text-[11px] font-normal text-zinc-400">
+          Confirmed by {provenance.resolvedByName}
+          {provenance.resolvedAt ? ` · ${new Date(provenance.resolvedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
+        </span>
+      ) : null}
+    </p>
+  );
+}
+
+function ChecklistPanel({ title, ok, warn, children }: { title: string; ok: boolean; warn?: boolean; children: React.ReactNode }) {
+  return (
+    <div className={`rounded-xl border-2 p-3 ${ok ? "border-emerald-700 bg-emerald-950/10" : warn ? "border-red-700 bg-red-950/10" : "border-amber-600 bg-amber-950/10"}`}>
+      <p
+        className={`flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide ${ok ? "text-emerald-400" : warn ? "text-red-400" : "text-amber-400"}`}
+      >
+        <span aria-hidden>{ok ? "✓" : "!"}</span>
+        {title}
+      </p>
+      <div className="mt-1.5">{children}</div>
+    </div>
+  );
+}
+
+function formatPurchasePackageDescription(line: LineClassificationRow): string {
+  const unit = line.effectivePurchaseUnitCode ?? "—";
+  if (line.effectiveReceivingBehavior === "FIXED_CONVERSION" && line.effectiveConversionFactor && line.inventoryBaseUnitCode) {
+    const baseUnit = line.inventoryBaseUnitCode.toLowerCase();
+    const plural = line.effectiveConversionFactor === 1 ? baseUnit : `${baseUnit}s`;
+    return `${unit} — ${line.effectiveConversionFactor} ${plural} per ${unit.toLowerCase()}`;
+  }
+  return unit;
+}
 
 function LineCard({
   id,
   outcome,
   line,
   receiving,
-  expanded,
-  onToggleExpand,
+  editingOpen,
+  onToggleEditing,
   readOnly,
   items,
   units,
   locations,
   spendCategoryPath,
   priceComparison,
-  editing,
   overrideFormOpen,
   reviewingPackage,
-  onToggleEdit,
   onToggleOverrideForm,
   onReviewPackage,
   onNavigateToStep1,
@@ -870,23 +1040,22 @@ function LineCard({
   onReceivingChange,
   onReceivedQtyOrUnitChange,
   onInvoiceUnitChoice,
+  savedFlash,
 }: {
   id: string;
   outcome: LineOutcome;
   line: LineClassificationRow;
   receiving: ReceivingLineDraft | null;
-  expanded: boolean;
-  onToggleExpand: () => void;
+  editingOpen: boolean;
+  onToggleEditing: () => void;
   readOnly?: boolean;
   items: InventoryItemSummary[];
   units: UnitSummary[];
   locations: LocationSummary[];
   spendCategoryPath?: string;
   priceComparison?: PriceComparisonResult;
-  editing: boolean;
   overrideFormOpen: boolean;
   reviewingPackage: boolean;
-  onToggleEdit: () => void;
   onToggleOverrideForm: () => void;
   onReviewPackage: () => void;
   onNavigateToStep1?: () => void;
@@ -896,211 +1065,255 @@ function LineCard({
   actionPending?: boolean;
   alreadyReceived: boolean;
   correcting: boolean;
-  correctionDraft: {
-    receiptLineId: string;
-    receivedQuantity: string;
-    receivedUnit: string;
-    verifiedQuantity: string;
-    locationId: string;
-    conditionStatus: ReceivingLineDraft["conditionStatus"];
-  } | null;
+  correctionDraft: CorrectionDraft | null;
   correctionPending: boolean;
   correctionError: string | null;
   onOpenCorrection: () => void;
   onCancelCorrection: () => void;
-  onCorrectionChange: (patch: Partial<NonNullable<typeof correctionDraft>>) => void;
+  onCorrectionChange: (patch: Partial<CorrectionDraft>) => void;
   onSaveCorrection: () => void;
   onReceivingChange: (patch: Partial<ReceivingLineDraft>) => void;
   onReceivedQtyOrUnitChange: (patch: { receivedQuantity?: string; receivedUnit?: string }) => void;
   onInvoiceUnitChoice: (unit: string) => void;
+  savedFlash?: boolean;
 }) {
   const orderedQuantity = formatSourceQuantity(line);
-  const badge =
-    outcome === "ready" ? (
-      <span className="inline-block rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-semibold text-emerald-300">✓ Ready</span>
-    ) : outcome === "expense" ? (
-      <span className="inline-block rounded-full bg-zinc-700/40 px-2.5 py-0.5 text-xs font-semibold text-zinc-300">Expense</span>
-    ) : (
-      <span className="inline-block rounded-full bg-amber-500/20 px-2.5 py-0.5 text-xs font-semibold text-amber-300">Needs attention</span>
-    );
+  const provenance = deriveLineProvenance({ status: line.status, resolutionSource: line.resolutionSource, resolvedByName: line.resolvedByName, resolvedAt: line.resolvedAt });
 
-  // ============ Collapsed compact rows ============
-  if (!expanded) {
+  // ============ EXPENSE -- a separate, simple classification panel ============
+  if (outcome === "expense") {
     return (
-      <div id={id} className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
-        <button type="button" onClick={onToggleExpand} className="flex w-full flex-wrap items-center justify-between gap-2 text-left">
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-zinc-100">
-              {line.description ?? "—"} {line.inventoryItemName ? <span className="text-zinc-500">· {line.inventoryItemName}</span> : null}
-            </p>
-            <p className="mt-0.5 truncate text-xs text-zinc-500">
-              {outcome === "expense"
-                ? spendCategoryPath ?? "Uncategorized expense"
-                : receiving
-                  ? `${receiving.receivedQuantity || "—"} ${receiving.receivedUnit} → ${receiving.verifiedQuantity || receiving.receivedQuantity || "—"} ${receiving.info.baseUnitCode ?? ""} · ${
-                      locations.find((l) => l.id === receiving.locationId)?.name ?? "No location"
-                    } · ${CONDITION_OPTIONS.find((c) => c.value === receiving.conditionStatus)?.label ?? ""}`
-                  : "—"}
+      <div id={id} className="rounded-2xl border-2 border-zinc-700 bg-zinc-900 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-base font-semibold text-white">{line.description ?? "—"}</p>
+            <p className="mt-0.5 text-sm text-zinc-300">
+              {line.vendorSku ? `Vendor SKU ${line.vendorSku}` : null}
+              {orderedQuantity ? ` · Invoice quantity: ${orderedQuantity}` : ""}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {badge}
-            {!readOnly ? <span className="text-xs text-zinc-500 underline underline-offset-2">Edit</span> : null}
+            <span className="rounded-full bg-zinc-700/60 px-3 py-1 text-xs font-semibold text-zinc-100">Expense — no stock</span>
+            {!readOnly ? (
+              <button type="button" onClick={onToggleEditing} className="rounded-full border border-zinc-500 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:border-zinc-300">
+                {editingOpen ? "Hide details" : "Edit details"}
+              </button>
+            ) : null}
           </div>
-        </button>
+        </div>
+        {savedFlash ? <p className="mt-1 text-xs font-semibold text-emerald-400">✓ Saved</p> : null}
+        <div className="mt-3 rounded-xl border-2 border-emerald-700 bg-emerald-950/10 p-3">
+          <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-400">
+            <span aria-hidden>✓</span> Expense classified
+          </p>
+          <p className="mt-1 text-sm font-semibold text-white">
+            {line.description ?? "This line"} → {spendCategoryPath ?? "Uncategorized expense"}
+          </p>
+          <p className="mt-1 text-xs font-semibold text-zinc-300">Will not add inventory</p>
+          <ProvenanceLine provenance={provenance} />
+        </div>
+        {editingOpen && !readOnly ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-700 pt-3">
+            <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-full border border-zinc-600 px-3 py-1 text-xs text-zinc-100 disabled:opacity-40">
+              Choose Different Item
+            </button>
+            {overrideFormOpen ? (
+              <div className="w-full">
+                <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     );
   }
 
-  // ============ Expanded card ============
+  const isComplete = outcome === "ready";
+  const { itemMatchOk, packageOk, receivingReadyOk } = checklistCompletion({
+    status: line.status,
+    disposition: line.disposition,
+    hasPackageMismatch: line.hasPackageMismatch,
+    receivingReady: line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null,
+  });
+
   return (
-    <div id={id} className={`rounded-2xl border p-4 ${outcome === "needs_attention" ? "border-amber-900/60 bg-amber-950/10" : "border-zinc-800 bg-zinc-900"}`}>
-      <div className="flex flex-wrap items-start justify-between gap-2">
+    <div id={id} className={`rounded-2xl border-2 p-4 ${isComplete ? "border-emerald-700 bg-zinc-900" : "border-amber-500 bg-amber-950/10"}`}>
+      {/* ============ Header ============ */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-zinc-100">{line.description ?? "—"}</p>
-          <p className="mt-0.5 text-xs text-zinc-500">{line.vendorSku ? `Vendor SKU ${line.vendorSku}` : null}</p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {badge}
-          <button type="button" onClick={onToggleExpand} className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300">
-            Collapse
-          </button>
-        </div>
-      </div>
-
-      {/* ============ A. Invoice ============ */}
-      <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Invoice</p>
-        <p className="mt-1 text-sm text-zinc-100">{line.description ?? "—"}</p>
-        <p className="text-xs text-zinc-500">
-          {line.vendorSku ? `Vendor SKU ${line.vendorSku}` : null}
-          {line.vendorSku && orderedQuantity ? " · " : null}
-          {orderedQuantity ? `Ordered: ${orderedQuantity}` : null}
-        </p>
-        {line.lineTotal !== null ? (
-          <p className="mt-0.5 text-xs text-zinc-500">
-            {line.packageQuantity && line.packageQuantity > 0 ? `Unit price: $${(line.lineTotal / line.packageQuantity).toFixed(2)} · ` : ""}
-            Line total: ${line.lineTotal.toFixed(2)}
+          <p className="text-base font-bold text-white">{line.description ?? "—"}</p>
+          <p className="mt-0.5 text-sm text-zinc-300">
+            {line.vendorSku ? `Vendor SKU ${line.vendorSku}` : null}
+            {orderedQuantity ? ` · Invoice quantity: ${orderedQuantity}` : ""}
           </p>
-        ) : null}
-        {priceComparison?.available ? (
-          <p className="mt-1 text-[11px] leading-tight">
-            <span className="text-zinc-300">
-              ${priceComparison.currentUnitCost.toFixed(2)} / {priceComparison.baseUnitCode}
-            </span>
-            <span className={`ml-1.5 font-medium ${priceChangeTone(priceComparison.direction).colorClass}`}>
-              {priceChangeTone(priceComparison.direction).glyph} {Math.abs(priceComparison.deltaPct).toFixed(1)}%
-            </span>
-          </p>
-        ) : null}
-      </div>
-
-      {/* ============ B. Inventory match ============ */}
-      {line.status === "CONFIRMED" ? (
-        <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Inventory match</p>
-          {line.disposition === "INVENTORY" ? (
-            <>
-              <p className="mt-1 text-sm text-zinc-100">{line.inventoryItemName ?? "—"}</p>
-              <p className="text-xs text-zinc-500">
-                {line.inventoryItemNumber ? `${line.inventoryItemNumber} · ` : ""}
-                {line.inventoryCategoryName ?? "No category"}
-                {line.inventoryBaseUnitCode ? ` · Tracked in: ${line.inventoryBaseUnitCode}` : ""}
-              </p>
-              <p className="mt-0.5 text-xs text-zinc-600">{line.resolutionSource === "VENDOR_SKU_MAPPING" || line.resolutionSource === "MANUAL" ? "Previously approved" : "Newly matched"}</p>
-            </>
+          {line.changedInAmendment ? (
+            <div className="mt-1.5">
+              <AmendmentChangedBadge previous={line.previousOrderedSummary} />
+            </div>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          {isComplete ? (
+            <span className="rounded-full border border-emerald-600 bg-emerald-950/40 px-3 py-1 text-xs font-bold text-emerald-300">✓ All checks complete</span>
           ) : (
-            <>
-              <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">Expense — will not add inventory</p>
-              <p className="text-sm text-zinc-100">{spendCategoryPath ?? "Uncategorized expense"}</p>
-            </>
+            <span className="rounded-full border border-amber-500 bg-amber-950/40 px-3 py-1 text-xs font-bold text-amber-300">! Needs attention</span>
           )}
           {!readOnly ? (
-            <button type="button" onClick={onToggleEdit} className="mt-2 text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300">
-              {editing ? "Cancel" : "Change match"}
+            <button type="button" onClick={onToggleEditing} className="rounded-full border border-zinc-500 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:border-zinc-300">
+              {editingOpen ? "Hide details" : "Edit details"}
             </button>
           ) : null}
         </div>
-      ) : (
-        <div className="mt-2 rounded-xl border border-amber-800 bg-amber-950/10 p-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-400">{STATUS_LABEL[line.status]}</p>
-          {!readOnly && line.aiSuggestedIsNewProposal ? (
+      </div>
+
+      {savedFlash ? <p className="mt-1 text-xs font-semibold text-emerald-400">✓ Saved</p> : null}
+
+      {/* ============ Always-visible three-panel checklist ============ */}
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {/* A. Item Match */}
+        <ChecklistPanel title="Item Match" ok={itemMatchOk}>
+          {itemMatchOk ? (
+            line.disposition === "INVENTORY" ? (
+              <>
+                <p className="text-sm font-semibold text-white">{line.inventoryItemName ?? "—"}</p>
+                <p className="mt-0.5 text-xs text-zinc-300">
+                  {line.inventoryItemNumber ? `${line.inventoryItemNumber} · ` : ""}
+                  {line.inventoryCategoryName ?? "No category"}
+                </p>
+                <p className="text-xs text-zinc-300">Tracked in: {line.inventoryBaseUnitCode ?? "—"}</p>
+                <ProvenanceLine provenance={provenance} />
+              </>
+            ) : (
+              <p className="text-xs text-zinc-300">Classified as an expense -- see the panel below.</p>
+            )
+          ) : (
             <>
-              <p className="mt-1 text-xs text-zinc-300">New item proposed: {line.aiSuggestedInventoryItemName}</p>
-              <button type="button" onClick={onReviewNewItem} className="mt-2 rounded-full bg-emerald-500 px-3 py-1 text-xs font-semibold text-zinc-950">
-                Review new item →
-              </button>
-            </>
-          ) : !readOnly ? (
-            <>
-              {line.aiSuggestedInventoryItemId ? (
+              <p className="text-sm font-semibold text-amber-200">{line.aiSuggestedIsNewProposal ? "New item needs verification" : "No item match yet"}</p>
+              {line.aiSuggestedInventoryItemId && !line.aiSuggestedIsNewProposal ? (
                 <p className="mt-1 text-xs text-zinc-300">
                   Suggested: {line.aiSuggestedInventoryItemName}
                   {line.aiConfidence !== null ? ` (${Math.round(line.aiConfidence * 100)}%)` : ""}
                 </p>
-              ) : (
-                <p className="mt-1 text-xs text-zinc-500">Not yet classified.</p>
-              )}
-              <div className="mt-2 flex flex-wrap gap-2">
-                {line.aiSuggestedInventoryItemId ? (
-                  <button
-                    type="button"
-                    disabled={actionPending}
-                    onClick={() => onApproveExisting(line.aiSuggestedInventoryItemId!)}
-                    className="rounded-full border border-emerald-700 px-3 py-1 text-xs text-emerald-300 disabled:opacity-40"
-                  >
-                    {actionPending ? "Confirming…" : "Confirm item"}
-                  </button>
-                ) : null}
-                <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 disabled:opacity-40">
-                  Change match
-                </button>
-                <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 disabled:opacity-40">
-                  {actionPending ? "Marking…" : "Mark as expense"}
-                </button>
-              </div>
+              ) : null}
+              {!readOnly ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {line.aiSuggestedIsNewProposal ? (
+                    <button type="button" onClick={onReviewNewItem} className="rounded-full bg-emerald-500 px-2.5 py-1 text-[11px] font-semibold text-zinc-950">
+                      Review new item →
+                    </button>
+                  ) : (
+                    <>
+                      {line.aiSuggestedInventoryItemId ? (
+                        <button
+                          type="button"
+                          disabled={actionPending}
+                          onClick={() => onApproveExisting(line.aiSuggestedInventoryItemId!)}
+                          className="rounded-full border border-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
+                        >
+                          {actionPending ? "Confirming…" : "Confirm item"}
+                        </button>
+                      ) : null}
+                      <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-full border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
+                        Change match
+                      </button>
+                      <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-full border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
+                        {actionPending ? "Marking…" : "Mark as expense"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              ) : null}
+              {overrideFormOpen ? (
+                <div className="mt-2">
+                  <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} />
+                </div>
+              ) : null}
             </>
-          ) : null}
-          {overrideFormOpen ? (
-            <div className="mt-2">
-              <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} />
-            </div>
-          ) : null}
-        </div>
-      )}
-
-      {/* ============ C. Package and receiving ============ */}
-      {line.status === "CONFIRMED" && line.disposition === "INVENTORY" ? (
-        <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Package and receiving</p>
-
-          {line.hasPackageMismatch ? (
-            <PackageMismatchInline line={line} onCorrectInvoiceUnit={onNavigateToStep1} onReviewPackage={onReviewPackage} onReturnToVerification={onToggleEdit} />
-          ) : (
-            <PackageConfirmationInline line={line} />
           )}
+        </ChecklistPanel>
 
-          {editing && !line.hasPackageMismatch ? (
-            <button type="button" onClick={onToggleOverrideForm} className="mt-2 text-xs text-zinc-500 underline underline-offset-2">
-              Review purchase package
-            </button>
-          ) : null}
-          {editing && overrideFormOpen ? (
-            <div className="mt-2">
-              <ExistingItemOverrideForm
-                items={items}
-                units={units}
-                onCancel={onToggleOverrideForm}
-                onConfirm={onApproveExisting}
-                defaultItemId={reviewingPackage ? (line.inventoryItemId ?? undefined) : undefined}
-                defaultRegisteringPackage={reviewingPackage}
-              />
+        {/* B. Purchase Package */}
+        <ChecklistPanel title="Purchase Package" ok={packageOk} warn={itemMatchOk && line.disposition === "INVENTORY" && line.hasPackageMismatch}>
+          {!itemMatchOk || line.disposition !== "INVENTORY" ? (
+            <p className="text-xs text-zinc-300">Waiting on item match.</p>
+          ) : line.hasPackageMismatch ? (
+            <>
+              <p className="text-sm font-semibold text-red-200">Purchase package needs review</p>
+              <p className="mt-1 text-xs text-zinc-200">
+                Invoice unit: <span className="font-semibold text-white">{line.resolvedInvoiceUnitCode}</span>
+              </p>
+              <p className="text-xs text-zinc-200">
+                Configured unit: <span className="font-semibold text-white">{formatPurchasePackageDescription(line)}</span>
+              </p>
+              {!readOnly ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {onNavigateToStep1 ? (
+                    <button type="button" onClick={onNavigateToStep1} className="rounded-full border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
+                      Correct invoice unit
+                    </button>
+                  ) : null}
+                  <button type="button" onClick={onReviewPackage} className="rounded-full border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
+                    Review purchase package
+                  </button>
+                  <button type="button" onClick={onToggleEditing} className="rounded-full border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
+                    Return to item verification
+                  </button>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <PackageChecklistBody line={line} />
+          )}
+          {editingOpen && itemMatchOk && line.disposition === "INVENTORY" && !readOnly ? (
+            <div className="mt-2 border-t border-zinc-700 pt-2">
+              <button type="button" onClick={onToggleOverrideForm} className="text-[11px] font-medium text-zinc-300 underline underline-offset-2 hover:text-zinc-100">
+                Review purchase package
+              </button>
+              {overrideFormOpen ? (
+                <div className="mt-2">
+                  <ExistingItemOverrideForm
+                    items={items}
+                    units={units}
+                    onCancel={onToggleOverrideForm}
+                    onConfirm={onApproveExisting}
+                    defaultItemId={reviewingPackage ? (line.inventoryItemId ?? undefined) : undefined}
+                    defaultRegisteringPackage={reviewingPackage}
+                  />
+                </div>
+              ) : null}
             </div>
           ) : null}
+        </ChecklistPanel>
 
+        {/* C. Receiving */}
+        <ChecklistPanel title="Receiving" ok={receivingReadyOk}>
+          {!itemMatchOk || line.disposition !== "INVENTORY" ? (
+            <p className="text-xs text-zinc-300">Waiting on item match.</p>
+          ) : receiving ? (
+            <ReceivingChecklistBody receiving={receiving} locations={locations} alreadyReceived={alreadyReceived} />
+          ) : null}
+        </ChecklistPanel>
+      </div>
+
+      {priceComparison?.available ? (
+        <p className="mt-2 text-[11px] leading-tight text-zinc-300">
+          <span className="text-zinc-200">
+            ${priceComparison.currentUnitCost.toFixed(2)} / {priceComparison.baseUnitCode}
+          </span>
+          <span className={`ml-1.5 font-medium ${priceChangeTone(priceComparison.direction).colorClass}`}>
+            {priceChangeTone(priceComparison.direction).glyph} {Math.abs(priceComparison.deltaPct).toFixed(1)}%
+          </span>
+          <span className="ml-1 text-zinc-400">vs previous purchase</span>
+        </p>
+      ) : null}
+
+      {/* ============ Editing controls -- collapsed unless editingOpen ============ */}
+      {editingOpen && itemMatchOk && line.disposition === "INVENTORY" ? (
+        <div className="mt-3 flex flex-col gap-2 border-t border-zinc-700 pt-3">
           {alreadyReceived ? (
             correcting && correctionDraft ? (
-              <div className="mt-3 flex flex-col gap-2 border-t border-zinc-800 pt-3">
+              <div className="flex flex-col gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-300">Correct receiving details</p>
                 <ReceivingFields
                   requiresVerifiedMeasurement={receiving?.info.requiresVerifiedMeasurement ?? false}
                   baseUnitCode={receiving?.info.baseUnitCode ?? null}
@@ -1116,51 +1329,44 @@ function LineCard({
                   onReceivedQtyOrUnitChange={(patch) => {
                     if (!receiving) return onCorrectionChange(patch);
                     const next = { ...correctionDraft, ...patch };
-                    const recomputed = receiving.info.receivingBehavior === "FIXED_CONVERSION" ? recomputeFixedConversionVerifiedQuantity(receiving.info, next.receivedQuantity, next.receivedUnit) : next.verifiedQuantity;
+                    const recomputed =
+                      receiving.info.receivingBehavior === "FIXED_CONVERSION" ? recomputeFixedConversionVerifiedQuantity(receiving.info, next.receivedQuantity, next.receivedUnit) : next.verifiedQuantity;
                     onCorrectionChange({ ...patch, verifiedQuantity: recomputed });
                   }}
                 />
-                {correctionError ? <p className="text-xs text-red-400">{correctionError}</p> : null}
+                {correctionError ? <p className="text-xs text-red-300">{correctionError}</p> : null}
                 <div className="flex items-center gap-3">
                   <button type="button" onClick={onSaveCorrection} disabled={correctionPending} className="rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40">
                     {correctionPending ? "Saving…" : "Save correction"}
                   </button>
-                  <button type="button" onClick={onCancelCorrection} className="text-xs text-zinc-400 underline underline-offset-2">
+                  <button type="button" onClick={onCancelCorrection} className="text-xs text-zinc-300 underline underline-offset-2">
                     Cancel
                   </button>
                 </div>
               </div>
             ) : (
-              <div className="mt-3 flex items-center justify-between border-t border-zinc-800 pt-3">
-                <p className="text-xs text-zinc-400">
-                  Received: {receiving?.receivedQuantity} {receiving?.receivedUnit} · {locations.find((l) => l.id === receiving?.locationId)?.name ?? "No location"} ·{" "}
-                  {CONDITION_OPTIONS.find((c) => c.value === receiving?.conditionStatus)?.label}
-                </p>
-                {!readOnly ? (
-                  <button type="button" onClick={onOpenCorrection} className="text-xs text-zinc-500 underline underline-offset-2">
-                    Edit
-                  </button>
-                ) : null}
-              </div>
+              <button type="button" onClick={onOpenCorrection} className="self-start rounded-full border border-zinc-500 px-3 py-1.5 text-xs font-semibold text-zinc-100">
+                Correct receiving details
+              </button>
             )
           ) : receiving ? (
-            <div className="mt-3 flex flex-col gap-2 border-t border-zinc-800 pt-3">
+            <div className="flex flex-col gap-2">
               {!readOnly && needsInvoiceUnitResolution(receiving) ? (
-                <div className="flex flex-col gap-2 rounded-lg border border-amber-800 bg-amber-950/20 p-3">
+                <div className="flex flex-col gap-2 rounded-lg border border-amber-700 bg-amber-950/20 p-3">
                   {receiving.invoiceUnitConflict ? (
-                    <p className="text-xs text-amber-400">
+                    <p className="text-xs text-amber-200">
                       Invoice says: <span className="font-semibold">{receiving.invoiceUnitConflict.invoiceUnit}</span> · Previously remembered:{" "}
                       <span className="font-semibold">{receiving.invoiceUnitConflict.rememberedUnit}</span> · Needs review.
                     </p>
                   ) : (
-                    <p className="text-xs text-amber-400">Invoice unit not stated -- resolve it once and it will be remembered.</p>
+                    <p className="text-xs text-amber-200">Invoice unit not stated -- resolve it once and it will be remembered.</p>
                   )}
-                  <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+                  <label className="flex flex-col gap-0.5 text-xs text-zinc-300">
                     Invoice unit
                     <select
                       value={receiving.invoiceUnitChoice}
                       onChange={(e) => onInvoiceUnitChoice(e.target.value)}
-                      className="rounded-lg border border-amber-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
+                      className="rounded-lg border border-amber-600 bg-zinc-950 px-2 py-1 text-xs text-white"
                     >
                       <option value="">Select…</option>
                       {invoiceUnitCandidates(receiving).map((u) => (
@@ -1171,15 +1377,6 @@ function LineCard({
                     </select>
                   </label>
                 </div>
-              ) : null}
-              {!needsInvoiceUnitResolution(receiving) && !receivingLineIsReady(receiving) ? (
-                <InlineValidationMessage>
-                  {receiving.receivedQuantity.trim() === ""
-                    ? "Enter the received quantity."
-                    : receiving.info.requiresVerifiedMeasurement && receiving.verifiedQuantity.trim() === ""
-                      ? `Enter the verified ${receiving.info.baseUnitCode ?? "measurement"}.`
-                      : "Choose a storage location."}
-                </InlineValidationMessage>
               ) : null}
               <ReceivingFields
                 requiresVerifiedMeasurement={receiving.info.requiresVerifiedMeasurement}
@@ -1200,6 +1397,56 @@ function LineCard({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function PackageChecklistBody({ line }: { line: LineClassificationRow }) {
+  const display = formatPackageConfirmation({
+    packageQuantity: line.packageQuantity,
+    resolvedInvoiceUnitCode: line.resolvedInvoiceUnitCode,
+    effectivePurchaseUnitCode: line.effectivePurchaseUnitCode,
+    effectiveReceivingBehavior: line.effectiveReceivingBehavior,
+    effectiveConversionFactor: line.effectiveConversionFactor,
+    inventoryBaseUnitCode: line.inventoryBaseUnitCode,
+  });
+  if (!display) {
+    return <p className="text-xs text-zinc-300">Purchase package not yet confirmed.</p>;
+  }
+  return (
+    <>
+      <p className="text-sm font-semibold text-white">{display.lines[0]}</p>
+      {display.lines.slice(1).map((text, index) => (
+        <p key={index} className="text-xs text-zinc-300">
+          {text}
+        </p>
+      ))}
+      <p className="mt-1 text-xs font-medium text-zinc-300">
+        Status: <span className="font-semibold text-emerald-300">Vendor package confirmed</span>
+      </p>
+    </>
+  );
+}
+
+function ReceivingChecklistBody({ receiving, locations, alreadyReceived }: { receiving: ReceivingLineDraft; locations: LocationSummary[]; alreadyReceived: boolean }) {
+  const ready = receivingLineIsReady(receiving);
+  if (!ready) {
+    return <p className="text-sm font-semibold text-amber-200">{missingReceivingReason(receiving)}</p>;
+  }
+  const locationName = locations.find((l) => l.id === receiving.locationId)?.name ?? "—";
+  const conditionLabel = CONDITION_OPTIONS.find((c) => c.value === receiving.conditionStatus)?.label ?? receiving.conditionStatus;
+  const normalized = receiving.info.receivingBehavior === "FIXED_CONVERSION" && receiving.verifiedQuantity ? `${receiving.verifiedQuantity} ${receiving.info.baseUnitCode ?? ""}` : null;
+  return (
+    <>
+      <p className="text-sm font-semibold text-white">
+        Received: {receiving.receivedQuantity} {receiving.receivedUnit}
+        {normalized ? ` / ${normalized}` : ""}
+      </p>
+      <p className="mt-0.5 text-xs text-zinc-300">{locationName}</p>
+      <p className="text-xs text-zinc-300">Condition: {conditionLabel}</p>
+      <p className="mt-1 text-xs font-medium text-zinc-300">
+        Status: <span className="font-semibold text-emerald-300">{alreadyReceived ? "Confirmed for this delivery" : "Ready to confirm"}</span>
+      </p>
+    </>
   );
 }
 
@@ -1232,7 +1479,7 @@ function ReceivingFields({
 }) {
   return (
     <div className="flex flex-wrap items-end gap-3">
-      <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+      <label className="flex flex-col gap-0.5 text-xs font-medium text-zinc-300">
         Received
         <div className="flex gap-1">
           <input
@@ -1241,7 +1488,7 @@ function ReceivingFields({
             disabled={disabled}
             onChange={(e) => onReceivedQtyOrUnitChange({ receivedQuantity: e.target.value })}
             placeholder="Qty"
-            className="w-20 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 disabled:opacity-60"
+            className="w-20 rounded-lg border border-zinc-600 bg-zinc-950 px-2 py-1 text-xs text-white disabled:opacity-60"
           />
           <input
             type="text"
@@ -1249,37 +1496,37 @@ function ReceivingFields({
             disabled={disabled}
             onChange={(e) => onReceivedQtyOrUnitChange({ receivedUnit: e.target.value })}
             placeholder="Unit"
-            className="w-20 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 disabled:opacity-60"
+            className="w-20 rounded-lg border border-zinc-600 bg-zinc-950 px-2 py-1 text-xs text-white disabled:opacity-60"
           />
         </div>
         {receivingBehavior === "FIXED_CONVERSION" && verifiedQuantity.trim() !== "" ? (
-          <span className="text-xs text-zinc-500">
+          <span className="text-xs font-medium text-zinc-300">
             Adds to inventory: {verifiedQuantity} {baseUnitCode}
           </span>
         ) : null}
       </label>
 
       {requiresVerifiedMeasurement ? (
-        <label className="flex flex-col gap-0.5 text-xs text-amber-400">
-          Verified {baseUnitCode} <span className="text-amber-500">REQUIRED</span>
+        <label className="flex flex-col gap-0.5 text-xs font-medium text-amber-300">
+          Verified {baseUnitCode} <span className="text-amber-400">REQUIRED</span>
           <input
             type="number"
             value={verifiedQuantity}
             disabled={disabled}
             onChange={(e) => onChange({ verifiedQuantity: e.target.value })}
             placeholder={baseUnitCode ?? ""}
-            className="w-28 rounded-lg border border-amber-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 disabled:opacity-60"
+            className="w-28 rounded-lg border border-amber-600 bg-zinc-950 px-2 py-1 text-xs text-white disabled:opacity-60"
           />
         </label>
       ) : null}
 
-      <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+      <label className="flex flex-col gap-0.5 text-xs font-medium text-zinc-300">
         Location
         <select
           value={locationId}
           disabled={disabled}
           onChange={(e) => onChange({ locationId: e.target.value })}
-          className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 disabled:opacity-60"
+          className="rounded-lg border border-zinc-600 bg-zinc-950 px-2 py-1 text-xs text-white disabled:opacity-60"
         >
           <option value="">Select…</option>
           {locations.map((loc) => (
@@ -1290,13 +1537,13 @@ function ReceivingFields({
         </select>
       </label>
 
-      <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+      <label className="flex flex-col gap-0.5 text-xs font-medium text-zinc-300">
         Condition
         <select
           value={conditionStatus}
           disabled={disabled}
           onChange={(e) => onChange({ conditionStatus: e.target.value as ReceivingLineDraft["conditionStatus"] })}
-          className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 disabled:opacity-60"
+          className="rounded-lg border border-zinc-600 bg-zinc-950 px-2 py-1 text-xs text-white disabled:opacity-60"
         >
           {CONDITION_OPTIONS.map((c) => (
             <option key={c.value} value={c.value}>
@@ -1305,84 +1552,6 @@ function ReceivingFields({
           ))}
         </select>
       </label>
-    </div>
-  );
-}
-
-function formatPurchasePackageDescription(line: LineClassificationRow): string {
-  const unit = line.effectivePurchaseUnitCode ?? "—";
-  if (line.effectiveReceivingBehavior === "FIXED_CONVERSION" && line.effectiveConversionFactor && line.inventoryBaseUnitCode) {
-    const baseUnit = line.inventoryBaseUnitCode.toLowerCase();
-    const plural = line.effectiveConversionFactor === 1 ? baseUnit : `${baseUnit}s`;
-    return `${unit} — ${line.effectiveConversionFactor} ${plural} per ${unit.toLowerCase()}`;
-  }
-  return unit;
-}
-
-function PackageMismatchInline({
-  line,
-  onCorrectInvoiceUnit,
-  onReviewPackage,
-  onReturnToVerification,
-}: {
-  line: LineClassificationRow;
-  onCorrectInvoiceUnit?: () => void;
-  onReviewPackage: () => void;
-  onReturnToVerification: () => void;
-}) {
-  return (
-    <div className="mt-1 rounded-lg border border-red-800 bg-red-950/20 p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-red-400">Purchase package needs review</p>
-      <p className="mt-1 text-sm text-zinc-200">
-        The invoice says <strong className="font-semibold text-zinc-50">{line.resolvedInvoiceUnitCode}</strong>, but this vendor/SKU is configured as{" "}
-        <strong className="font-semibold text-zinc-50">{formatPurchasePackageDescription(line)}</strong>.
-      </p>
-      <p className="mt-1 text-xs text-zinc-400">
-        Posting this line as received would record the wrong quantity of {line.inventoryItemName ?? "this item"} into inventory -- the two units aren&apos;t interchangeable.
-      </p>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {onCorrectInvoiceUnit ? (
-          <button type="button" onClick={onCorrectInvoiceUnit} className="rounded-full border border-red-700 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-900/30">
-            Correct invoice unit
-          </button>
-        ) : null}
-        <button type="button" onClick={onReviewPackage} className="rounded-full border border-red-700 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-900/30">
-          Review purchase package
-        </button>
-        <button type="button" onClick={onReturnToVerification} className="rounded-full border border-red-700 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-900/30">
-          Return to item verification
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function PackageConfirmationInline({ line }: { line: LineClassificationRow }) {
-  const display = formatPackageConfirmation({
-    packageQuantity: line.packageQuantity,
-    resolvedInvoiceUnitCode: line.resolvedInvoiceUnitCode,
-    effectivePurchaseUnitCode: line.effectivePurchaseUnitCode,
-    effectiveReceivingBehavior: line.effectiveReceivingBehavior,
-    effectiveConversionFactor: line.effectiveConversionFactor,
-    inventoryBaseUnitCode: line.inventoryBaseUnitCode,
-  });
-  if (!display) return null;
-
-  if (display.mode === "inline") {
-    return (
-      <p className="mt-1 text-sm text-emerald-200">
-        <span className="font-semibold text-emerald-300">Purchase package confirmed:</span> {display.lines[0]}
-      </p>
-    );
-  }
-  return (
-    <div className="mt-1">
-      <p className="text-xs font-semibold text-emerald-400">Purchase package confirmed</p>
-      {display.lines.map((text, index) => (
-        <p key={index} className="text-sm text-emerald-200">
-          {text}
-        </p>
-      ))}
     </div>
   );
 }

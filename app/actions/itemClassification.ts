@@ -19,6 +19,7 @@ import {
 import { NotPreparerError } from "@/app/lib/purchaseDocuments/errors";
 import { resolveLineMismatchFields, resolveUnitCode } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
 import { resolveVendorPurchasePackages } from "@/app/lib/purchaseDocuments/resolveVendorPurchasePackage";
+import { amendmentDiff, type AmendmentDiffLine } from "@/app/lib/purchaseDocuments/lineProvenance";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -110,6 +111,25 @@ export interface LineClassificationRow {
    * stays CONFIRMED (its item match is correct) but must not count as
    * fully resolved until this clears. */
   hasPackageMismatch: boolean;
+  // ---- Redesign: verification-checklist provenance (only ever shown
+  // when the underlying data genuinely supports it -- never a fabricated
+  // timestamp or attribution).
+  /** Who resolved this classification, from
+   * purchase_document_line_classifications.resolved_by_app_user_id --
+   * null for a system auto-match (VENDOR_SKU_MAPPING/VENDOR_DESCRIPTION_
+   * MAPPING), which was never a manager action to attribute. */
+  resolvedByName: string | null;
+  resolvedAt: string | null;
+  /** True when this line's own invoice facts (description/package
+   * quantity/unit) differ from the matching line (by vendor SKU) on the
+   * PREVIOUS revision -- only meaningful/computed when this document is
+   * itself an amendment (revisionNumber > 1). Never guesses "changed" for
+   * a field it couldn't actually compare. */
+  changedInAmendment: boolean;
+  /** The previous revision's own ordered quantity/unit for this line,
+   * shown in smaller text beside a "Changed in amendment" badge -- null
+   * unless changedInAmendment is true. */
+  previousOrderedSummary: string | null;
 }
 
 export type GetPurchaseDocumentLineClassificationsResult = { ok: true; lines: LineClassificationRow[] } | AuthFailure;
@@ -133,7 +153,7 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
     supabase
       .from("purchase_document_line_classifications")
       .select(
-        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, vendor_item_purchase_unit_id, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, base_unit_id, inventory_categories(name), units(code, name)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code))"
+        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, vendor_item_purchase_unit_id, resolved_by_app_user_id, resolved_at, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, base_unit_id, inventory_categories(name), units(code, name)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code))"
       )
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", auth.manager.organizationId),
@@ -144,12 +164,62 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
     // post_purchase_document_inventory itself resolves the received unit
     // (never a raw string compare against unverified OCR text).
     supabase.from("units").select("code"),
-    supabase.from("purchase_documents").select("vendor_id").eq("id", purchaseDocumentId).eq("organization_id", auth.manager.organizationId).maybeSingle(),
+    supabase
+      .from("purchase_documents")
+      .select("vendor_id, revision_number, previous_revision_id")
+      .eq("id", purchaseDocumentId)
+      .eq("organization_id", auth.manager.organizationId)
+      .maybeSingle(),
   ]);
 
   const recognizedUnitCodes = new Set((allUnits ?? []).map((u) => (u.code as string).trim().toUpperCase()));
 
   const classificationByLineKey = new Map((classifications ?? []).map((c) => [c.line_key as string, c]));
+
+  // Redesign: "Confirmed by <name> · <time>" -- ONLY for a genuine manager
+  // resolution (resolved_by_app_user_id set); a system auto-match
+  // (VENDOR_SKU_MAPPING/VENDOR_DESCRIPTION_MAPPING) never sets it, so it's
+  // never falsely attributed. Batched, one query for every distinct
+  // resolver on this document, never one lookup per line.
+  const resolverIds = Array.from(
+    new Set((classifications ?? []).map((c) => c.resolved_by_app_user_id as string | null).filter((id): id is string => Boolean(id)))
+  );
+  const { data: resolverRows } =
+    resolverIds.length > 0 ? await supabase.from("app_users").select("id, employees(first_name, last_name)").in("id", resolverIds) : { data: [] };
+  const resolverNameById = new Map(
+    (resolverRows ?? []).map((row) => {
+      const employee = Array.isArray(row.employees) ? row.employees[0] : row.employees;
+      return [row.id as string, employee ? `${(employee as { first_name: string }).first_name} ${(employee as { last_name: string }).last_name}` : null];
+    })
+  );
+
+  // Redesign: "Changed in amendment" -- only computed when this document
+  // is itself an amendment (revisionNumber > 1); matched to the previous
+  // revision's own line by vendor SKU (the natural cross-revision
+  // identity, since each revision generates brand-new lineKeys). Compares
+  // only the raw INVOICE facts (description/package quantity/unit) --
+  // genuinely comparable across revisions without guessing at
+  // classification- or receiving-level intent.
+  const revisionNumber = (purchaseDocument?.revision_number as number | undefined) ?? 1;
+  const previousRevisionId = (purchaseDocument?.previous_revision_id as string | null | undefined) ?? null;
+  const previousLineBySku = new Map<string, AmendmentDiffLine>();
+  if (revisionNumber > 1 && previousRevisionId) {
+    const { data: previousLines } = await supabase
+      .from("purchase_document_lines")
+      .select("vendor_sku, description, package_quantity, package_unit")
+      .eq("purchase_document_id", previousRevisionId)
+      .eq("organization_id", auth.manager.organizationId);
+    for (const row of previousLines ?? []) {
+      const sku = row.vendor_sku as string | null;
+      if (!sku) continue;
+      previousLineBySku.set(sku, {
+        vendorSku: sku,
+        description: row.description as string | null,
+        packageQuantity: row.package_quantity as number | null,
+        packageUnit: row.package_unit as string | null,
+      });
+    }
+  }
 
   // Resolves the effective vendor purchase package with the SAME 3-layer
   // priority Step 3 (getReceivingLines.ts) uses -- see
@@ -172,6 +242,15 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
 
   const rows: LineClassificationRow[] = (lines ?? []).map((line) => {
     const c = classificationByLineKey.get(line.line_key as string);
+    const { changed: changedInAmendment, previousSummary: previousOrderedSummary } = amendmentDiff(
+      {
+        vendorSku: line.vendor_sku as string | null,
+        description: line.description as string | null,
+        packageQuantity: line.package_quantity as number | null,
+        packageUnit: line.package_unit as string | null,
+      },
+      previousLineBySku
+    );
     if (!c) {
       return {
         classificationId: null,
@@ -206,6 +285,10 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
         effectiveConversionFactor: null,
         resolvedInvoiceUnitCode: resolveUnitCode(line.package_unit as string | null, recognizedUnitCodes),
         hasPackageMismatch: false,
+        resolvedByName: null,
+        resolvedAt: null,
+        changedInAmendment,
+        previousOrderedSummary,
       };
     }
 
@@ -273,6 +356,10 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
       effectiveConversionFactor,
       resolvedInvoiceUnitCode,
       hasPackageMismatch,
+      resolvedByName: c.resolved_by_app_user_id ? (resolverNameById.get(c.resolved_by_app_user_id as string) ?? null) : null,
+      resolvedAt: c.resolved_at as string | null,
+      changedInAmendment,
+      previousOrderedSummary,
       aiNewItemProposal: isNewProposal
         ? {
             disposition: (aiItem?.disposition as "INVENTORY" | "NON_INVENTORY" | undefined) ?? "INVENTORY",

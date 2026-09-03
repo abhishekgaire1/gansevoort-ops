@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyLineOutcome, summarizeCombinedStep, type CombinedLineReadinessInput } from "@/app/lib/purchaseDocuments/combinedLineReadiness";
+import { classifyLineOutcome, summarizeCombinedStep, checklistCompletion, type CombinedLineReadinessInput } from "@/app/lib/purchaseDocuments/combinedLineReadiness";
 
 /**
  * Redesign: combined "Confirm Items & Receiving" step -- the single
@@ -50,5 +50,31 @@ describe("summarizeCombinedStep", () => {
 
   it("an empty document is never treated as resolved", () => {
     expect(summarizeCombinedStep([]).allResolved).toBe(false);
+  });
+});
+
+describe("checklistCompletion", () => {
+  it("test 1: a fully ready line shows all three checks complete", () => {
+    expect(checklistCompletion(readyLine)).toEqual({ itemMatchOk: true, packageOk: true, receivingReadyOk: true });
+  });
+
+  it("test 5: an unconfirmed item match is the ONLY incomplete check it can identify -- package/receiving aren't evaluated yet", () => {
+    expect(checklistCompletion({ ...readyLine, status: "PENDING_REVIEW" })).toEqual({ itemMatchOk: false, packageOk: false, receivingReadyOk: false });
+  });
+
+  it("test 5: a package mismatch is identified as the incomplete check while item match stays complete", () => {
+    expect(checklistCompletion({ ...readyLine, hasPackageMismatch: true })).toEqual({ itemMatchOk: true, packageOk: false, receivingReadyOk: true });
+  });
+
+  it("test 5: incomplete receiving is identified as the incomplete check while item match and package stay complete", () => {
+    expect(checklistCompletion({ ...readyLine, receivingReady: false })).toEqual({ itemMatchOk: true, packageOk: true, receivingReadyOk: false });
+  });
+
+  it("an expense line's package/receiving checks are never marked complete -- they don't apply to it", () => {
+    expect(checklistCompletion({ status: "CONFIRMED", disposition: "NON_INVENTORY", hasPackageMismatch: false, receivingReady: null })).toEqual({
+      itemMatchOk: true,
+      packageOk: false,
+      receivingReadyOk: false,
+    });
   });
 });

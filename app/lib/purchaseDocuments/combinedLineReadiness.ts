@@ -43,6 +43,36 @@ export interface CombinedStepSummary {
   allResolved: boolean;
 }
 
+export interface ChecklistCompletionInput {
+  status: "UNCLASSIFIED" | "PENDING_REVIEW" | "STALE" | "CONFIRMED";
+  disposition: "INVENTORY" | "NON_INVENTORY" | "UNRESOLVED";
+  hasPackageMismatch: boolean;
+  receivingReady: boolean | null;
+}
+
+export interface ChecklistCompletion {
+  itemMatchOk: boolean;
+  packageOk: boolean;
+  receivingReadyOk: boolean;
+}
+
+/** The per-panel "which of the three checks is actually done" breakdown
+ * shown on an inventory line's card -- the SAME three facts
+ * classifyLineOutcome already folds into a single ready/needs_attention
+ * verdict, exposed separately here so a needs-attention card can point at
+ * the specific incomplete check instead of a single undifferentiated
+ * warning. Never a competing calculation: a line is "ready" exactly when
+ * all three of these are true. */
+export function checklistCompletion(input: ChecklistCompletionInput): ChecklistCompletion {
+  const itemMatchOk = input.status === "CONFIRMED";
+  const isInventory = itemMatchOk && input.disposition === "INVENTORY";
+  return {
+    itemMatchOk,
+    packageOk: isInventory && !input.hasPackageMismatch,
+    receivingReadyOk: isInventory && input.receivingReady === true,
+  };
+}
+
 export function summarizeCombinedStep(outcomes: LineOutcome[]): CombinedStepSummary {
   const readyCount = outcomes.filter((o) => o === "ready").length;
   const expenseCount = outcomes.filter((o) => o === "expense").length;
