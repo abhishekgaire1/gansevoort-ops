@@ -140,6 +140,24 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
     excludeRevisionGroupId: purchaseDocument.revision_group_id,
   });
 
+  // Amendment-in-progress context (fix for a confirmed defect: a reopened
+  // amendment's own prior VERIFIED revision used to reappear as a "possible
+  // duplicate" of itself, discovered ~500ms after load by
+  // PurchaseDocumentReviewView's own client-side re-check, which never
+  // carried revisionGroupId). previousVerifiedAt is fetched here (rather
+  // than derived from `revisions`, which has no verifiedAt field) purely
+  // for the banner's "previously verified on <date>" text.
+  let previousVerifiedAt: string | null = null;
+  if (purchaseDocument.previous_revision_id) {
+    const { data: previousRevision } = await serviceClient
+      .from("purchase_documents")
+      .select("verified_at")
+      .eq("id", purchaseDocument.previous_revision_id)
+      .eq("organization_id", auth.manager.organizationId)
+      .maybeSingle();
+    previousVerifiedAt = previousRevision?.verified_at ?? null;
+  }
+
   const normalized = (extractionAttempt?.normalized_extraction ?? null) as NormalizedInvoiceExtraction | null;
 
   const lineRows = (lines ?? []).map((line) => ({
@@ -379,6 +397,10 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
       }
       lastReturnedReason={purchaseDocument.last_returned_reason}
       lastReturnedAt={purchaseDocument.last_returned_at}
+      revisionGroupId={purchaseDocument.revision_group_id}
+      previousRevisionId={purchaseDocument.previous_revision_id}
+      previousVerifiedAt={previousVerifiedAt}
+      amendmentReason={purchaseDocument.amendment_reason}
       initialDuplicates={duplicates}
       vendors={vendorsResult.ok ? vendorsResult.vendors : []}
       deliveryVerifiedByName={deliveryVerifiedByName}

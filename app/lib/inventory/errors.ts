@@ -7,6 +7,11 @@
  */
 export const INVENTORY_SQLSTATE = {
   POSTING_BLOCKED: "GA017",
+  /** post_purchase_document_inventory refused: another revision sharing
+   * this document's revision_group_id has already posted inventory --
+   * an amendment lineage may post at most once (20260811100132, fix for
+   * a confirmed double-posting defect). */
+  AMENDMENT_LINEAGE_ALREADY_POSTED: "GA075",
   INVALID_STORAGE_LOCATION: "GA021",
   INSUFFICIENT_INVENTORY: "GA022",
   STALE_CYCLE_COUNT_LINE: "GA023",
@@ -181,6 +186,18 @@ export class KioskUsageUnitNotAuthorizedError extends Error {
   }
 }
 
+/** post_purchase_document_inventory refused: this document is one
+ * revision in an amendment lineage (revision_group_id) where another
+ * revision already posted inventory -- fix for a confirmed defect where
+ * re-receiving and posting the same physical delivery on a reopened
+ * amendment double-counted it. An amendment lineage posts at most once. */
+export class AmendmentLineageAlreadyPostedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AmendmentLineageAlreadyPostedError";
+  }
+}
+
 export function mapInventoryBatchRpcError(error: { code?: string; message: string; details?: string | null }): Error {
   if (error.code === INVENTORY_SQLSTATE.INSUFFICIENT_INVENTORY) {
     return new BatchInsufficientInventoryError(error.message, error.details ?? undefined);
@@ -197,6 +214,9 @@ export function mapInventoryBatchRpcError(error: { code?: string; message: strin
 export function mapInventoryRpcError(error: { code?: string; message: string; details?: string | null }): Error {
   if (error.code === INVENTORY_SQLSTATE.POSTING_BLOCKED) {
     return new InventoryPostingBlockedError(error.message, error.details ?? undefined);
+  }
+  if (error.code === INVENTORY_SQLSTATE.AMENDMENT_LINEAGE_ALREADY_POSTED) {
+    return new AmendmentLineageAlreadyPostedError(error.message);
   }
   if (error.code === INVENTORY_SQLSTATE.INSUFFICIENT_INVENTORY) {
     return new InsufficientInventoryError(error.message, error.details ?? undefined);

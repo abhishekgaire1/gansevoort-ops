@@ -91,3 +91,56 @@ export function resolveLineMismatchFields(input: LineMismatchResolutionInput): L
   const hasPackageMismatch = hasPackageUnitMismatch({ status: input.status, disposition: input.disposition, resolvedInvoiceUnitCode, effectivePurchaseUnitCode });
   return { effectivePurchaseUnitCode, effectivePurchaseUnitName, effectiveReceivingBehavior, effectiveConversionFactor, resolvedInvoiceUnitCode, hasPackageMismatch };
 }
+
+export interface PackageConfirmationInput {
+  packageQuantity: number | null;
+  /** Prefer the invoice's own resolved unit text; when the raw invoice
+   * text isn't available/recognized (common for a historical line whose
+   * package_unit was never extracted), the confirmed purchase unit itself
+   * is shown instead -- still an honest statement of "the unit this line
+   * is being treated as," never a fabricated invoice fact. */
+  resolvedInvoiceUnitCode: string | null;
+  effectivePurchaseUnitCode: string | null;
+  effectiveReceivingBehavior: "SAME_UNIT" | "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY" | null;
+  effectiveConversionFactor: number | null;
+  inventoryBaseUnitCode: string | null;
+}
+
+export interface PackageConfirmationDisplay {
+  /** "inline" -- a single short line, shown after the "Purchase package
+   * confirmed:" heading on the SAME line (the direct one-to-one case).
+   * "block" -- a heading followed by each of `lines` on its own line
+   * (fixed-conversion and measured-at-receiving cases). */
+  mode: "inline" | "block";
+  lines: string[];
+}
+
+/** The calm, positive Step 2 confirmation for a CONFIRMED inventory line
+ * whose purchase package is genuinely resolved and does NOT mismatch (see
+ * hasPackageUnitMismatch -- callers must check that separately and show
+ * the red warning instead when it's true). Returns null when there is
+ * nothing confirmed yet to show (no effective purchase unit resolved at
+ * all) -- never fabricates a conversion that was never actually
+ * confirmed. */
+export function formatPackageConfirmation(input: PackageConfirmationInput): PackageConfirmationDisplay | null {
+  const { packageQuantity, effectivePurchaseUnitCode, effectiveReceivingBehavior, effectiveConversionFactor, inventoryBaseUnitCode } = input;
+  if (!effectivePurchaseUnitCode || !effectiveReceivingBehavior) return null;
+  const invoiceUnit = input.resolvedInvoiceUnitCode ?? effectivePurchaseUnitCode;
+  const qty = packageQuantity ?? null;
+  const invoiceLine = `Invoice: ${qty !== null ? `${qty} ` : ""}${invoiceUnit}`;
+
+  if (effectiveReceivingBehavior === "MEASURE_EACH_DELIVERY" || effectiveReceivingBehavior === "COUNT_EACH_DELIVERY") {
+    const behaviorLabel = effectiveReceivingBehavior === "MEASURE_EACH_DELIVERY" ? "weight or volume is measured" : "count is verified";
+    return { mode: "block", lines: [invoiceLine, `${effectivePurchaseUnitCode} -- ${behaviorLabel} each delivery (no fixed conversion)`] };
+  }
+
+  if (effectiveReceivingBehavior === "FIXED_CONVERSION") {
+    if (!effectiveConversionFactor || !inventoryBaseUnitCode) return null;
+    const lines = [invoiceLine, `Conversion: 1 ${effectivePurchaseUnitCode} = ${effectiveConversionFactor} ${inventoryBaseUnitCode}`];
+    if (qty !== null) lines.push(`Inventory received: ${qty * effectiveConversionFactor} ${inventoryBaseUnitCode}`);
+    return { mode: "block", lines };
+  }
+
+  // SAME_UNIT -- direct one-to-one, e.g. "3 BOTTLE -> 3 BOTTLE".
+  return { mode: "inline", lines: [qty !== null ? `${qty} ${effectivePurchaseUnitCode} -> ${qty} ${effectivePurchaseUnitCode}` : `${effectivePurchaseUnitCode} -> ${effectivePurchaseUnitCode}`] };
+}

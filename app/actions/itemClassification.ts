@@ -18,6 +18,7 @@ import {
 } from "@/app/lib/itemMaster/errors";
 import { NotPreparerError } from "@/app/lib/purchaseDocuments/errors";
 import { resolveLineMismatchFields, resolveUnitCode } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
+import { resolveVendorPurchasePackages } from "@/app/lib/purchaseDocuments/resolveVendorPurchasePackage";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -122,7 +123,7 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();
-  const [{ data: lines }, { data: classifications }, { data: allUnits }] = await Promise.all([
+  const [{ data: lines }, { data: classifications }, { data: allUnits }, { data: purchaseDocument }] = await Promise.all([
     supabase
       .from("purchase_document_lines")
       .select("line_key, line_number, vendor_sku, description, package_quantity, package_unit, measured_quantity, measured_unit, line_total")
@@ -132,7 +133,7 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
     supabase
       .from("purchase_document_line_classifications")
       .select(
-        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, vendor_item_purchase_unit_id, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, base_unit_id, inventory_categories(name), units(code, name)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code)), vendor_item_purchase_units!purchase_document_line_classifications_vendor_package_org_fk(purchase_unit_id, conversion_factor, receiving_behavior, units(code, name))"
+        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, vendor_item_purchase_unit_id, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, base_unit_id, inventory_categories(name), units(code, name)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code))"
       )
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", auth.manager.organizationId),
@@ -143,11 +144,31 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
     // post_purchase_document_inventory itself resolves the received unit
     // (never a raw string compare against unverified OCR text).
     supabase.from("units").select("code"),
+    supabase.from("purchase_documents").select("vendor_id").eq("id", purchaseDocumentId).eq("organization_id", auth.manager.organizationId).maybeSingle(),
   ]);
 
   const recognizedUnitCodes = new Set((allUnits ?? []).map((u) => (u.code as string).trim().toUpperCase()));
 
   const classificationByLineKey = new Map((classifications ?? []).map((c) => [c.line_key as string, c]));
+
+  // Resolves the effective vendor purchase package with the SAME 3-layer
+  // priority Step 3 (getReceivingLines.ts) uses -- see
+  // resolveVendorPurchasePackage.ts's own doc comment. Layer 1 (this
+  // classification's own vendor_item_purchase_unit_id) alone silently
+  // missed every VENDOR_SKU_MAPPING-auto-classified repeat line (the
+  // common case for a returning vendor/SKU) and every item whose original
+  // approval predated full vendor-package-model adoption -- exactly the
+  // real Bartlett/Farmland Sour Cream case (confirmed package "PACK, 1
+  // PACK = 10 LB" lives only in the legacy inventory_item_units +
+  // vendor_item_mappings.confirmed_invoice_unit_id tables for that item).
+  const vendorPackageByLineKey = await resolveVendorPurchasePackages(
+    supabase,
+    auth.manager.organizationId,
+    (purchaseDocument?.vendor_id as string | null) ?? null,
+    (classifications ?? [])
+      .filter((c) => c.status === "CONFIRMED" && c.disposition === "INVENTORY" && c.inventory_item_id)
+      .map((c) => ({ key: c.line_key as string, inventoryItemId: c.inventory_item_id as string, vendorItemPurchaseUnitId: c.vendor_item_purchase_unit_id as string | null }))
+  );
 
   const rows: LineClassificationRow[] = (lines ?? []).map((line) => {
     const c = classificationByLineKey.get(line.line_key as string);
@@ -196,12 +217,12 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
     const isNewProposal = aiItem?.approval_status === "PENDING_REVIEW";
 
     // Purchase-package mismatch (see packageUnitMismatch.ts): the
-    // effective purchase package comes from THIS classification's own
-    // resolved vendor_item_purchase_unit_id, falling back to the item's
-    // base unit for SAME_UNIT -- exactly coalesce(vpu.purchase_unit_id,
-    // ii.base_unit_id) in post_purchase_document_inventory.
-    const vendorPackageRow = Array.isArray(c.vendor_item_purchase_units) ? c.vendor_item_purchase_units[0] : c.vendor_item_purchase_units;
-    const vendorPackageUnit = vendorPackageRow ? (Array.isArray(vendorPackageRow.units) ? vendorPackageRow.units[0] : vendorPackageRow.units) : null;
+    // effective purchase package comes from THIS line's own resolved
+    // vendor package (see resolveVendorPurchasePackages' 3-layer priority
+    // above), falling back to the item's base unit for SAME_UNIT --
+    // exactly coalesce(vpu.purchase_unit_id, ii.base_unit_id) in
+    // post_purchase_document_inventory.
+    const vendorPackage = vendorPackageByLineKey.get(line.line_key as string) ?? null;
     const status = c.status as "PENDING_REVIEW" | "CONFIRMED" | "STALE";
     const disposition = c.disposition as "INVENTORY" | "NON_INVENTORY" | "UNRESOLVED";
     const {
@@ -215,14 +236,7 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
       status,
       disposition,
       invoicePackageUnitText: line.package_unit as string | null,
-      vendorPackage: vendorPackageRow
-        ? {
-            unitCode: (vendorPackageUnit?.code as string | undefined) ?? null,
-            unitName: (vendorPackageUnit?.name as string | undefined) ?? null,
-            receivingBehavior: vendorPackageRow.receiving_behavior as "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY",
-            conversionFactor: vendorPackageRow.conversion_factor as number | null,
-          }
-        : null,
+      vendorPackage,
       itemBaseUnit: itemUnit ? { code: (itemUnit.code as string | undefined) ?? null, name: (itemUnit.name as string | undefined) ?? null } : null,
       recognizedUnitCodes,
     });

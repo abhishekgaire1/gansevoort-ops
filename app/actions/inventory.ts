@@ -5,7 +5,7 @@ import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { postPurchaseDocumentInventoryRpc, setInventoryStockReferenceRpc } from "@/app/lib/inventory/postingRpcs";
 import { getInventoryPostingDetail, type InventoryPostingDetail } from "@/app/lib/inventory/getInventoryPostingDetail";
 import { listInventoryBalances, type InventoryBalanceRow } from "@/app/lib/inventory/listInventoryBalances";
-import { InventoryPostingBlockedError, type InventoryPostingBlocker } from "@/app/lib/inventory/errors";
+import { InventoryPostingBlockedError, AmendmentLineageAlreadyPostedError, type InventoryPostingBlocker } from "@/app/lib/inventory/errors";
 import { VerifiedLockedError } from "@/app/lib/purchaseDocuments/errors";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
@@ -38,6 +38,13 @@ export async function postPurchaseDocumentToInventory(purchaseDocumentId: string
     }
     if (err instanceof VerifiedLockedError) {
       return { ok: false, reason: "wrong_status", message: "Only a VERIFIED document can be posted to inventory." };
+    }
+    if (err instanceof AmendmentLineageAlreadyPostedError) {
+      return {
+        ok: false,
+        reason: "wrong_status",
+        message: "Inventory for this delivery was already posted from an earlier revision of this document -- posting again would double-count it.",
+      };
     }
     return { ok: false, reason: "misconfigured", message: "Could not post to inventory. Try again." };
   }

@@ -32,6 +32,7 @@ import {
 import { NewItemReviewModal, type NewItemReviewCandidate } from "@/app/manager/(app)/_components/NewItemReviewModal";
 import { flattenSpendCategoryPaths } from "@/app/lib/itemMaster/spendCategoryPaths";
 import { computeItemMappingProgress } from "@/app/lib/purchaseDocuments/itemMappingProgress";
+import { formatPackageConfirmation } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
 import { matchSourceLabel, formatSourceQuantity } from "@/app/lib/purchaseDocuments/matchSourcePresentation";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
 import { blockingIssueSummaryLabel, scrollToFirstIssue } from "@/app/components/receiving/blockingIssues";
@@ -756,6 +757,45 @@ function PackageMismatchWarning({
   );
 }
 
+/** The calm, positive counterpart to PackageMismatchWarning -- fix for a
+ * confirmed defect: Step 2 previously gave a manager no visibility into a
+ * SUCCESSFUL purchase-package match at all, only ever surfacing anything
+ * once something was wrong. Always visible beneath the mapping (never
+ * behind Advanced Settings), for every CONFIRMED inventory line that
+ * isn't itself mismatched -- including a read-only reviewer's view. */
+function PackageConfirmationCard({ line }: { line: LineClassificationRow }) {
+  const display = formatPackageConfirmation({
+    packageQuantity: line.packageQuantity,
+    resolvedInvoiceUnitCode: line.resolvedInvoiceUnitCode,
+    effectivePurchaseUnitCode: line.effectivePurchaseUnitCode,
+    effectiveReceivingBehavior: line.effectiveReceivingBehavior,
+    effectiveConversionFactor: line.effectiveConversionFactor,
+    inventoryBaseUnitCode: line.inventoryBaseUnitCode,
+  });
+  if (!display) return null;
+
+  if (display.mode === "inline") {
+    return (
+      <div className="w-full rounded-xl border border-emerald-900 bg-emerald-950/10 p-3 sm:col-span-2">
+        <p className="text-sm text-emerald-200">
+          <span className="font-semibold text-emerald-300">Purchase package confirmed:</span> {display.lines[0]}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full rounded-xl border border-emerald-900 bg-emerald-950/10 p-3 sm:col-span-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400">Purchase package confirmed</p>
+      {display.lines.map((text, index) => (
+        <p key={index} className="mt-1 text-sm text-emerald-200">
+          {text}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 function ResolvedLineRow({
   id,
   line,
@@ -858,6 +898,8 @@ function ResolvedLineRow({
       {!readOnly && line.hasPackageMismatch && !editing ? (
         <PackageMismatchWarning line={line} onCorrectInvoiceUnit={onNavigateToStep1} onReviewPackage={onReviewPackage} onReturnToVerification={onToggleEdit} />
       ) : null}
+
+      {line.disposition === "INVENTORY" && !line.hasPackageMismatch ? <PackageConfirmationCard line={line} /> : null}
 
       {editing ? (
         <div className="flex w-full flex-col gap-2 border-t border-zinc-800 pt-3 sm:col-span-2">

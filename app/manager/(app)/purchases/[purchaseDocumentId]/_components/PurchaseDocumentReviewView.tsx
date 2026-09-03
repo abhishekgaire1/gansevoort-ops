@@ -8,6 +8,7 @@ import { checkPurchaseDocumentDuplicates, discardPurchaseDocumentDraft, withdraw
 import { PreparationWizard } from "./PreparationWizard";
 import { FinalReviewView } from "./FinalReviewView";
 import type { PossibleDuplicatePurchaseDocument } from "@/app/lib/purchaseDocuments/duplicateDetection";
+import { deriveAmendmentBanner } from "@/app/lib/purchaseDocuments/amendmentBanner";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 import type { MappingProposals, ReceivingProposals } from "@/app/lib/purchaseDocuments/reviewProposals";
 import type { ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
@@ -74,6 +75,16 @@ interface Props {
   lastReturnedReason: string | null;
   lastReturnedAt: string | null;
   vendors: VendorSummary[];
+  /** Shared by every revision in this business document's history --
+   * required so the client-side duplicate re-check below can exclude the
+   * whole lineage, not just this one revision's own id (see
+   * duplicateDetection.ts's excludeRevisionGroupId doc comment). */
+  revisionGroupId: string;
+  /** Non-null exactly when this revision is an amendment (revisionNumber >
+   * 1) -- the revision it was reopened from. */
+  previousRevisionId: string | null;
+  previousVerifiedAt: string | null;
+  amendmentReason: string | null;
   initialDuplicates: PossibleDuplicatePurchaseDocument[];
   deliveryVerifiedByName: string | null;
   preparerName: string | null;
@@ -105,6 +116,14 @@ interface Props {
 export function PurchaseDocumentReviewView(props: Props) {
   const router = useRouter();
   const { viewUrl, viewError, contentType: pageContentType, pageNumber, pageCount, goPrev, goNext } = useDocumentPageNavigator(props.documentId, props.contentType);
+  const amendmentBanner = deriveAmendmentBanner({
+    revisionNumber: props.revisionNumber,
+    documentNumber: props.header.documentNumber,
+    documentType: props.header.documentType,
+    previousVerifiedAt: props.previousVerifiedAt,
+    amendmentReason: props.amendmentReason,
+    previousRevisionId: props.previousRevisionId,
+  });
   const [duplicates, setDuplicates] = useState<PossibleDuplicatePurchaseDocument[]>(props.initialDuplicates);
   const [duplicatesDismissed, setDuplicatesDismissed] = useState(false);
   const [showDiscardForm, setShowDiscardForm] = useState(false);
@@ -126,6 +145,7 @@ export function PurchaseDocumentReviewView(props: Props) {
     const timer = setTimeout(() => {
       checkPurchaseDocumentDuplicates({
         purchaseDocumentId: props.purchaseDocumentId,
+        revisionGroupId: props.revisionGroupId,
         vendorId: props.header.vendorId,
         documentType: props.header.documentType,
         documentNumber: props.header.documentNumber,
@@ -220,6 +240,22 @@ export function PurchaseDocumentReviewView(props: Props) {
         </div>
       </div>
 
+      {amendmentBanner ? (
+        <div className="mt-3 rounded-lg border border-sky-800 bg-sky-950/40 px-3 py-2 text-sm text-sky-100">
+          <p className="font-semibold uppercase tracking-wide text-sky-300">Amendment in Progress</p>
+          <p className="mt-1">You are editing a previously verified invoice. Changes will be recorded in the audit history.</p>
+          <p className="mt-1 text-sky-300">
+            {amendmentBanner.originalLabel}
+            {amendmentBanner.previousVerifiedAt ? ` · Previously verified ${new Date(amendmentBanner.previousVerifiedAt).toLocaleDateString()}` : ""}
+          </p>
+          {amendmentBanner.amendmentReason ? <p className="mt-1 text-sky-300">Reason: {amendmentBanner.amendmentReason}</p> : null}
+          {amendmentBanner.previousRevisionId ? (
+            <Link href={`/manager/purchases/${amendmentBanner.previousRevisionId}`} className="mt-2 inline-block text-xs underline">
+              View previous verified version
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
       {!props.isPreparer && props.status === "DRAFT" ? (
         <p className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-400">
           Only the preparer who created this draft can edit it. You can review it once submitted.

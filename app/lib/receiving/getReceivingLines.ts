@@ -1,5 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { resolveVendorPurchasePackages } from "@/app/lib/purchaseDocuments/resolveVendorPurchasePackage";
 
 export type ReceivingBehavior = "SAME_UNIT" | "FIXED_CONVERSION" | "MEASURE_EACH_DELIVERY" | "COUNT_EACH_DELIVERY";
 
@@ -131,26 +132,26 @@ export async function getReceivingLines(supabase: SupabaseClient, purchaseDocume
 
   // Purchase-versus-usage unit model (20260811100123): the effective
   // purchase package for a CONFIRMED line comes from THAT classification's
-  // OWN resolved vendor_item_purchase_unit_id -- never the shared, global
-  // inventory_item_units row (that was the exact pre-100123 bug: a second
-  // vendor/SKU's approval could silently reprice an unrelated line, and it
-  // let a genuinely mismatched received unit go undetected here even after
-  // posting's own blocker scan had already been fixed to catch it). A
-  // classification with no vendor package (SAME_UNIT) falls back to the
-  // item's own base unit, factor 1 -- exactly
+  // OWN vendor package -- never the shared, global inventory_item_units
+  // row alone (that was the exact pre-100123 bug: a second vendor/SKU's
+  // approval could silently reprice an unrelated line). resolveVendor
+  // PurchasePackages also covers a VENDOR_SKU_MAPPING-auto-classified line
+  // (whose classification never gets vendor_item_purchase_unit_id set at
+  // all, by design -- see that module's own doc comment) and an item whose
+  // original approval predates full adoption of vendor_item_purchase_units
+  // -- both still resolved vendor-specifically, never a blind "first
+  // non-base row" guess. A line resolved by none of those falls back to
+  // the item's own base unit, factor 1 -- exactly
   // coalesce(vpu.purchase_unit_id, ii.base_unit_id) in
   // post_purchase_document_inventory.
-  const vendorPackageIds = Array.from(
-    new Set((classifications ?? []).map((c) => c.vendor_item_purchase_unit_id as string | null).filter((id): id is string => Boolean(id)))
+  const vendorPackageByLineKey = await resolveVendorPurchasePackages(
+    supabase,
+    organizationId,
+    vendorId,
+    (classifications ?? [])
+      .filter((c) => c.status === "CONFIRMED" && c.disposition === "INVENTORY" && c.inventory_item_id)
+      .map((c) => ({ key: c.line_key as string, inventoryItemId: c.inventory_item_id as string, vendorItemPurchaseUnitId: c.vendor_item_purchase_unit_id as string | null }))
   );
-  const { data: vendorPackages } =
-    vendorPackageIds.length > 0
-      ? await supabase
-          .from("vendor_item_purchase_units")
-          .select("id, purchase_unit_id, conversion_factor, receiving_behavior, requires_actual_measurement, units(code)")
-          .in("id", vendorPackageIds)
-      : { data: [] };
-  const vendorPackageById = new Map((vendorPackages ?? []).map((v) => [v.id as string, v]));
 
   return (lines ?? []).map((line) => {
     const lineKey = line.line_key as string;
@@ -182,18 +183,14 @@ export async function getReceivingLines(supabase: SupabaseClient, purchaseDocume
     const baseUnit = item ? (Array.isArray(item.units) ? item.units[0] : item.units) : null;
     const baseUnitId = (item?.base_unit_id as string | undefined) ?? null;
 
-    const vendorPackageId = classification.vendor_item_purchase_unit_id as string | null;
-    const vendorPackage = vendorPackageId ? vendorPackageById.get(vendorPackageId) : undefined;
-    const purchaseUnit = vendorPackage ? (Array.isArray(vendorPackage.units) ? vendorPackage.units[0] : vendorPackage.units) : null;
+    const vendorPackage = vendorPackageByLineKey.get(lineKey) ?? null;
 
     // SAME_UNIT (no vendor package resolved) falls back to the base unit
-    // itself, factor 1 -- vendor_item_purchase_units.receiving_behavior is
-    // read directly, never re-derived from requires_actual_measurement +
-    // base unit type (that re-derivation is what the OLD, buggy
-    // inventory_item_units-based resolution above used to need; the
-    // vendor-specific row already states its own receiving_behavior).
-    const receivingBehavior: ReceivingBehavior | null = vendorPackage ? (vendorPackage.receiving_behavior as ReceivingBehavior) : "SAME_UNIT";
-    const fixedConversionFactor: number | null = vendorPackage && receivingBehavior === "FIXED_CONVERSION" ? (vendorPackage.conversion_factor as number | null) : null;
+    // itself, factor 1 -- receivingBehavior is read directly off the
+    // resolved package, never re-derived from requires_actual_measurement +
+    // base unit type.
+    const receivingBehavior: ReceivingBehavior | null = vendorPackage ? vendorPackage.receivingBehavior : "SAME_UNIT";
+    const fixedConversionFactor: number | null = vendorPackage && receivingBehavior === "FIXED_CONVERSION" ? vendorPackage.conversionFactor : null;
 
     return {
       lineKey,
@@ -205,7 +202,7 @@ export async function getReceivingLines(supabase: SupabaseClient, purchaseDocume
       inventoryItemId: classification.inventory_item_id as string,
       baseUnitCode: (baseUnit?.code as string | undefined) ?? null,
       baseUnitId,
-      purchaseUnitCode: (purchaseUnit?.code as string | undefined) ?? null,
+      purchaseUnitCode: vendorPackage?.unitCode ?? null,
       receivingBehavior,
       fixedConversionFactor,
       requiresVerifiedMeasurement: receivingBehavior === "MEASURE_EACH_DELIVERY" || receivingBehavior === "COUNT_EACH_DELIVERY",

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { hasPackageUnitMismatch, resolveLineMismatchFields, resolveUnitCode, type PackageUnitMismatchInput } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
+import {
+  hasPackageUnitMismatch,
+  resolveLineMismatchFields,
+  resolveUnitCode,
+  formatPackageConfirmation,
+  type PackageUnitMismatchInput,
+} from "@/app/lib/purchaseDocuments/packageUnitMismatch";
 
 /**
  * Fix for a confirmed defect: the invoice-unit-vs-confirmed-purchase-
@@ -159,5 +165,101 @@ describe("resolveLineMismatchFields", () => {
       recognizedUnitCodes,
     });
     expect(resolution.hasPackageMismatch).toBe(false);
+  });
+});
+
+describe("formatPackageConfirmation", () => {
+  it("test 8 + 9: a valid fixed conversion (1 PACK = 10 LB) shows the calm confirmation, and 2 PACK -> 20 LB is calculated correctly", () => {
+    const display = formatPackageConfirmation({
+      packageQuantity: 2,
+      resolvedInvoiceUnitCode: "PACK",
+      effectivePurchaseUnitCode: "PACK",
+      effectiveReceivingBehavior: "FIXED_CONVERSION",
+      effectiveConversionFactor: 10,
+      inventoryBaseUnitCode: "LB",
+    });
+    expect(display).toEqual({
+      mode: "block",
+      lines: ["Invoice: 2 PACK", "Conversion: 1 PACK = 10 LB", "Inventory received: 20 LB"],
+    });
+  });
+
+  it("shows the confirmed package even when the raw invoice text itself wasn't extracted/recognized -- the real Bartlett/Farmland Sour Cream case (package_unit was null on the line, but the vendor's confirmed package is PACK/10)", () => {
+    const display = formatPackageConfirmation({
+      packageQuantity: 2,
+      resolvedInvoiceUnitCode: null,
+      effectivePurchaseUnitCode: "PACK",
+      effectiveReceivingBehavior: "FIXED_CONVERSION",
+      effectiveConversionFactor: 10,
+      inventoryBaseUnitCode: "LB",
+    });
+    expect(display!.lines[0]).toBe("Invoice: 2 PACK");
+    expect(display!.lines).toContain("Conversion: 1 PACK = 10 LB");
+    expect(display!.lines).toContain("Inventory received: 20 LB");
+  });
+
+  it("test 10: a direct one-to-one package match (3 BOTTLE -> 3 BOTTLE) displays as a single inline confirmation", () => {
+    const display = formatPackageConfirmation({
+      packageQuantity: 3,
+      resolvedInvoiceUnitCode: "BOTTLE",
+      effectivePurchaseUnitCode: "BOTTLE",
+      effectiveReceivingBehavior: "SAME_UNIT",
+      effectiveConversionFactor: null,
+      inventoryBaseUnitCode: "BOTTLE",
+    });
+    expect(display).toEqual({ mode: "inline", lines: ["3 BOTTLE -> 3 BOTTLE"] });
+  });
+
+  it("test 11: measured-at-receiving shows the measured behavior without inventing a fixed conversion", () => {
+    const display = formatPackageConfirmation({
+      packageQuantity: 1,
+      resolvedInvoiceUnitCode: "BOX",
+      effectivePurchaseUnitCode: "BOX",
+      effectiveReceivingBehavior: "MEASURE_EACH_DELIVERY",
+      effectiveConversionFactor: null,
+      inventoryBaseUnitCode: "LB",
+    });
+    expect(display!.mode).toBe("block");
+    expect(display!.lines.join(" ")).not.toMatch(/Conversion:/);
+    expect(display!.lines.join(" ")).toMatch(/measured/i);
+  });
+
+  it("shows count-verified-each-delivery similarly, without a fixed factor", () => {
+    const display = formatPackageConfirmation({
+      packageQuantity: 1,
+      resolvedInvoiceUnitCode: "CRATE",
+      effectivePurchaseUnitCode: "CRATE",
+      effectiveReceivingBehavior: "COUNT_EACH_DELIVERY",
+      effectiveConversionFactor: null,
+      inventoryBaseUnitCode: "PIECE",
+    });
+    expect(display!.lines.join(" ")).not.toMatch(/Conversion:/);
+    expect(display!.lines.join(" ")).toMatch(/count is verified/i);
+  });
+
+  it("never fabricates a conversion when the factor or base unit is genuinely unresolved", () => {
+    expect(
+      formatPackageConfirmation({
+        packageQuantity: 2,
+        resolvedInvoiceUnitCode: "PACK",
+        effectivePurchaseUnitCode: "PACK",
+        effectiveReceivingBehavior: "FIXED_CONVERSION",
+        effectiveConversionFactor: null,
+        inventoryBaseUnitCode: "LB",
+      })
+    ).toBeNull();
+  });
+
+  it("shows nothing when there is no effective purchase package resolved at all", () => {
+    expect(
+      formatPackageConfirmation({
+        packageQuantity: 2,
+        resolvedInvoiceUnitCode: "PACK",
+        effectivePurchaseUnitCode: null,
+        effectiveReceivingBehavior: null,
+        effectiveConversionFactor: null,
+        inventoryBaseUnitCode: null,
+      })
+    ).toBeNull();
   });
 });
