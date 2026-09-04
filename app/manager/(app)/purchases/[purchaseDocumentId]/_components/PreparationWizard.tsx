@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { savePurchaseDocumentDraft, submitPurchaseDocumentForVerification, getPurchaseDocumentPreparationStatus } from "@/app/actions/purchaseDocuments";
+import { getPurchaseDocumentLineClassifications } from "@/app/actions/itemClassification";
+import { reconcileStaleUnitFlags, buildResolvedUnitNotes, type ResolvedUnitNote } from "@/app/lib/purchaseDocuments/lineUnitResolution";
 import { Stepper } from "./Stepper";
 import { Step1ReviewInvoice, emptyStep1Line } from "./Step1ReviewInvoice";
 import { ItemsAndReceivingPanel } from "./ItemsAndReceivingPanel";
@@ -129,6 +131,15 @@ export function PreparationWizard({
   // recomputed separately here. Null until the panel has loaded once.
   const [step2Progress, setStep2Progress] = useState<{ readyCount: number; totalLines: number; expenseCount: number; needsAttentionCount: number } | null>(null);
   const [preparationStatus, setPreparationStatus] = useState<PreparationStatus | null>(null);
+  // Step 1's own stale-unit reconciliation: which lines' classification is
+  // genuinely CONFIRMED (Step 2's own authoritative status -- see
+  // lineUnitResolution.ts), fetched independently since Step 1 is the
+  // default landing step and ItemsAndReceivingPanel hasn't necessarily
+  // mounted yet. Null until the first fetch resolves -- treated as "not
+  // yet known," never as "resolved," so a fresh page load never
+  // optimistically hides a genuine warning for a moment.
+  const [resolvedLineKeys, setResolvedLineKeys] = useState<Set<string> | null>(null);
+  const [resolvedUnitNotes, setResolvedUnitNotes] = useState<ResolvedUnitNote[]>([]);
 
   const setRequestedStep = useCallback(
     (step: WizardStepId) => {
@@ -138,12 +149,24 @@ export function PreparationWizard({
     [purchaseDocumentId, router]
   );
 
-  const draftFlags = useMemo(() => validatePurchaseDocumentDraft({ ...header, lines }), [header, lines]);
+  const rawDraftFlags = useMemo(() => validatePurchaseDocumentDraft({ ...header, lines }), [header, lines]);
+  // Never a second, competing "is this line resolved" calculation -- the
+  // exact same CONFIRMED classification status Step 2 already treats as
+  // authoritative, just applied here to stop a genuinely-resolved line's
+  // stale-unit warning from lingering on Step 1.
+  const draftFlags = useMemo(() => reconcileStaleUnitFlags(rawDraftFlags, lines, resolvedLineKeys ?? new Set()), [rawDraftFlags, lines, resolvedLineKeys]);
   const step1Complete = !draftFlags.some((f) => f.severity === "error");
   const isDirty = useMemo(
     () => purchaseDocumentDiffCount(computePurchaseDocumentDiff(lastSavedHeader, lastSavedLines, header, lines)) > 0,
     [lastSavedHeader, lastSavedLines, header, lines]
   );
+
+  const refetchLineClassifications = useCallback(async () => {
+    const result = await getPurchaseDocumentLineClassifications(purchaseDocumentId);
+    if (!result.ok) return;
+    setResolvedLineKeys(new Set(result.lines.filter((l) => l.status === "CONFIRMED").map((l) => l.lineKey)));
+    setResolvedUnitNotes(buildResolvedUnitNotes(rawDraftFlags, lines, result.lines));
+  }, [purchaseDocumentId, rawDraftFlags, lines]);
 
   const refetchPreparationStatus = useCallback(async () => {
     const result = await getPurchaseDocumentPreparationStatus(purchaseDocumentId);
@@ -159,7 +182,8 @@ export function PreparationWizard({
       // completion depends on, so no separate fetch is duplicated here.
       setStep2Resolved(lineLevelBlockers(result.status.blockers).length === 0);
     }
-  }, [purchaseDocumentId]);
+    await refetchLineClassifications();
+  }, [purchaseDocumentId, refetchLineClassifications]);
 
   const { steps, activeStep, furthestReachableStep } = deriveWizardProgress({
     step1Complete,
@@ -311,6 +335,7 @@ export function PreparationWizard({
           aiAmountDue={aiAmountDue}
           vendors={vendors}
           reviewFlags={draftFlags}
+          resolvedUnitNotes={resolvedUnitNotes}
           aiWarnings={aiWarnings}
           aiModel={aiModel}
           onContinue={handleContinueFromStep1}

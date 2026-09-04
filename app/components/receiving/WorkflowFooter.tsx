@@ -67,7 +67,7 @@ export function WorkflowFooter({
       // offset) -- without this, the launcher renders on top of this
       // footer's own primary action in the same bottom-right corner.
       className={`flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 bg-zinc-950/95 px-4 py-3 pr-4 backdrop-blur sm:pr-44 ${
-        sticky ? "sticky bottom-0 z-10 -mx-4 sm:mx-0 sm:rounded-b-2xl" : "rounded-2xl border"
+        sticky ? "sticky bottom-0 z-10 -mx-4 sm:mx-0 sm:rounded-b-lg" : "rounded-lg border"
       }`}
     >
       <div className="flex min-w-0 items-center gap-3">

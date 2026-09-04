@@ -56,6 +56,8 @@ import {
 import type { ReceivingLineEdit } from "@/app/lib/receiving/effectiveReceivingEdit";
 import { computeReceivingPrefill, recomputeFixedConversionVerifiedQuantity } from "@/app/lib/receiving/computeReceivingPrefill";
 import { mergeReceivingLineState, type ReceivingLineDraft } from "@/app/lib/receiving/mergeReceivingLineState";
+import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, inlineWarningClass, inlineSuccessClass, inlineNeutralClass } from "@/app/components/manager/surfaces";
+import { secondaryButtonClass } from "@/app/components/manager/buttonStyles";
 
 /**
  * Redesign: the combined "Confirm Items & Receiving" step -- a visible
@@ -124,6 +126,12 @@ const CONDITION_OPTIONS: { value: ReceivingLineDraft["conditionStatus"]; label: 
 ];
 
 type Filter = "all" | "needs_attention" | "ready" | "expenses";
+
+/** A smaller "Edit details" affordance sized for a table row -- the
+ * shared secondaryButtonClass's h-9 height is right for a toolbar, but
+ * too tall to sit inline in a compact ~52px row. */
+const secondaryButtonClassCompact =
+  "inline-flex h-7 items-center justify-center rounded-md border border-zinc-600 px-2.5 text-xs font-medium leading-none text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40";
 
 export function ItemsAndReceivingPanel({
   purchaseDocumentId,
@@ -600,7 +608,7 @@ export function ItemsAndReceivingPanel({
 
   if (loading || lines === null) {
     return (
-      <div aria-busy="true" className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+      <div aria-busy="true" className="mt-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
         <p className="text-sm text-zinc-300">Loading…</p>
       </div>
     );
@@ -608,12 +616,12 @@ export function ItemsAndReceivingPanel({
 
   const matchingBanner =
     matchingPhase === "blocking" ? (
-      <div aria-busy="true" className="rounded-2xl border border-amber-800 bg-amber-950/10 p-4">
+      <div aria-busy="true" className="rounded-lg border border-amber-800 bg-amber-950/10 p-4">
         <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">Matching Items</p>
         <p className="mt-1 text-sm text-zinc-200">Checking vendor mappings and matching invoice lines against your item master. This will update automatically.</p>
       </div>
     ) : matchingPhase === "stillActive" || matchingPhase === "failed" || matchingPhase === "stuck" ? (
-      <div className="rounded-2xl border border-amber-800 bg-amber-950/10 p-4">
+      <div className="rounded-lg border border-amber-800 bg-amber-950/10 p-4">
         <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">
           {matchingPhase === "stillActive" ? "Item Matching Is Taking Longer Than Expected" : "Automatic Matching Unavailable"}
         </p>
@@ -626,7 +634,7 @@ export function ItemsAndReceivingPanel({
         <button
           type="button"
           onClick={matchingPhase === "stillActive" ? handleCheckAgain : handleRetryUnresolvedMatching}
-          className="mt-3 rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950"
+          className="mt-3 rounded-md bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950"
         >
           {matchingPhase === "stillActive" ? "Check Again" : "Retry Unresolved Matching"}
         </button>
@@ -658,12 +666,12 @@ export function ItemsAndReceivingPanel({
   const bulkEligibleForCondition = receivingLineState.filter((l) => l.receivedQuantity.trim() !== "").length;
 
   return (
-    <div className="mx-auto mt-4 flex max-w-4xl flex-col gap-4">
+    <div className="mt-3 flex flex-col gap-3">
       {matchingBanner}
-      {error && !matchingBanner ? <p className="rounded-xl border border-red-800 bg-red-950/20 p-3 text-sm text-red-300">{error}</p> : null}
+      {error && !matchingBanner ? <p className="rounded-lg border border-red-800 bg-red-950/20 p-3 text-sm text-red-300">{error}</p> : null}
 
       {alreadyPostedElsewhere ? (
-        <div className="rounded-2xl border-2 border-sky-600 bg-sky-950/40 p-4">
+        <div className="rounded-lg border border-sky-700 bg-sky-950/30 p-4">
           <p className="text-xs font-bold uppercase tracking-wide text-sky-300">Inventory already posted</p>
           <p className="mt-1 text-sm font-medium text-sky-50">Inventory was already posted from the original revision. This amendment will not post it again.</p>
         </div>
@@ -678,20 +686,16 @@ export function ItemsAndReceivingPanel({
       />
 
       {/* ============ TOOLBAR ============ */}
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-base font-semibold text-white">Confirm Items &amp; Receiving</h2>
+      <div className={panelClass}>
+        <div className={`${panelHeaderClass} flex-wrap`}>
+          <h2 className={panelTitleClass}>Confirm Items &amp; Receiving</h2>
           {!readOnly ? (
             <div className="relative">
-              <button
-                type="button"
-                onClick={() => setMoreActionsOpen((v) => !v)}
-                className="rounded-full border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 hover:border-zinc-400"
-              >
+              <button type="button" onClick={() => setMoreActionsOpen((v) => !v)} className={secondaryButtonClass}>
                 More actions ▾
               </button>
               {moreActionsOpen ? (
-                <div className="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-zinc-700 bg-zinc-900 p-2 shadow-xl">
+                <div className="absolute right-0 z-20 mt-1 w-56 rounded-lg border border-zinc-700 bg-zinc-900 p-2 shadow-xl">
                   <button
                     type="button"
                     onClick={() => setRerunConfirmOpen(true)}
@@ -705,18 +709,19 @@ export function ItemsAndReceivingPanel({
             </div>
           ) : null}
         </div>
-        <p className="mt-1 text-sm text-zinc-300">Confirm each item match, purchase package, received quantity and destination.</p>
+        <div className={panelBodyClass}>
+        <p className="text-sm text-zinc-400">Confirm each item match, purchase package, received quantity and destination.</p>
 
         {rerunConfirmOpen ? (
-          <div className="mt-3 rounded-xl border border-amber-700 bg-amber-950/20 p-3">
-            <p className="text-sm font-medium text-amber-100">
+          <div className={`mt-3 ${inlineWarningClass}`}>
+            <p className="font-medium text-amber-100">
               Re-running matching may replace existing AI suggestions for lines you haven&apos;t confirmed yet. Already-confirmed lines are never touched.
             </p>
             <div className="mt-2 flex gap-2">
-              <button type="button" onClick={handleRunMatching} className="rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950">
+              <button type="button" onClick={handleRunMatching} className="rounded-md bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950">
                 Re-run matching
               </button>
-              <button type="button" onClick={() => setRerunConfirmOpen(false)} className="rounded-full border border-zinc-600 px-4 py-1.5 text-xs text-zinc-200">
+              <button type="button" onClick={() => setRerunConfirmOpen(false)} className="rounded-md border border-zinc-600 px-4 py-1.5 text-xs text-zinc-200">
                 Cancel
               </button>
             </div>
@@ -731,7 +736,7 @@ export function ItemsAndReceivingPanel({
                 key={f}
                 type="button"
                 onClick={() => setFilter(f)}
-                className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+                className={`rounded-md border px-2.5 py-1 text-[11px] font-medium ${
                   filter === f ? "border-amber-500 bg-amber-950/30 text-amber-200" : "border-zinc-700 text-zinc-300 hover:text-zinc-100"
                 }`}
               >
@@ -748,7 +753,7 @@ export function ItemsAndReceivingPanel({
           {!readOnly ? (
             <div className="flex flex-wrap gap-2">
               {newItemCandidates.length > 0 ? (
-                <button type="button" onClick={() => setShowNewItemModal(true)} className="rounded-full bg-emerald-500 px-3 py-1 text-[11px] font-semibold text-zinc-950">
+                <button type="button" onClick={() => setShowNewItemModal(true)} className="rounded-md bg-emerald-500 px-3 py-1 text-[11px] font-semibold text-zinc-950">
                   Review New Items ({newItemCandidates.length})
                 </button>
               ) : null}
@@ -757,7 +762,7 @@ export function ItemsAndReceivingPanel({
                   type="button"
                   onClick={handleConfirmAllMatches}
                   disabled={bulkConfirmPending}
-                  className="rounded-full border border-emerald-600 px-3 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
+                  className="rounded-md border border-emerald-600 px-3 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
                 >
                   {bulkConfirmPending ? "Confirming…" : `Confirm All Matches (${bulkEligible.length})`}
                 </button>
@@ -768,7 +773,7 @@ export function ItemsAndReceivingPanel({
 
         {/* ============ BULK RECEIVING ACTIONS -- never mapping/units/conversions ============ */}
         {!readOnly ? (
-          <div className="mt-3 rounded-xl border border-zinc-700 bg-zinc-950/50 p-3">
+          <div className="mt-3 rounded-lg border border-zinc-700 bg-zinc-950/50 p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-zinc-200">Apply receiving details to multiple items</p>
             <div className="mt-2 flex flex-wrap items-end gap-3">
               <label className="flex flex-col gap-1 text-xs text-zinc-300">
@@ -787,7 +792,7 @@ export function ItemsAndReceivingPanel({
                 onClick={handleApplyLocationToAll}
                 disabled={!bulkLocationId}
                 title={!bulkLocationId ? "Choose a location above first" : undefined}
-                className="rounded-full border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 disabled:opacity-40"
+                className="rounded-md border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 disabled:opacity-40"
               >
                 Apply location to all inventory items
               </button>
@@ -810,17 +815,28 @@ export function ItemsAndReceivingPanel({
                 onClick={handleApplyConditionToAll}
                 disabled={bulkEligibleForCondition === 0}
                 title={bulkEligibleForCondition === 0 ? "No lines have a received quantity entered yet" : undefined}
-                className="rounded-full border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 disabled:opacity-40"
+                className="rounded-md border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 disabled:opacity-40"
               >
                 Apply condition to all
               </button>
             </div>
           </div>
         ) : null}
+        </div>
       </div>
 
-      {/* ============ ONE CARD PER LINE ============ */}
-      <div className="flex flex-col gap-3">
+      {/* ============ Work-queue table -- one aligned row per line ============ */}
+      <div className={panelClass}>
+        {filtered.length > 0 ? (
+          <div className="hidden border-b border-zinc-800 px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-zinc-500 sm:grid sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.3fr_84px_112px] sm:gap-3">
+            <span>Invoice line</span>
+            <span>Item match</span>
+            <span>Purchase package</span>
+            <span>Receiving</span>
+            <span>Status</span>
+            <span>Action</span>
+          </div>
+        ) : null}
         {filtered.map(({ line, receiving, outcome }) => (
           <LineCard
             key={line.lineKey}
@@ -871,7 +887,7 @@ export function ItemsAndReceivingPanel({
             savedFlash={savedFlashLineKey === line.lineKey}
           />
         ))}
-        {filtered.length === 0 ? <p className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-300">No lines match this filter.</p> : null}
+        {filtered.length === 0 ? <p className="px-4 py-6 text-center text-sm text-zinc-400">No lines match this filter.</p> : null}
       </div>
 
       {!readOnly && showNewItemModal ? (
@@ -923,35 +939,25 @@ function CompletionPanel({
   const inventoryReady = summary.readyCount;
 
   if (summary.allResolved) {
+    // "Complete," never "reviewed" -- readiness is a persisted fact (every
+    // line is either ready or a classified expense), but no "review" event
+    // is actually recorded here. One compact line, not a large box -- the
+    // work below is the thing that deserves the visual weight.
     return (
-      <div className="rounded-2xl border-2 border-emerald-600 bg-emerald-950/30 p-4">
-        {/* "Complete," never "reviewed" -- readiness is a persisted fact
-            (every line is either ready or a classified expense), but no
-            "review" event is actually recorded here. */}
-        <p className="text-lg font-bold text-emerald-300">✓ ALL {summary.totalLines} LINES COMPLETE</p>
-        <ul className="mt-2 flex flex-col gap-0.5 text-sm font-medium text-emerald-100">
-          <li>
-            {inventoryReady} inventory item{inventoryReady === 1 ? "" : "s"} ready
-          </li>
-          <li>
-            {summary.expenseCount} expense{summary.expenseCount === 1 ? "" : "s"} classified
-          </li>
-          <li>0 issues remaining</li>
-        </ul>
-      </div>
+      <p className={inlineSuccessClass}>
+        ✓ {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {inventoryReady} inventory ready · {summary.expenseCount} expense
+        {summary.expenseCount === 1 ? "" : "s"} · 0 issues
+      </p>
     );
   }
 
   return (
-    <div className="rounded-2xl border-2 border-amber-500 bg-amber-950/30 p-4">
-      <p className="text-lg font-bold text-amber-300">
-        {summary.needsAttentionCount} LINE{summary.needsAttentionCount === 1 ? "" : "S"} NEED ATTENTION
-      </p>
-      <p className="mt-1 text-sm font-medium text-amber-100">
-        {inventoryReady} ready · {summary.expenseCount} expense{summary.expenseCount === 1 ? "" : "s"} classified · {summary.needsAttentionCount} still need
-        {summary.needsAttentionCount === 1 ? "s" : ""} an item match, purchase package, or receiving detail.
-      </p>
-      <button type="button" onClick={onGoToFirstIssue} className="mt-3 rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950">
+    <div className={`${inlineWarningClass} flex flex-wrap items-center justify-between gap-3`}>
+      <span>
+        {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {inventoryReady} ready · {summary.expenseCount} expense
+        {summary.expenseCount === 1 ? "" : "s"} · {summary.needsAttentionCount} issue{summary.needsAttentionCount === 1 ? "" : "s"}
+      </span>
+      <button type="button" onClick={onGoToFirstIssue} className={secondaryButtonClassCompact}>
         Go to first issue
       </button>
     </div>
@@ -973,7 +979,7 @@ interface CorrectionDraft {
 
 function AmendmentChangedBadge({ previous }: { previous: string | null }) {
   return (
-    <span className="inline-flex flex-wrap items-baseline gap-1.5 rounded-full border border-sky-600 bg-sky-950/40 px-2 py-0.5 text-[11px] font-semibold text-sky-200">
+    <span className="inline-flex flex-wrap items-baseline gap-1.5 rounded-md border border-sky-600 bg-sky-950/40 px-2 py-0.5 text-[11px] font-semibold text-sky-200">
       Changed in amendment
       {previous ? <span className="font-normal text-sky-300">(was {previous})</span> : null}
     </span>
@@ -996,7 +1002,7 @@ function ProvenanceLine({ provenance }: { provenance: ReturnType<typeof deriveLi
 
 function ChecklistPanel({ title, ok, warn, children }: { title: string; ok: boolean; warn?: boolean; children: React.ReactNode }) {
   return (
-    <div className={`rounded-xl border-2 p-3 ${ok ? "border-emerald-700 bg-emerald-950/10" : warn ? "border-red-700 bg-red-950/10" : "border-amber-600 bg-amber-950/10"}`}>
+    <div className={`rounded-lg border p-3 ${ok ? "border-emerald-700 bg-emerald-950/10" : warn ? "border-red-700 bg-red-950/10" : "border-amber-600 bg-amber-950/10"}`}>
       <p
         className={`flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide ${ok ? "text-emerald-400" : warn ? "text-red-400" : "text-amber-400"}`}
       >
@@ -1092,33 +1098,55 @@ function LineCard({
   const orderedQuantity = formatSourceQuantity(line);
   const provenance = deriveLineProvenance({ status: line.status, resolutionSource: line.resolutionSource, resolvedByName: line.resolvedByName, resolvedAt: line.resolvedAt });
 
-  // ============ EXPENSE -- a separate, simple classification panel ============
+  // ============ EXPENSE -- a quiet, clearly-labeled row, never styled
+  // like an incomplete inventory line ============
+  if (outcome === "expense" && !editingOpen) {
+    return (
+      <div id={id} className="grid grid-cols-1 gap-1.5 border-b border-zinc-800 bg-zinc-950/30 px-3 py-2.5 last:border-0 hover:bg-zinc-800/10 sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.3fr_84px_112px] sm:items-center sm:gap-3">
+        <p className="truncate text-sm text-zinc-300">{line.description ?? "—"}</p>
+        <p className="truncate text-xs text-zinc-500 sm:col-span-2">{spendCategoryPath ?? "Uncategorized expense"}</p>
+        <p className="text-xs text-zinc-500">{formatSourceQuantity(line) ?? "—"} · will not add inventory</p>
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-400">
+          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
+          Expense
+        </span>
+        {!readOnly ? (
+          <button type="button" onClick={onToggleEditing} className={secondaryButtonClassCompact}>
+            Edit details
+          </button>
+        ) : null}
+      </div>
+    );
+  }
   if (outcome === "expense") {
     return (
-      <div id={id} className="rounded-2xl border-2 border-zinc-700 bg-zinc-900 p-4">
+      <div id={id} className="border-b border-zinc-800 bg-zinc-950/30 p-3.5 last:border-0">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
-            <p className="text-base font-semibold text-white">{line.description ?? "—"}</p>
-            <p className="mt-0.5 text-sm text-zinc-300">
+            <p className="text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+            <p className="mt-0.5 text-xs text-zinc-400">
               {line.vendorSku ? `Vendor SKU ${line.vendorSku}` : null}
               {orderedQuantity ? ` · Invoice quantity: ${orderedQuantity}` : ""}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <span className="rounded-full bg-zinc-700/60 px-3 py-1 text-xs font-semibold text-zinc-100">Expense — no stock</span>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-400">
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
+              Expense — no stock
+            </span>
             {!readOnly ? (
-              <button type="button" onClick={onToggleEditing} className="rounded-full border border-zinc-500 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:border-zinc-300">
-                {editingOpen ? "Hide details" : "Edit details"}
+              <button type="button" onClick={onToggleEditing} className={secondaryButtonClassCompact}>
+                Hide details
               </button>
             ) : null}
           </div>
         </div>
         {savedFlash ? <p className="mt-1 text-xs font-semibold text-emerald-400">✓ Saved</p> : null}
-        <div className="mt-3 rounded-xl border-2 border-emerald-700 bg-emerald-950/10 p-3">
-          <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-400">
+        <div className={`mt-3 ${inlineNeutralClass} !border-emerald-800/60`}>
+          <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-400">
             <span aria-hidden>✓</span> Expense classified
           </p>
-          <p className="mt-1 text-sm font-semibold text-white">
+          <p className="mt-1 text-sm font-medium text-zinc-200">
             {line.description ?? "This line"} → {spendCategoryPath ?? "Uncategorized expense"}
           </p>
           <p className="mt-1 text-xs font-semibold text-zinc-300">Will not add inventory</p>
@@ -1126,7 +1154,7 @@ function LineCard({
         </div>
         {editingOpen && !readOnly ? (
           <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-700 pt-3">
-            <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-full border border-zinc-600 px-3 py-1 text-xs text-zinc-100 disabled:opacity-40">
+            <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className={secondaryButtonClassCompact}>
               Choose Different Item
             </button>
             {overrideFormOpen ? (
@@ -1148,13 +1176,96 @@ function LineCard({
     receivingReady: line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null,
   });
 
+  // ============ Compact table row -- the common case ============
+  // A ready line, not expanded, is ONE scannable row: never three
+  // repeated "complete/confirmed/ready" panels. Package/receiving
+  // one-liners reuse the SAME formatters the expanded detail below uses
+  // -- never a second, independently-worded summary.
+  if (isComplete && !editingOpen) {
+    const packageSummary = formatPackageConfirmation({
+      packageQuantity: line.packageQuantity,
+      resolvedInvoiceUnitCode: line.resolvedInvoiceUnitCode,
+      effectivePurchaseUnitCode: line.effectivePurchaseUnitCode,
+      effectiveReceivingBehavior: line.effectiveReceivingBehavior,
+      effectiveConversionFactor: line.effectiveConversionFactor,
+      inventoryBaseUnitCode: line.inventoryBaseUnitCode,
+    });
+    // FIXED_CONVERSION's block form is 3 lines (Invoice/Conversion/Inventory
+    // received) meant for the expanded checklist -- the compact row instead
+    // collapses it to the same "X UNIT -> Y UNIT" shape as the inline
+    // (SAME_UNIT) case, e.g. "2 PACK -> 20 LB", so this column always reads
+    // as a package conversion rather than duplicating the Receiving column.
+    const packageLine = packageSummary
+      ? packageSummary.mode === "inline"
+        ? packageSummary.lines[0]
+        : line.effectiveReceivingBehavior === "FIXED_CONVERSION" &&
+            line.packageQuantity !== null &&
+            line.effectiveConversionFactor &&
+            line.inventoryBaseUnitCode
+          ? `${line.packageQuantity} ${line.effectivePurchaseUnitCode} -> ${line.packageQuantity * line.effectiveConversionFactor} ${line.inventoryBaseUnitCode}`
+          : (packageSummary.lines[packageSummary.lines.length - 1] ?? packageSummary.lines[0])
+      : "—";
+    const locationName = receiving ? (locations.find((l) => l.id === receiving.locationId)?.name ?? "—") : "—";
+    const conditionLabel = receiving ? (CONDITION_OPTIONS.find((c) => c.value === receiving.conditionStatus)?.label ?? receiving.conditionStatus) : "—";
+    // FIXED_CONVERSION lines are entered in the purchase-package unit (e.g.
+    // "2 PACK") but this column reports what actually lands in inventory --
+    // the same converted `verifiedQuantity`/`baseUnitCode` already shown as
+    // "Adds to inventory: X" in the expanded checklist below, never a
+    // second, independently recomputed conversion.
+    const receivedQuantityDisplay =
+      receiving && receiving.info.receivingBehavior === "FIXED_CONVERSION" && receiving.verifiedQuantity.trim() !== ""
+        ? `${receiving.verifiedQuantity} ${receiving.info.baseUnitCode ?? ""}`
+        : receiving
+          ? `${receiving.receivedQuantity} ${receiving.receivedUnit}`
+          : null;
+    const receivingLine = receivedQuantityDisplay ? `${receivedQuantityDisplay} · ${locationName} · ${conditionLabel}` : "—";
+
+    return (
+      <div id={id} className="grid grid-cols-1 gap-1.5 border-b border-zinc-800 px-3 py-2.5 last:border-0 hover:bg-zinc-800/20 sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.3fr_84px_112px] sm:items-center sm:gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+          <p className="truncate text-xs text-zinc-500">{line.vendorSku ? `SKU ${line.vendorSku}` : "—"}{orderedQuantity ? ` · ${orderedQuantity}` : ""}</p>
+          {line.changedInAmendment ? (
+            <div className="mt-1">
+              <AmendmentChangedBadge previous={line.previousOrderedSummary} />
+            </div>
+          ) : null}
+        </div>
+        <p className="truncate text-sm text-zinc-300 sm:text-xs sm:uppercase sm:tracking-wide sm:text-zinc-500">
+          <span className="sm:hidden">Match: </span>
+          <span className="sm:normal-case sm:tracking-normal sm:text-sm sm:text-zinc-200">{line.inventoryItemName ?? "—"}</span>
+        </p>
+        <p className="truncate text-sm text-zinc-300">
+          <span className="sm:hidden">Package: </span>
+          {packageLine}
+        </p>
+        <p className="truncate text-sm text-zinc-300">
+          <span className="sm:hidden">Receiving: </span>
+          {receivingLine}
+        </p>
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          Ready
+        </span>
+        <div className="flex items-center gap-2">
+          {savedFlash ? <span className="text-[11px] font-medium text-emerald-400">Saved</span> : null}
+          {!readOnly ? (
+            <button type="button" onClick={onToggleEditing} className={`${secondaryButtonClassCompact}`}>
+              Edit details
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div id={id} className={`rounded-2xl border-2 p-4 ${isComplete ? "border-emerald-700 bg-zinc-900" : "border-amber-500 bg-amber-950/10"}`}>
+    <div id={id} className={`border-b border-zinc-800 p-3.5 last:border-0 ${isComplete ? "" : "border-l-2 border-l-amber-500 bg-amber-950/10"}`}>
       {/* ============ Header ============ */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-base font-bold text-white">{line.description ?? "—"}</p>
-          <p className="mt-0.5 text-sm text-zinc-300">
+          <p className="text-sm font-semibold text-zinc-100">{line.description ?? "—"}</p>
+          <p className="mt-0.5 text-xs text-zinc-400">
             {line.vendorSku ? `Vendor SKU ${line.vendorSku}` : null}
             {orderedQuantity ? ` · Invoice quantity: ${orderedQuantity}` : ""}
           </p>
@@ -1166,12 +1277,18 @@ function LineCard({
         </div>
         <div className="flex shrink-0 flex-col items-end gap-2">
           {isComplete ? (
-            <span className="rounded-full border border-emerald-600 bg-emerald-950/40 px-3 py-1 text-xs font-bold text-emerald-300">✓ All checks complete</span>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              Ready
+            </span>
           ) : (
-            <span className="rounded-full border border-amber-500 bg-amber-950/40 px-3 py-1 text-xs font-bold text-amber-300">! Needs attention</span>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-400">
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+              Needs attention
+            </span>
           )}
           {!readOnly ? (
-            <button type="button" onClick={onToggleEditing} className="rounded-full border border-zinc-500 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:border-zinc-300">
+            <button type="button" onClick={onToggleEditing} className={secondaryButtonClassCompact}>
               {editingOpen ? "Hide details" : "Edit details"}
             </button>
           ) : null}
@@ -1210,7 +1327,7 @@ function LineCard({
               {!readOnly ? (
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {line.aiSuggestedIsNewProposal ? (
-                    <button type="button" onClick={onReviewNewItem} className="rounded-full bg-emerald-500 px-2.5 py-1 text-[11px] font-semibold text-zinc-950">
+                    <button type="button" onClick={onReviewNewItem} className="rounded-md bg-emerald-500 px-2.5 py-1 text-[11px] font-semibold text-zinc-950">
                       Review new item →
                     </button>
                   ) : (
@@ -1220,15 +1337,15 @@ function LineCard({
                           type="button"
                           disabled={actionPending}
                           onClick={() => onApproveExisting(line.aiSuggestedInventoryItemId!)}
-                          className="rounded-full border border-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
+                          className="rounded-md border border-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
                         >
                           {actionPending ? "Confirming…" : "Confirm item"}
                         </button>
                       ) : null}
-                      <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-full border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
+                      <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
                         Change match
                       </button>
-                      <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-full border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
+                      <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
                         {actionPending ? "Marking…" : "Mark as expense"}
                       </button>
                     </>
@@ -1260,14 +1377,14 @@ function LineCard({
               {!readOnly ? (
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {onNavigateToStep1 ? (
-                    <button type="button" onClick={onNavigateToStep1} className="rounded-full border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
+                    <button type="button" onClick={onNavigateToStep1} className="rounded-md border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
                       Correct invoice unit
                     </button>
                   ) : null}
-                  <button type="button" onClick={onReviewPackage} className="rounded-full border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
+                  <button type="button" onClick={onReviewPackage} className="rounded-md border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
                     Review purchase package
                   </button>
-                  <button type="button" onClick={onToggleEditing} className="rounded-full border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
+                  <button type="button" onClick={onToggleEditing} className="rounded-md border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
                     Return to item verification
                   </button>
                 </div>
@@ -1348,7 +1465,7 @@ function LineCard({
                 />
                 {correctionError ? <p className="text-xs text-red-300">{correctionError}</p> : null}
                 <div className="flex items-center gap-3">
-                  <button type="button" onClick={onSaveCorrection} disabled={correctionPending} className="rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40">
+                  <button type="button" onClick={onSaveCorrection} disabled={correctionPending} className="rounded-md bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40">
                     {correctionPending ? "Saving…" : "Save correction"}
                   </button>
                   <button type="button" onClick={onCancelCorrection} className="text-xs text-zinc-300 underline underline-offset-2">
@@ -1357,7 +1474,7 @@ function LineCard({
                 </div>
               </div>
             ) : (
-              <button type="button" onClick={onOpenCorrection} className="self-start rounded-full border border-zinc-500 px-3 py-1.5 text-xs font-semibold text-zinc-100">
+              <button type="button" onClick={onOpenCorrection} className="self-start rounded-md border border-zinc-500 px-3 py-1.5 text-xs font-semibold text-zinc-100">
                 Correct receiving details
               </button>
             )

@@ -6,13 +6,15 @@ import { SOLE_APPROVER_REASON_OPTIONS, reasonRequiresNotes, isSoleApproverFormVa
 
 /**
  * Single-manager approval -- the confirmation modal shown when an
- * authorized manager clicks "Post Now as Sole Approver." Deliberately
- * NOT the same visual weight as the primary "Send for Second Review"
- * action it sits beside: the Confirm & Post button below is never the
- * default-focused control (Keep Pending gets initial focus instead), and
- * every fact shown here (vendor/invoice/total/counts/locations) is
- * exactly what the server will independently re-verify and record in the
- * audit trail -- never a claim this modal invents on its own.
+ * authorized manager clicks "Post Now." Deliberately NOT the same visual
+ * weight as the primary "Send for Final Review" action it sits beside: the
+ * Post to Inventory button below is never the default-focused control
+ * (Cancel gets initial focus instead), and every fact shown here
+ * (vendor/invoice/total/counts/locations) is exactly what the server will
+ * independently re-verify and record in the audit trail -- never a claim
+ * this modal invents on its own. A manager who reconsiders can route
+ * straight to the safer path from here via "Send for Final Review",
+ * without having to close the dialog and hunt for that button again.
  */
 export function SoleApproverPostModal({
   vendorName,
@@ -26,6 +28,7 @@ export function SoleApproverPostModal({
   pending,
   error,
   onCancel,
+  onSendForReview,
   onConfirm,
 }: {
   vendorName: string | null;
@@ -39,6 +42,7 @@ export function SoleApproverPostModal({
   pending: boolean;
   error: string | null;
   onCancel: () => void;
+  onSendForReview: () => void;
   onConfirm: (input: { reason: SoleApproverReasonCode; notes: string }) => void;
 }) {
   const [reason, setReason] = useState<SoleApproverReasonCode | null>(null);
@@ -55,17 +59,17 @@ export function SoleApproverPostModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div role="alertdialog" aria-modal="true" aria-labelledby="sole-approver-title" className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-y-auto rounded-2xl border-2 border-amber-600 bg-zinc-900 p-5">
+      <div role="alertdialog" aria-modal="true" aria-labelledby="sole-approver-title" className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-y-auto rounded-lg border border-amber-600 bg-zinc-900 p-5">
         <h2 id="sole-approver-title" className="text-lg font-bold text-amber-300">
-          Post without independent review?
+          Post without a second review?
         </h2>
         <p className="mt-2 text-sm text-zinc-200">
-          This invoice has not been reviewed by a second manager. By continuing, you confirm that the item matches, quantities, units, costs and
-          receiving details are accurate.
+          A second manager has not reviewed this invoice. By posting now, you confirm that the invoice details, item matches, purchase packages,
+          received quantities, locations, and conditions are accurate. Inventory will be updated immediately, and your name and the posting time
+          will be recorded in the audit history.
         </p>
-        <p className="mt-2 text-sm font-medium text-amber-200">Your name, reason and posting time will be recorded in the audit history as the sole approver.</p>
 
-        <div className="mt-4 rounded-xl border border-zinc-700 bg-zinc-950 p-3">
+        <div className="mt-4 rounded-lg border border-zinc-700 bg-zinc-950 p-3">
           <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Posting summary</p>
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
             <dt className="text-zinc-500">Vendor</dt>
@@ -116,7 +120,7 @@ export function SoleApproverPostModal({
 
         <label className="mt-4 flex items-start gap-2 rounded-lg border border-amber-800 bg-amber-950/20 p-3 text-sm text-amber-100">
           <input type="checkbox" checked={acknowledged} disabled={pending} onChange={(e) => setAcknowledged(e.target.checked)} className="mt-0.5" />
-          I understand that I will be recorded as the sole approver responsible for the accuracy of this posting.
+          I have reviewed this document and accept responsibility for posting it without a second review.
         </label>
 
         {error ? <p className="mt-3 text-sm text-red-400">{error}</p> : null}
@@ -128,17 +132,25 @@ export function SoleApproverPostModal({
             autoFocus
             onClick={onCancel}
             disabled={pending}
-            className="rounded-full border border-zinc-600 px-5 py-2 text-sm font-semibold text-zinc-100 disabled:opacity-40"
+            className="rounded-md border border-zinc-600 px-5 py-2 text-sm font-semibold text-zinc-100 disabled:opacity-40"
           >
-            Keep Pending for Second Review
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onSendForReview}
+            disabled={pending}
+            className="rounded-md border border-zinc-600 px-5 py-2 text-sm font-semibold text-zinc-100 disabled:opacity-40"
+          >
+            Send for Final Review
           </button>
           <button
             type="button"
             onClick={handleConfirm}
             disabled={!valid || pending}
-            className="rounded-full border-2 border-amber-500 bg-amber-500/10 px-5 py-2 text-sm font-bold text-amber-300 disabled:opacity-40"
+            className="rounded-md border border-amber-500 bg-amber-500/10 px-5 py-2 text-sm font-bold text-amber-300 disabled:opacity-40"
           >
-            {pending ? "Posting…" : "Confirm & Post as Sole Approver"}
+            {pending ? "Posting…" : "Post to Inventory"}
           </button>
         </div>
       </div>

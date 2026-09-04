@@ -9,6 +9,9 @@ import { PreparationWizard } from "./PreparationWizard";
 import { FinalReviewView } from "./FinalReviewView";
 import type { PossibleDuplicatePurchaseDocument } from "@/app/lib/purchaseDocuments/duplicateDetection";
 import { deriveAmendmentBanner } from "@/app/lib/purchaseDocuments/amendmentBanner";
+import { DocumentHeader } from "./DocumentHeader";
+import { inlineWarningClass, inlineNeutralClass } from "@/app/components/manager/surfaces";
+import { secondaryButtonClass, destructiveButtonClass, primaryButtonClass } from "@/app/components/manager/buttonStyles";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 import type { MappingProposals, ReceivingProposals } from "@/app/lib/purchaseDocuments/reviewProposals";
 import type { ReviewFlag } from "@/app/lib/ai/tasks/invoiceExtraction/types";
@@ -202,70 +205,33 @@ export function PurchaseDocumentReviewView(props: Props) {
   }
 
   return (
-    <div className="mx-auto max-w-6xl">
-      <Link href="/manager/receiving" className="mb-4 inline-flex items-center gap-1 text-sm text-zinc-400 hover:text-zinc-200">
-        ← Receiving Queue
-      </Link>
+    <div className="mx-auto flex max-w-[1600px] flex-col gap-3">
+      <DocumentHeader
+        vendorName={props.vendorName}
+        documentNumberLabel={DOCUMENT_NUMBER_LABEL[props.header.documentType ?? "INVOICE"]}
+        documentNumber={props.header.documentNumber}
+        documentDate={props.header.documentDate}
+        statusLabel={statusLabelForViewer(props.status, props.isPreparer)}
+        statusTone={props.status === "READY_FOR_VERIFICATION" ? "info" : "neutral"}
+        sourceFilename={props.originalFilename}
+        amendmentBanner={amendmentBanner}
+        actions={
+          editableAsPreparer ? (
+            <button type="button" onClick={() => setShowDiscardForm(true)} className={`${secondaryButtonClass} !border-zinc-700 !text-zinc-400 hover:!text-red-400`}>
+              {props.revisionNumber > 1 ? "Discard Amendment" : "Discard Draft"}
+            </button>
+          ) : undefined
+        }
+      />
 
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          {/* Receiving UX pass, Part 9: once real invoice metadata exists,
-              the manager orients around vendor/document number/status --
-              the filename is still shown, but as secondary source evidence,
-              never the primary heading (a filename like
-              "Invoices_0-16675_20260816.pdf" tells a manager nothing about
-              what they're actually reviewing). Never invents metadata: a
-              document with no vendor/number yet (extraction still pending,
-              or genuinely blank) falls back to the filename as the title,
-              exactly as before. */}
-          {props.vendorName || props.header.documentNumber ? (
-            <>
-              <h1 className="text-xl font-semibold">{props.vendorName ?? "Unknown Vendor"}</h1>
-              <p className="mt-0.5 text-sm text-zinc-300">
-                {DOCUMENT_NUMBER_LABEL[props.header.documentType ?? "INVOICE"]}
-                {props.header.documentNumber ?? "—"}
-              </p>
-              <p className="mt-1 text-xs text-zinc-500">
-                {statusLabelForViewer(props.status, props.isPreparer)}
-                {props.header.documentDate ? ` · ${new Date(props.header.documentDate).toLocaleDateString()}` : ""}
-              </p>
-              <p className="mt-2 text-xs text-zinc-600">Source file: {props.originalFilename}</p>
-            </>
-          ) : (
-            <>
-              <h1 className="text-xl font-semibold">{props.originalFilename}</h1>
-              <p className="mt-1 text-sm text-zinc-500">{statusLabelForViewer(props.status, props.isPreparer)}</p>
-            </>
-          )}
-        </div>
-      </div>
-
-      {amendmentBanner ? (
-        <div className="mt-3 rounded-lg border border-sky-800 bg-sky-950/40 px-3 py-2 text-sm text-sky-100">
-          <p className="font-semibold uppercase tracking-wide text-sky-300">Amendment in Progress</p>
-          <p className="mt-1">You are editing a previously verified invoice. Changes will be recorded in the audit history.</p>
-          <p className="mt-1 text-sky-300">
-            {amendmentBanner.originalLabel}
-            {amendmentBanner.previousVerifiedAt ? ` · Previously verified ${new Date(amendmentBanner.previousVerifiedAt).toLocaleDateString()}` : ""}
-          </p>
-          {amendmentBanner.amendmentReason ? <p className="mt-1 text-sky-300">Reason: {amendmentBanner.amendmentReason}</p> : null}
-          {amendmentBanner.previousRevisionId ? (
-            <Link href={`/manager/purchases/${amendmentBanner.previousRevisionId}`} className="mt-2 inline-block text-xs underline">
-              View previous verified version
-            </Link>
-          ) : null}
-        </div>
-      ) : null}
       {!props.isPreparer && props.status === "DRAFT" ? (
-        <p className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-400">
-          Only the preparer who created this draft can edit it. You can review it once submitted.
-        </p>
+        <p className={inlineNeutralClass}>Only the preparer who created this draft can edit it. You can review it once submitted.</p>
       ) : null}
       {props.isPreparer && props.status === "READY_FOR_VERIFICATION" ? (
-        <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-400">
+        <div className={inlineNeutralClass}>
           <p>Your review is complete. This document is waiting for verification by another manager -- you cannot verify your own submission.</p>
           {!showWithdrawForm ? (
-            <button type="button" onClick={() => setShowWithdrawForm(true)} className="mt-2 text-xs text-amber-400 underline">
+            <button type="button" onClick={() => setShowWithdrawForm(true)} className="mt-2 text-xs font-medium text-amber-400 underline underline-offset-2">
               Withdraw Submission
             </button>
           ) : (
@@ -275,18 +241,13 @@ export function PurchaseDocumentReviewView(props: Props) {
                 value={withdrawReason}
                 onChange={(event) => setWithdrawReason(event.target.value)}
                 placeholder="Reason (optional)"
-                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+                className="h-9 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50"
               />
               <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleWithdraw}
-                  disabled={withdrawPending}
-                  className="rounded-full border border-amber-700 px-4 py-1.5 text-xs font-semibold text-amber-300 disabled:opacity-40"
-                >
+                <button type="button" onClick={handleWithdraw} disabled={withdrawPending} className={primaryButtonClass}>
                   {withdrawPending ? "Withdrawing…" : "Confirm Withdraw"}
                 </button>
-                <button type="button" onClick={() => setShowWithdrawForm(false)} className="text-xs text-zinc-400 underline">
+                <button type="button" onClick={() => setShowWithdrawForm(false)} className="text-xs text-zinc-400 underline underline-offset-2">
                   Cancel
                 </button>
               </div>
@@ -296,23 +257,21 @@ export function PurchaseDocumentReviewView(props: Props) {
         </div>
       ) : null}
       {showFinalReview ? (
-        <p className="mt-3 rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+        <p className={inlineWarningClass}>
           You are reviewing another manager&apos;s submission. Fields you change are marked below -- Final Verify to accept
           them as final, or Return to Preparer if you&apos;d rather they resolve it.
         </p>
       ) : null}
       {props.lastReturnedReason && props.status === "DRAFT" ? (
-        <p className="mt-3 rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+        <p className={inlineWarningClass}>
           Returned{props.lastReturnedAt ? ` on ${new Date(props.lastReturnedAt).toLocaleString()}` : ""}: {props.lastReturnedReason}
         </p>
       ) : null}
       {props.hasNewerExtraction ? (
-        <p className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-400">
-          A newer AI extraction attempt is available for this document -- this draft was not automatically updated.
-        </p>
+        <p className={inlineNeutralClass}>A newer AI extraction attempt is available for this document -- this draft was not automatically updated.</p>
       ) : null}
       {duplicates.length > 0 && !duplicatesDismissed ? (
-        <div className="mt-3 rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+        <div className={inlineWarningClass}>
           <p className="font-semibold">Possible duplicate</p>
           <ul className="mt-1 flex flex-col gap-1">
             {duplicates.map((dup) => (
@@ -323,13 +282,13 @@ export function PurchaseDocumentReviewView(props: Props) {
                 {dup.documentDate ? `${new Date(dup.documentDate).toLocaleDateString()} · ` : ""}
                 {DUPLICATE_STATUS_LABEL[dup.status]}
                 {" · "}
-                <Link href={`/manager/purchases/${dup.purchaseDocumentId}`} className="underline">
+                <Link href={`/manager/purchases/${dup.purchaseDocumentId}`} className="underline underline-offset-2">
                   Open Existing
                 </Link>
               </li>
             ))}
           </ul>
-          <button type="button" onClick={() => setDuplicatesDismissed(true)} className="mt-2 text-xs text-amber-300 underline">
+          <button type="button" onClick={() => setDuplicatesDismissed(true)} className="mt-2 text-xs font-medium text-amber-300 underline underline-offset-2">
             Continue Anyway
           </button>
         </div>
@@ -390,21 +349,9 @@ export function PurchaseDocumentReviewView(props: Props) {
         />
       )}
 
-      {editableAsPreparer ? (
-        <div className="mt-6 flex flex-col gap-3">
-          {/* Receiving UX pass, Part 38: visually secondary (small, muted,
-              never competing with Continue), but a real, styled
-              confirmation dialog opens on click -- not a loose destructive
-              link with no confirmation UI. */}
-          <button type="button" onClick={() => setShowDiscardForm(true)} className="self-start text-xs text-zinc-500 underline underline-offset-2 hover:text-red-400">
-            {props.revisionNumber > 1 ? "Discard Amendment" : "Discard Draft"}
-          </button>
-        </div>
-      ) : null}
-
       {showDiscardForm ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div role="alertdialog" aria-modal="true" aria-labelledby="discard-draft-title" className="w-full max-w-md rounded-2xl border border-red-900 bg-zinc-900 p-5">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="discard-draft-title" className="w-full max-w-md rounded-lg border border-red-900 bg-zinc-900 p-5">
             <h2 id="discard-draft-title" className="text-sm font-semibold text-zinc-100">
               {props.revisionNumber > 1 ? "Discard this amendment?" : "Discard this draft?"}
             </h2>
@@ -417,7 +364,7 @@ export function PurchaseDocumentReviewView(props: Props) {
                 type="text"
                 value={discardReason}
                 onChange={(event) => setDiscardReason(event.target.value)}
-                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+                className="h-9 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-50"
               />
             </label>
             {discardError ? <p className="mt-2 text-sm text-red-400">{discardError}</p> : null}
@@ -429,16 +376,11 @@ export function PurchaseDocumentReviewView(props: Props) {
                   setShowDiscardForm(false);
                   setDiscardError(null);
                 }}
-                className="rounded-full border border-zinc-700 px-4 py-1.5 text-xs font-semibold text-zinc-300 disabled:opacity-40"
+                className={secondaryButtonClass}
               >
                 Cancel
               </button>
-              <button
-                type="button"
-                onClick={handleDiscard}
-                disabled={discardPending}
-                className="rounded-full bg-red-600 px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
-              >
+              <button type="button" onClick={handleDiscard} disabled={discardPending} className={destructiveButtonClass}>
                 {discardPending ? "Discarding…" : props.revisionNumber > 1 ? "Discard Amendment" : "Discard Draft"}
               </button>
             </div>

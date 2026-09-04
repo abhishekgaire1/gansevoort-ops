@@ -12,6 +12,8 @@ import type { SoleApproverReasonCode } from "@/app/lib/purchaseDocuments/soleApp
 import { formatMoney } from "@/app/lib/formatMoney";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
 import { SoleApproverPostModal } from "./SoleApproverPostModal";
+import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, panelMetaClass, inlineWarningClass, tableWrapClass, tableClass, tableHeadClass, tableHeadCellClass, tableHeadCellRightClass, tableRowClass, tableCellClass, tableCellRightClass, tableCellMutedClass } from "@/app/components/manager/surfaces";
+import { secondaryButtonClass, textLinkClass } from "@/app/components/manager/buttonStyles";
 
 /**
  * Redesign: this is now Step 3 ("Review & Post") of the 3-step wizard --
@@ -129,6 +131,19 @@ export function Step4ReviewSend({
   const [soleApproverPending, setSoleApproverPending] = useState(false);
   const [soleApproverError, setSoleApproverError] = useState<string | null>(null);
   const [amendmentAlreadyPosted, setAmendmentAlreadyPosted] = useState(false);
+  // Secondary facts (SKU, unit price, condition, package derivation, price
+  // comparison) move into an expandable row detail -- never crammed into
+  // the primary table alongside Type/Item/Matched/Received/Destination/
+  // Amount/Status.
+  const [expandedRowKeys, setExpandedRowKeys] = useState<Set<string>>(new Set());
+  function toggleRowExpanded(key: string) {
+    setExpandedRowKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -224,13 +239,13 @@ export function Step4ReviewSend({
   const soleApproverLocations = Array.from(new Set((summary?.receiving ?? []).map((r) => r.locationName).filter((name): name is string => Boolean(name))));
 
   return (
-    <div className="mt-4 flex flex-col gap-4">
+    <div className="mt-3 flex flex-col gap-3">
       {/* ============ COMPACT READINESS STRIP ============ */}
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">{ready ? "Ready for Final Review" : "Almost Ready"}</h2>
+      <div className={panelClass}>
+        <div className={panelHeaderClass}>
+          <h2 className={panelTitleClass}>{ready ? "Ready for Second Review" : "Almost Ready"}</h2>
         </div>
-        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3 lg:grid-cols-6">
+        <div className={`${panelBodyClass} grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm sm:grid-cols-3 lg:grid-cols-6`}>
           <SummaryRow label="Invoice" ok className="Reviewed" />
           <SummaryRow
             label="Items"
@@ -248,11 +263,11 @@ export function Step4ReviewSend({
             ok={exceptionCount === 0}
             className={exceptionCount === 0 ? "None" : `${exceptionCount} documented`}
           />
-          <SummaryRow label="Delivery verifier" ok={!missingDeliveryVerifier} className={missingDeliveryVerifier ? "Missing" : (deliveryVerifiedByName ?? "Set")} />
+          <SummaryRow label="Responsible manager" ok={!missingDeliveryVerifier} className={missingDeliveryVerifier ? "Missing" : (deliveryVerifiedByName ?? "Set")} />
         </div>
       </div>
 
-      {/* ============ COMPACT DOCUMENT GRID ============ */}
+      {/* ============ RESTRAINED DOCUMENT SUMMARY ============ */}
       <Section title="Document">
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
           <DetailField label="Vendor" value={vendorName} />
@@ -271,7 +286,10 @@ export function Step4ReviewSend({
         </div>
       </Section>
 
-      {/* ============ THE CONSOLIDATED LINE REVIEW ============ */}
+      {/* ============ ONE READABLE LINE TABLE -- secondary facts (SKU,
+          unit price, condition, package derivation, price comparison)
+          live in an expandable row detail, never crammed into the
+          primary columns. ============ */}
       <Section
         title="Line Review"
         countLabel={
@@ -281,7 +299,7 @@ export function Step4ReviewSend({
         }
       >
         {exceptionCount > 0 ? (
-          <ul className="mb-3 flex flex-col gap-1 rounded-lg border border-amber-900 bg-amber-950/20 p-3 text-xs text-amber-200">
+          <ul className={`mb-3 flex flex-col gap-1 ${inlineWarningClass}`}>
             {summary!.exceptions.map((exception, index) => (
               <li key={index}>• {exception.message}</li>
             ))}
@@ -291,53 +309,78 @@ export function Step4ReviewSend({
         {summary === null ? (
           <p className="text-sm text-zinc-500">Loading…</p>
         ) : (
-          <div className="max-h-[32rem] overflow-auto rounded-lg border border-zinc-800">
-            <table className="w-full min-w-[1080px] text-left text-sm">
-              <thead className="sticky top-0 z-10 bg-zinc-950 text-xs uppercase tracking-wide text-zinc-500">
+          <div className={`max-h-[32rem] overflow-auto ${tableWrapClass}`}>
+            <table className={tableClass}>
+              <thead className={tableHeadClass}>
                 <tr>
-                  <th className="px-3 py-2 font-normal">Type</th>
-                  <th className="px-3 py-2 font-normal">SKU</th>
-                  <th className="px-3 py-2 font-normal">Item</th>
-                  <th className="px-3 py-2 font-normal">Matched Item</th>
-                  <th className="px-3 py-2 text-right font-normal">Qty</th>
-                  <th className="px-3 py-2 font-normal">Unit</th>
-                  <th className="px-3 py-2 text-right font-normal">Unit Price</th>
-                  <th className="px-3 py-2 text-right font-normal">Line Total</th>
-                  <th className="px-3 py-2 font-normal">Received</th>
-                  <th className="px-3 py-2 font-normal">Inventory Qty</th>
-                  <th className="px-3 py-2 font-normal">Location</th>
-                  <th className="px-3 py-2 font-normal">Condition</th>
-                  <th className="px-3 py-2 font-normal">Status</th>
+                  <th className={tableHeadCellClass}>Type</th>
+                  <th className={tableHeadCellClass}>Invoice Item</th>
+                  <th className={tableHeadCellClass}>Matched Item</th>
+                  <th className={tableHeadCellClass}>Received</th>
+                  <th className={tableHeadCellClass}>Destination</th>
+                  <th className={tableHeadCellRightClass}>Amount</th>
+                  <th className={tableHeadCellClass}>Status</th>
+                  <th className={tableHeadCellClass} aria-label="Expand" />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-zinc-800">
-                {rows.map((row, index) => (
-                  <tr key={row.lineKey ?? index} className="align-top">
-                    <td className="px-3 py-2 text-xs text-zinc-400">{row.typeLabel}</td>
-                    <td className="px-3 py-2 text-xs text-zinc-400">{row.sku ?? "—"}</td>
-                    <td className="max-w-56 px-3 py-2">
-                      <p className="text-zinc-100">{row.description ?? "—"}</p>
-                      {row.secondary ? <p className="mt-0.5 text-xs text-zinc-500">{row.secondary}</p> : null}
-                    </td>
-                    <td className="max-w-52 px-3 py-2 text-zinc-300">{row.matchedLabel ?? "—"}</td>
-                    <td className="px-3 py-2 text-right text-zinc-200">{row.quantity ?? "—"}</td>
-                    <td className="px-3 py-2 text-zinc-400">{row.unit ?? "—"}</td>
-                    <td className="px-3 py-2 text-right text-zinc-300">{formatMoney(row.unitPrice, header.currency)}</td>
-                    <td className="px-3 py-2 text-right text-zinc-100">{formatMoney(row.lineTotal, header.currency)}</td>
-                    <td className="px-3 py-2 text-zinc-200">{row.receivedLabel ?? "—"}</td>
-                    <td className="px-3 py-2 text-zinc-300">{row.inventoryQuantityLabel ?? "—"}</td>
-                    <td className="px-3 py-2 text-zinc-300">{row.locationName ?? "—"}</td>
-                    <td className="px-3 py-2 text-zinc-400">{row.conditionLabel ?? "—"}</td>
-                    <td className="px-3 py-2">
-                      <span
-                        className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_BADGE_CLASS[row.status.kind]}`}
-                        title={row.problems.length > 0 ? row.problems.join("\n") : undefined}
-                      >
-                        {row.status.kind === "ready" ? "✓ Ready" : row.status.label}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+              <tbody>
+                {rows.map((row, index) => {
+                  const rowKey = row.lineKey ?? String(index);
+                  const rowExpanded = expandedRowKeys.has(rowKey);
+                  return (
+                    <>
+                      <tr key={rowKey} className={tableRowClass}>
+                        <td className={tableCellMutedClass}>{row.typeLabel}</td>
+                        <td className={`${tableCellClass} max-w-64`}>
+                          <p className="truncate text-zinc-100">{row.description ?? "—"}</p>
+                          {row.secondary ? <p className="mt-0.5 truncate text-xs text-zinc-500">{row.secondary}</p> : null}
+                        </td>
+                        <td className={`${tableCellClass} max-w-52`}>
+                          <p className="truncate">{row.matchedLabel ?? "—"}</p>
+                        </td>
+                        <td className={tableCellClass}>{row.receivedLabel ?? "—"}</td>
+                        <td className={tableCellClass}>{row.locationName ?? "—"}</td>
+                        <td className={tableCellRightClass}>{formatMoney(row.lineTotal, header.currency)}</td>
+                        <td className={tableCellClass}>
+                          <span
+                            className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASS[row.status.kind]}`}
+                            title={row.problems.length > 0 ? row.problems.join("\n") : undefined}
+                          >
+                            {row.status.kind === "ready" ? "✓ Ready" : row.status.label}
+                          </span>
+                        </td>
+                        <td className={tableCellClass}>
+                          <button type="button" onClick={() => toggleRowExpanded(rowKey)} className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300">
+                            {rowExpanded ? "Hide" : "Details"}
+                          </button>
+                        </td>
+                      </tr>
+                      {rowExpanded ? (
+                        <tr key={`${rowKey}-detail`} className="border-b border-zinc-800/70 bg-zinc-950/40">
+                          <td colSpan={8} className="px-3 py-2.5 text-xs text-zinc-400">
+                            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 sm:grid-cols-4">
+                              <DetailField label="SKU" value={row.sku} />
+                              <DetailField label="Qty" value={row.quantity !== null ? `${row.quantity} ${row.unit ?? ""}`.trim() : "—"} />
+                              <DetailField label="Unit Price" value={formatMoney(row.unitPrice, header.currency)} />
+                              <DetailField label="Inventory Qty" value={row.inventoryQuantityLabel ?? "—"} />
+                              <DetailField label="Condition" value={row.conditionLabel ?? "—"} />
+                              {row.problems.length > 0 ? (
+                                <div className="col-span-2 sm:col-span-4">
+                                  <p className={panelMetaClass}>Problems</p>
+                                  <ul className="mt-0.5 flex flex-col gap-0.5 text-amber-300">
+                                    {row.problems.map((p, i) => (
+                                      <li key={i}>• {p}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -346,7 +389,7 @@ export function Step4ReviewSend({
 
       {/* ============ BLOCKERS -- NEXT TO THE PRIMARY ACTION ============ */}
       {!ready && blockers.length > 0 ? (
-        <div className="rounded-2xl border border-amber-800 bg-amber-950/20 p-4">
+        <div className="rounded-lg border border-amber-800 bg-amber-950/20 p-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-amber-400">
             {blockers.length} thing{blockers.length === 1 ? "" : "s"} remaining
           </p>
@@ -379,7 +422,7 @@ export function Step4ReviewSend({
                 type="button"
                 onClick={handleSetDeliveryVerifier}
                 disabled={!verifierChoice || verifierPending}
-                className="rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40"
+                className="rounded-md bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40"
               >
                 {verifierPending ? "Saving…" : "Set"}
               </button>
@@ -392,7 +435,7 @@ export function Step4ReviewSend({
             <button
               type="button"
               onClick={() => onNavigateToStep(blockers.some((b) => /invoice date/i.test(b.reason)) ? 1 : 2)}
-              className="mt-3 rounded-full border border-amber-700 px-4 py-1.5 text-xs font-semibold text-amber-200"
+              className="mt-3 rounded-md border border-amber-700 px-4 py-1.5 text-xs font-semibold text-amber-200"
             >
               {blockers.some((b) => /invoice date/i.test(b.reason)) ? "Go to Review Invoice" : "Go to Confirm Items & Receiving"}
             </button>
@@ -411,25 +454,25 @@ export function Step4ReviewSend({
               backLabel="Back to Confirm Items & Receiving"
               contextLabel={!sendAction.enabled ? "Resolve the items above before sending" : undefined}
               contextTone="warning"
-              primaryLabel="Send for Second Review"
+              primaryLabel="Send for Final Review"
               onPrimary={onSend}
               primaryDisabled={!sendAction.enabled}
               primaryPending={sendPending}
-              primaryPendingLabel="Sending for Second Review…"
-              primaryTitle={!sendAction.enabled ? "Resolve the items above before sending for second review." : undefined}
+              primaryPendingLabel="Sending for Final Review…"
+              primaryTitle={!sendAction.enabled ? "Resolve the items above before sending for final review." : undefined}
               sticky={false}
             />
             <p className="mt-1.5 text-xs text-zinc-500">Another authorized manager independently confirms the invoice before inventory is posted.</p>
           </div>
 
           {soleApproverEligible ? (
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
               <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Authorized manager option</p>
               {amendmentAlreadyPosted ? (
                 <p className="text-sm text-amber-300">Inventory was already posted from the original revision. This amendment cannot post it again.</p>
               ) : (
                 <>
-                  <p className="text-sm text-zinc-300">Post immediately with your approval recorded in the audit history.</p>
+                  <p className="text-sm text-zinc-300">Post immediately without a second review. Your name and posting time will be recorded in the audit history.</p>
                   <button
                     type="button"
                     onClick={() => {
@@ -438,9 +481,9 @@ export function Step4ReviewSend({
                     }}
                     disabled={!sendAction.enabled}
                     title={!sendAction.enabled ? "Resolve the items above before posting." : undefined}
-                    className="mt-2 rounded-full border border-zinc-600 px-4 py-1.5 text-xs font-semibold text-zinc-200 hover:border-zinc-400 disabled:opacity-40"
+                    className={`mt-2 ${secondaryButtonClass}`}
                   >
-                    Post Now as Sole Approver
+                    Post Now
                   </button>
                 </>
               )}
@@ -448,8 +491,8 @@ export function Step4ReviewSend({
           ) : null}
         </>
       ) : sendAction.kind === "sent" ? (
-        <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-zinc-800 bg-zinc-950/95 px-4 py-3">
-          <button type="button" onClick={() => onNavigateToStep(2)} className="text-xs text-zinc-400 underline">
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-800 bg-zinc-950/95 px-4 py-3">
+          <button type="button" onClick={() => onNavigateToStep(2)} className={textLinkClass}>
             ← Back to Confirm Items & Receiving
           </button>
           <div className="flex flex-col items-end gap-0.5">
@@ -457,7 +500,7 @@ export function Step4ReviewSend({
                 inert state IS the submitting manager's success confirmation
                 in this app's design (no separate toast/modal exists) --
                 "Sent," never "Ready," since they just sent it. */}
-            <span className="inline-flex cursor-default items-center gap-2 self-end rounded-full border border-emerald-800 bg-emerald-950/30 px-6 py-2 text-sm font-semibold text-emerald-300">
+            <span className="inline-flex cursor-default items-center gap-2 self-end rounded-md border border-emerald-800 bg-emerald-950/30 px-6 py-2 text-sm font-semibold text-emerald-300">
               ✓ Sent for Verification
             </span>
             <span className="text-xs text-zinc-500">
@@ -481,6 +524,10 @@ export function Step4ReviewSend({
           pending={soleApproverPending}
           error={soleApproverError}
           onCancel={() => setSoleApproverModalOpen(false)}
+          onSendForReview={() => {
+            setSoleApproverModalOpen(false);
+            onSend();
+          }}
           onConfirm={handleConfirmSoleApprover}
         />
       ) : null}
@@ -502,12 +549,12 @@ function SummaryRow({ label, ok, className }: { label: string; ok: boolean | nul
 
 function Section({ title, countLabel, children }: { title: string; countLabel?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
-      <div className="flex items-baseline justify-between">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{title}</h2>
-        {countLabel ? <span className="text-xs text-zinc-500">{countLabel}</span> : null}
+    <div className={panelClass}>
+      <div className={`${panelHeaderClass} flex items-baseline justify-between`}>
+        <h2 className={panelTitleClass}>{title}</h2>
+        {countLabel ? <span className={panelMetaClass}>{countLabel}</span> : null}
       </div>
-      <div className="mt-3">{children}</div>
+      <div className={panelBodyClass}>{children}</div>
     </div>
   );
 }

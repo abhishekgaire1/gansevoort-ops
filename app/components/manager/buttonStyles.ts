@@ -1,13 +1,19 @@
 /**
- * Shared button role classNames (Manager UX & Navigation Milestone, Part
- * 15) -- plain className strings, not components, since every call site
+ * Shared button role classNames (Desktop Application Design System pass)
+ * -- plain className strings, not components, since every call site
  * already uses a plain <button>/<Link> and a full wrapper component
- * would be a bigger abstraction than this milestone needs. One obvious
- * PRIMARY (warm gold) per screen/task; SECONDARY is a visible bordered
- * button, never faint-to-the-point-of-looking-disabled; DESTRUCTIVE is
- * restrained, only for genuinely destructive actions.
+ * would be a bigger abstraction than this needs. Sturdy desktop controls,
+ * never oversized pills: 6-10px corner radii (rounded-lg = 8px), a fixed
+ * ~36px height (py-2 + leading-5 text), one obvious PRIMARY (warm gold)
+ * per screen/task, a visible (never faint-to-invisible) SECONDARY
+ * border, and a restrained DESTRUCTIVE only for genuinely destructive
+ * actions. Every call site inherits this automatically -- never a
+ * per-screen one-off button style.
  */
-export const primaryButtonClass = "rounded-full bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-40";
-export const secondaryButtonClass = "rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40";
-export const destructiveButtonClass = "rounded-full border border-red-900 px-4 py-2 text-sm font-medium text-red-400 hover:bg-red-950/40 disabled:opacity-40";
-export const textLinkClass = "text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300";
+export const primaryButtonClass =
+  "inline-flex h-9 items-center justify-center rounded-lg bg-amber-400 px-4 text-sm font-semibold leading-none text-zinc-950 transition-colors hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40";
+export const secondaryButtonClass =
+  "inline-flex h-9 items-center justify-center rounded-lg border border-zinc-600 px-4 text-sm font-medium leading-none text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40";
+export const destructiveButtonClass =
+  "inline-flex h-9 items-center justify-center rounded-lg border border-red-900 px-4 text-sm font-medium leading-none text-red-400 transition-colors hover:bg-red-950/40 disabled:cursor-not-allowed disabled:opacity-40";
+export const textLinkClass = "text-xs text-zinc-400 underline underline-offset-2 hover:text-zinc-200";
