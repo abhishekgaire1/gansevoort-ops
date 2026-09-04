@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { NotificationBell } from "@/app/components/notifications/NotificationBell";
 import { AskGansevoortLauncher } from "@/app/components/manager/askGansevoort/AskGansevoortLauncher";
+import { AskGansevoortDensityProvider } from "@/app/components/manager/askGansevoort/AskGansevoortDensityContext";
 import { signOutManager } from "@/app/actions/managerAuth";
 
 /**
@@ -189,6 +190,7 @@ export function ManagerShell({ managerName, isAdmin, children }: { managerName: 
   }, [collapsed]);
 
   return (
+    <AskGansevoortDensityProvider>
     <div className="flex min-h-screen bg-zinc-950 text-zinc-50">
       <aside
         className={`sticky top-0 hidden h-screen shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 transition-[width] duration-150 md:flex ${
@@ -232,6 +234,7 @@ export function ManagerShell({ managerName, isAdmin, children }: { managerName: 
       </div>
       <AskGansevoortLauncher />
     </div>
+    </AskGansevoortDensityProvider>
   );
 }
 

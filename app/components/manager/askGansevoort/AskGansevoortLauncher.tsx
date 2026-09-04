@@ -6,6 +6,7 @@ import { sendAskGansevoortQuestion } from "./askGansevoortClient";
 import { fetchChatDownload } from "./chatDownload";
 import { ASK_GANSEVOORT_SUGGESTED_QUESTIONS, canSubmitQuestion, trimChatHistory } from "@/app/lib/ai/tasks/chat/uiHelpers";
 import type { ChatDownload, ChatEvidence, ChatHistoryTurn } from "@/app/lib/ai/tasks/chat/contract";
+import { useAskGansevoortDensity } from "@/app/components/manager/askGansevoort/AskGansevoortDensityContext";
 
 /**
  * Manager-only entry point (Section 16). Rendered ONLY from
@@ -29,6 +30,7 @@ interface DisplayMessage {
 }
 
 export function AskGansevoortLauncher() {
+  const density = useAskGansevoortDensity();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
@@ -103,10 +105,16 @@ export function AskGansevoortLauncher() {
         ref={triggerRef}
         type="button"
         onClick={() => setOpen(true)}
-        className="fixed bottom-[max(1.25rem,env(safe-area-inset-bottom))] right-5 z-40 flex items-center gap-2 rounded-full bg-amber-400 px-4 py-3 text-sm font-semibold text-zinc-950 shadow-lg hover:bg-amber-300"
+        aria-label="Ask Gansevoort"
+        title="Ask Gansevoort"
+        className={
+          density === "compact"
+            ? "fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 z-40 flex items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-900/95 px-3 py-2 text-xs font-medium text-zinc-300 shadow-md hover:border-zinc-600 hover:text-zinc-100"
+            : "fixed bottom-[max(1.25rem,env(safe-area-inset-bottom))] right-5 z-40 flex items-center gap-2 rounded-full bg-amber-400 px-4 py-3 text-sm font-semibold text-zinc-950 shadow-lg hover:bg-amber-300"
+        }
       >
         <ChatIcon />
-        Ask Gansevoort
+        {density === "compact" ? null : "Ask Gansevoort"}
       </button>
 
       {open ? (

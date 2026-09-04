@@ -141,6 +141,6 @@ export function formatPackageConfirmation(input: PackageConfirmationInput): Pack
     return { mode: "block", lines };
   }
 
-  // SAME_UNIT -- direct one-to-one, e.g. "3 BOTTLE -> 3 BOTTLE".
-  return { mode: "inline", lines: [qty !== null ? `${qty} ${effectivePurchaseUnitCode} -> ${qty} ${effectivePurchaseUnitCode}` : `${effectivePurchaseUnitCode} -> ${effectivePurchaseUnitCode}`] };
+  // SAME_UNIT -- direct one-to-one, e.g. "3 BOTTLE → 3 BOTTLE".
+  return { mode: "inline", lines: [qty !== null ? `${qty} ${effectivePurchaseUnitCode} → ${qty} ${effectivePurchaseUnitCode}` : `${effectivePurchaseUnitCode} → ${effectivePurchaseUnitCode}`] };
 }

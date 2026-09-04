@@ -198,7 +198,7 @@ describe("formatPackageConfirmation", () => {
     expect(display!.lines).toContain("Inventory received: 20 LB");
   });
 
-  it("test 10: a direct one-to-one package match (3 BOTTLE -> 3 BOTTLE) displays as a single inline confirmation", () => {
+  it("test 10: a direct one-to-one package match (3 BOTTLE → 3 BOTTLE) displays as a single inline confirmation", () => {
     const display = formatPackageConfirmation({
       packageQuantity: 3,
       resolvedInvoiceUnitCode: "BOTTLE",
@@ -207,7 +207,7 @@ describe("formatPackageConfirmation", () => {
       effectiveConversionFactor: null,
       inventoryBaseUnitCode: "BOTTLE",
     });
-    expect(display).toEqual({ mode: "inline", lines: ["3 BOTTLE -> 3 BOTTLE"] });
+    expect(display).toEqual({ mode: "inline", lines: ["3 BOTTLE → 3 BOTTLE"] });
   });
 
   it("test 11: measured-at-receiving shows the measured behavior without inventing a fixed conversion", () => {

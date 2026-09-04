@@ -1,0 +1,44 @@
+-- Fix: upsert_vendor_item_mapping's own "remap" branch (added by
+-- 20260811100041, later CREATE OR REPLACEd body-only by 20260811100120)
+-- violates vendor_item_mappings_superseded_by_org_fk whenever a vendor
+-- SKU/description that is ALREADY actively mapped is remapped to a
+-- genuinely different inventory item.
+--
+-- That function's remap branch runs, in order:
+--   1. UPDATE the existing active row: superseded_by_mapping_id = v_new_id
+--   2. INSERT the new row with id = v_new_id
+-- vendor_item_mappings_superseded_by_org_fk (foreign key
+-- (superseded_by_mapping_id, organization_id) references
+-- vendor_item_mappings(id, organization_id)) was NOT deferrable, so step
+-- 1's UPDATE was checked immediately -- before the referenced row from
+-- step 2 existed -- and the whole call failed with 23503.
+--
+-- This is the exact sibling of the bug already fixed for
+-- vendor_item_purchase_units by 20260811100131
+-- (fix_vendor_purchase_unit_supersede_ordering) -- same self-referencing
+-- "supersede chain" pattern, same root cause, same fix. That migration's
+-- own reasoning for why reordering the statements is not a safe
+-- alternative applies identically here: vendor_item_mappings_org_vendor_sku_key
+-- / vendor_item_mappings_org_vendor_description_key (partial unique
+-- indexes on is_active) would reject the new row's INSERT if it ran before
+-- the old row was deactivated. The FK itself is what needs to change, not
+-- the function.
+--
+-- This was never exercised by any existing test, and -- until this
+-- session's "Change item match" rework of the Items & Receiving editor --
+-- never reachable from the UI at all: there was previously no affordance
+-- to reclassify an already-CONFIRMED line against a different existing
+-- item, so upsert_vendor_item_mapping's remap branch (as opposed to its
+-- first-time-mapping branch) had no caller. It is directly load-bearing
+-- for that new "Change item match" action whenever the line's vendor
+-- SKU/description was already mapped to some item.
+--
+-- Fix: mark the FK DEFERRABLE INITIALLY DEFERRED, so it is checked at
+-- transaction commit rather than immediately after the UPDATE statement --
+-- by commit time, the function's own INSERT (later in the same
+-- transaction) has already created the row it points to. No other schema
+-- or business-rule change; the function body, its audit trail, and every
+-- other constraint on this table are untouched.
+alter table public.vendor_item_mappings
+  alter constraint vendor_item_mappings_superseded_by_org_fk
+  deferrable initially deferred;

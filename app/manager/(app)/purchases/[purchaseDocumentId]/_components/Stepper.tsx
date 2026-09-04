@@ -43,6 +43,7 @@ export function Stepper({
   furthestReachableStep,
   onNavigate,
   stepStatusText,
+  readyToContinue,
 }: {
   steps: { id: WizardStepId; state: WizardStepState }[];
   activeStep: WizardStepId;
@@ -52,6 +53,15 @@ export function Stepper({
    * "3 issues remaining") -- reported by that step's own panel, never
    * recomputed here. */
   stepStatusText?: Partial<Record<WizardStepId, string>>;
+  /** True for the ACTIVE step only when its own requirements are already
+   * satisfied -- deriveWizardProgress deliberately never reports the
+   * currently-viewed step as "complete" (there is no further step to
+   * unlock by completing the one you're looking at), but "In progress"
+   * is a genuinely contradictory word to show right next to "9 of 9
+   * complete." This changes ONLY the word, never the dot color or
+   * reachability -- the step stays visually "current," just truthfully
+   * worded. */
+  readyToContinue?: Partial<Record<WizardStepId, boolean>>;
 }) {
   return (
     <nav aria-label="Invoice preparation steps" className="flex overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
@@ -59,6 +69,7 @@ export function Stepper({
         const clickable = step.id <= furthestReachableStep;
         const status = stepStatusText?.[step.id];
         const isActive = step.id === activeStep;
+        const word = step.state === "current" && readyToContinue?.[step.id] ? "Ready to continue" : STATE_WORD[step.state];
         return (
           <button
             key={step.id}
@@ -76,7 +87,7 @@ export function Stepper({
                 <span className="text-[13px] font-semibold text-zinc-100">
                   {step.id} · {STEP_LABELS[step.id]}
                 </span>
-                <span className={`text-[11px] font-medium ${STATE_TEXT_CLASS[step.state]}`}>{STATE_WORD[step.state]}</span>
+                <span className={`text-[11px] font-medium ${STATE_TEXT_CLASS[step.state]}`}>{word}</span>
               </span>
               {status ? <span className="mt-0.5 block truncate text-[11px] text-zinc-500">{status}</span> : null}
             </span>

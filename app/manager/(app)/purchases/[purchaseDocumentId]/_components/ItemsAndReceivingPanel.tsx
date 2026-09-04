@@ -35,7 +35,6 @@ import { priceChangeTone } from "@/app/lib/purchasing/priceChangePresentation";
 import { formatPackageConfirmation } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
 import { classifyLineOutcome, summarizeCombinedStep, checklistCompletion, type LineOutcome } from "@/app/lib/purchaseDocuments/combinedLineReadiness";
 import {
-  isCardExpanded,
   receivingLineIsReady,
   applyLocationToAll,
   applyConditionToAll,
@@ -43,6 +42,7 @@ import {
   missingReceivingReason,
 } from "@/app/lib/purchaseDocuments/itemsAndReceivingCardState";
 import { deriveLineProvenance } from "@/app/lib/purchaseDocuments/lineProvenance";
+import { describeLineIssue } from "@/app/lib/purchaseDocuments/lineIssueSummary";
 import { getAmendmentAlreadyPosted } from "@/app/actions/purchaseDocuments";
 import {
   recordReceipt,
@@ -56,7 +56,7 @@ import {
 import type { ReceivingLineEdit } from "@/app/lib/receiving/effectiveReceivingEdit";
 import { computeReceivingPrefill, recomputeFixedConversionVerifiedQuantity } from "@/app/lib/receiving/computeReceivingPrefill";
 import { mergeReceivingLineState, type ReceivingLineDraft } from "@/app/lib/receiving/mergeReceivingLineState";
-import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, inlineWarningClass, inlineSuccessClass, inlineNeutralClass } from "@/app/components/manager/surfaces";
+import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, inlineWarningClass, inlineNeutralClass } from "@/app/components/manager/surfaces";
 import { secondaryButtonClass } from "@/app/components/manager/buttonStyles";
 
 /**
@@ -183,12 +183,19 @@ export function ItemsAndReceivingPanel({
   const matchingRunToken = useRef(0);
   const hasAutoAttempted = useRef(false);
 
-  // Manager-toggled overrides against each line's DEFAULT editing-controls
-  // visibility (needs_attention starts with editing controls open; ready
-  // and expense start closed -- the CHECKLIST summary itself is always
-  // visible regardless, only the raw controls collapse). Toggling flips a
-  // card relative to its own default.
-  const [toggledLineKeys, setToggledLineKeys] = useState<Set<string>>(new Set());
+  // Exactly one line editable at a time: null means every row is
+  // collapsed to its compact summary; a lineKey means that ONE row shows
+  // the full inline editor (Item Match / Purchase Package / Receiving),
+  // never more than one simultaneously.
+  const [editingLineKey, setEditingLineKey] = useState<string | null>(null);
+  // The editing line's receiving draft AT THE MOMENT the editor opened --
+  // the only way "Cancel restores the persisted values" can be honest,
+  // since receivingLineState itself is live/shared with every other
+  // consumer (bulk actions, the compact row, Continue's own batch
+  // submit) and can't just be rolled back wholesale.
+  const [receivingDraftSnapshot, setReceivingDraftSnapshot] = useState<ReceivingLineDraft | null>(null);
+  const [receivingSavePending, setReceivingSavePending] = useState(false);
+  const [receivingSaveError, setReceivingSaveError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [bulkLocationId, setBulkLocationId] = useState("");
   const [bulkConditionValue, setBulkConditionValue] = useState<ReceivingLineDraft["conditionStatus"]>("RECEIVED_AS_INVOICED");
@@ -217,7 +224,7 @@ export function ItemsAndReceivingPanel({
   const [correctionPending, setCorrectionPending] = useState(false);
   const [correctionError, setCorrectionError] = useState<string | null>(null);
   const [correctionDraft, setCorrectionDraft] = useState<{
-    receiptLineId: string;
+    receiptLineIds: string[];
     receivedQuantity: string;
     receivedUnit: string;
     verifiedQuantity: string;
@@ -231,19 +238,31 @@ export function ItemsAndReceivingPanel({
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const [linesResult, itemsResult, categoriesResult, spendResult, unitsResult, priceComparisonsResult, receiptsResult, receivingResult, locationsResult, amendmentPostedResult] =
-      await Promise.all([
-        getPurchaseDocumentLineClassifications(purchaseDocumentId),
-        listInventoryItems(),
-        listInventoryCategories(),
-        listSpendCategories(),
-        listUnits(),
-        getPriceComparisons(purchaseDocumentId),
-        listEffectiveReceiptsForPurchaseDocument(purchaseDocumentId),
-        getReceivingLinesForPurchaseDocument(purchaseDocumentId),
-        listLocations(),
-        getAmendmentAlreadyPosted(purchaseDocumentId),
-      ]);
+    const [
+      linesResult,
+      itemsResult,
+      categoriesResult,
+      spendResult,
+      unitsResult,
+      priceComparisonsResult,
+      receiptsResult,
+      receivingResult,
+      locationsResult,
+      amendmentPostedResult,
+      effectiveReceivingResult,
+    ] = await Promise.all([
+      getPurchaseDocumentLineClassifications(purchaseDocumentId),
+      listInventoryItems(),
+      listInventoryCategories(),
+      listSpendCategories(),
+      listUnits(),
+      getPriceComparisons(purchaseDocumentId),
+      listEffectiveReceiptsForPurchaseDocument(purchaseDocumentId),
+      getReceivingLinesForPurchaseDocument(purchaseDocumentId),
+      listLocations(),
+      getAmendmentAlreadyPosted(purchaseDocumentId),
+      getEffectiveReceivingLinesForPurchaseDocument(purchaseDocumentId),
+    ]);
 
     if (linesResult.ok) setLines(linesResult.lines);
     else setError(linesResult.message);
@@ -260,7 +279,31 @@ export function ItemsAndReceivingPanel({
       const soleLocationId = locationsResult.ok && locationsResult.locations.length === 1 ? locationsResult.locations[0].id : "";
       setBulkLocationId((current) => current || soleLocationId);
       const loadedLocations = locationsResult.ok ? locationsResult.locations : [];
-      setReceivingLineState((prev) => mergeReceivingLineState(receivingResult.lines, loadedLocations, prev));
+      // getReceivingLinesForPurchaseDocument's own prefill (mergeReceivingLineState)
+      // is correction-BLIND -- it exists for the pre-first-receipt draft
+      // workflow and never revisits a line once a delivery receipt exists.
+      // Once corrections start (correctEffectiveReceiving), the row/editor
+      // display for an already-received line must instead reflect the
+      // SAME authoritative "effective" (latest-correction-aware) state the
+      // correction editor itself already trusts -- never a second,
+      // independently stale copy that silently un-shows a saved correction.
+      const effectiveByLineKey = new Map(
+        effectiveReceivingResult.ok ? effectiveReceivingResult.lines.map((l) => [l.matchedLineKey, l] as const) : []
+      );
+      setReceivingLineState((prev) =>
+        mergeReceivingLineState(receivingResult.lines, loadedLocations, prev).map((draft) => {
+          const effective = effectiveByLineKey.get(draft.lineKey);
+          if (!effective) return draft;
+          return {
+            ...draft,
+            receivedQuantity: effective.receivedQuantity !== null ? String(effective.receivedQuantity) : draft.receivedQuantity,
+            receivedUnit: effective.receivedUnit ?? draft.receivedUnit,
+            verifiedQuantity: effective.verifiedBaseQuantity !== null ? String(effective.verifiedBaseQuantity) : draft.verifiedQuantity,
+            locationId: effective.locationId ?? draft.locationId,
+            conditionStatus: effective.conditionStatus as ReceivingLineDraft["conditionStatus"],
+          };
+        })
+      );
     }
 
     setLoading(false);
@@ -377,6 +420,8 @@ export function ItemsAndReceivingPanel({
 
   async function handleApproveExisting(lineKey: string, inventoryItemId: string, vendorPackage?: ExistingItemVendorPackageInput | null) {
     if (actionPendingLineKey) return;
+    const line = (lines ?? []).find((l) => l.lineKey === lineKey);
+    const itemChanged = Boolean(line && line.inventoryItemId !== inventoryItemId);
     setActionPendingLineKey(lineKey);
     const result = await approveExistingItemClassification({
       purchaseDocumentId,
@@ -390,6 +435,23 @@ export function ItemsAndReceivingPanel({
     if (!result.ok) {
       setError(result.message);
       return;
+    }
+    if (itemChanged) {
+      // Immediate revalidation: a received quantity/unit entered against
+      // the PREVIOUS item's purchase package is never safe to keep for a
+      // DIFFERENT item (it may not even sell in the same unit) -- clearing
+      // it here, before load() re-merges below, is what lets the new
+      // item's own package config re-prefill fresh instead of a stale
+      // value surviving the match change.
+      updateReceivingLine(lineKey, { receivedQuantity: "", receivedUnit: "", verifiedQuantity: "" });
+      // Once a delivery already exists for this document, Receiving here
+      // renders the CORRECTION editor instead (fed by correctionDraft, not
+      // receivingLineState) -- the clear above is invisible to it, so the
+      // already-recorded quantity/unit from the PREVIOUS item would
+      // otherwise keep showing as if it were still valid for the new one.
+      if (correctingLineKey === lineKey) {
+        setCorrectionDraft((prev) => (prev ? { ...prev, receivedQuantity: "", receivedUnit: "", verifiedQuantity: "" } : prev));
+      }
     }
     setOverrideFormLineKey(null);
     setPackageReviewLineKey(null);
@@ -520,15 +582,25 @@ export function ItemsAndReceivingPanel({
       setError(result.message);
       return;
     }
-    const effectiveLine = result.lines.find((l) => l.matchedLineKey === lineKey);
-    if (!effectiveLine) return;
+    // Normally exactly one receipt line is effective per matched line key --
+    // but the data model doesn't forbid two independently-effective lines
+    // existing at once (e.g. a stray duplicate delivery submission never
+    // corrected against the first). Reconciling ALL of them into the same
+    // new values on save (below) is what makes a correction self-healing
+    // instead of leaving the other one silently still "effective" and
+    // fighting the display for which value is true. getEffectiveReceivingLines
+    // already returns lines ordered oldest-effective-receipt-first, so the
+    // LAST match is the best-guess "current" value to prefill from.
+    const effectiveLines = result.lines.filter((l) => l.matchedLineKey === lineKey);
+    if (effectiveLines.length === 0) return;
+    const latest = effectiveLines[effectiveLines.length - 1];
     setCorrectionDraft({
-      receiptLineId: effectiveLine.receiptLineId,
-      receivedQuantity: effectiveLine.receivedQuantity !== null ? String(effectiveLine.receivedQuantity) : "",
-      receivedUnit: effectiveLine.receivedUnit ?? "",
-      verifiedQuantity: effectiveLine.verifiedBaseQuantity !== null ? String(effectiveLine.verifiedBaseQuantity) : "",
-      locationId: effectiveLine.locationId ?? "",
-      conditionStatus: effectiveLine.conditionStatus as ReceivingLineDraft["conditionStatus"],
+      receiptLineIds: effectiveLines.map((l) => l.receiptLineId),
+      receivedQuantity: latest.receivedQuantity !== null ? String(latest.receivedQuantity) : "",
+      receivedUnit: latest.receivedUnit ?? "",
+      verifiedQuantity: latest.verifiedBaseQuantity !== null ? String(latest.verifiedBaseQuantity) : "",
+      locationId: latest.locationId ?? "",
+      conditionStatus: latest.conditionStatus as ReceivingLineDraft["conditionStatus"],
     });
     setCorrectingLineKey(lineKey);
   }
@@ -537,32 +609,134 @@ export function ItemsAndReceivingPanel({
     if (!correctionDraft || correctionPending || !correctingLineKey) return;
     setCorrectionPending(true);
     setCorrectionError(null);
-    const edits: ReceivingLineEdit[] = [
-      {
-        receiptLineId: correctionDraft.receiptLineId,
-        receivedQuantity: Number(correctionDraft.receivedQuantity),
-        receivedUnit: correctionDraft.receivedUnit || null,
-        verifiedBaseQuantity: correctionDraft.verifiedQuantity.trim() !== "" ? Number(correctionDraft.verifiedQuantity) : null,
-        locationId: correctionDraft.locationId || null,
-        conditionStatus: correctionDraft.conditionStatus,
-      },
-    ];
+    const edits: ReceivingLineEdit[] = correctionDraft.receiptLineIds.map((receiptLineId) => ({
+      receiptLineId,
+      receivedQuantity: Number(correctionDraft.receivedQuantity),
+      receivedUnit: correctionDraft.receivedUnit || null,
+      verifiedBaseQuantity: correctionDraft.verifiedQuantity.trim() !== "" ? Number(correctionDraft.verifiedQuantity) : null,
+      locationId: correctionDraft.locationId || null,
+      conditionStatus: correctionDraft.conditionStatus,
+    }));
     const result = await correctEffectiveReceiving({ purchaseDocumentId, editSessionKey, edits });
     setCorrectionPending(false);
     if (!result.ok) {
       setCorrectionError(result.message);
       return;
     }
-    flashSaved(correctingLineKey);
+    const savedLineKey = correctingLineKey;
+    flashSaved(savedLineKey);
     setCorrectingLineKey(null);
     setCorrectionDraft(null);
+    setEditingLineKey(null);
+    setReceivingDraftSnapshot(null);
     await load();
+    focusRow(savedLineKey);
+  }
+
+  // ============ Single line-editor open/close/save (Edit line) ============
+
+  function focusRow(lineKey: string) {
+    window.setTimeout(() => document.getElementById(`classification-line-${lineKey}`)?.focus(), 0);
+  }
+
+  /** True only for the currently-editing line, and only once its
+   * receiving draft has actually diverged from the snapshot captured the
+   * moment the editor opened -- the one fact "warn before discarding"
+   * needs, since Item Match / Purchase Package changes below already
+   * save immediately (their own Confirm button), leaving Receiving as
+   * the only genuinely deferred edit. */
+  function isReceivingDirty(lineKey: string): boolean {
+    if (editingLineKey !== lineKey || !receivingDraftSnapshot) return false;
+    const current = receivingLineState.find((l) => l.lineKey === lineKey);
+    if (!current) return false;
+    return (
+      current.receivedQuantity !== receivingDraftSnapshot.receivedQuantity ||
+      current.receivedUnit !== receivingDraftSnapshot.receivedUnit ||
+      current.verifiedQuantity !== receivingDraftSnapshot.verifiedQuantity ||
+      current.locationId !== receivingDraftSnapshot.locationId ||
+      current.conditionStatus !== receivingDraftSnapshot.conditionStatus
+    );
+  }
+
+  function restoreReceivingSnapshot(lineKey: string) {
+    if (receivingDraftSnapshot) updateReceivingLine(lineKey, receivingDraftSnapshot);
+  }
+
+  async function handleEditLine(lineKey: string) {
+    if (editingLineKey === lineKey) {
+      handleCloseEditor(lineKey);
+      return;
+    }
+    if (editingLineKey && isReceivingDirty(editingLineKey)) {
+      if (!window.confirm("Discard unsaved receiving changes on the line you're currently editing?")) return;
+      restoreReceivingSnapshot(editingLineKey);
+    }
+    setOverrideFormLineKey(null);
+    setPackageReviewLineKey(null);
+    setCorrectingLineKey(null);
+    setCorrectionDraft(null);
+    setCorrectionError(null);
+    setReceivingSaveError(null);
+    setEditingLineKey(lineKey);
+    setReceivingDraftSnapshot(receivingLineState.find((l) => l.lineKey === lineKey) ?? null);
+    if (alreadyReceived) await handleOpenCorrection(lineKey);
+  }
+
+  function handleCloseEditor(lineKey: string) {
+    if (isReceivingDirty(lineKey) && !window.confirm("Discard unsaved receiving changes?")) return;
+    restoreReceivingSnapshot(lineKey);
+    setEditingLineKey(null);
+    setReceivingDraftSnapshot(null);
+    setOverrideFormLineKey(null);
+    setPackageReviewLineKey(null);
+    setCorrectingLineKey(null);
+    setCorrectionDraft(null);
+    setCorrectionError(null);
+    setReceivingSaveError(null);
+    focusRow(lineKey);
+  }
+
+  function handleCancelReceivingDraft(lineKey: string) {
+    restoreReceivingSnapshot(lineKey);
+    setReceivingSaveError(null);
+    setEditingLineKey(null);
+    setReceivingDraftSnapshot(null);
+    focusRow(lineKey);
+  }
+
+  /** Saves the not-yet-received (draft) path -- reuses submitReceivingIfNeeded
+   * unchanged (the SAME batch action Continue already calls), just
+   * triggered earlier by one line's own Save button rather than only at
+   * the bottom of the step. Any OTHER line's already-filled-in draft is
+   * committed too, exactly as it would be if the manager clicked
+   * Continue right now -- never a second, differently-scoped RPC. */
+  async function handleSaveReceivingDraft(lineKey: string) {
+    if (receivingSavePending) return;
+    setReceivingSavePending(true);
+    setReceivingSaveError(null);
+    const result = await submitReceivingIfNeeded();
+    setReceivingSavePending(false);
+    if (!result.ok) {
+      setReceivingSaveError(result.message);
+      return;
+    }
+    flashSaved(lineKey);
+    setEditingLineKey(null);
+    setReceivingDraftSnapshot(null);
+    await load();
+    focusRow(lineKey);
   }
 
   // ============ Continue ============
 
   async function handleContinue() {
     if (continuePending || !onContinue) return;
+    if (editingLineKey && isReceivingDirty(editingLineKey)) {
+      if (!window.confirm("You have unsaved receiving changes on this line. Continue anyway and discard them?")) return;
+      restoreReceivingSnapshot(editingLineKey);
+    }
+    setEditingLineKey(null);
+    setReceivingDraftSnapshot(null);
     setContinuePending(true);
     setError(null);
     const result = await submitReceivingIfNeeded();
@@ -605,6 +779,17 @@ export function ItemsAndReceivingPanel({
     onAllResolvedChange?.(summary.allResolved);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lines === null, summary.allResolved, onAllResolvedChange]);
+
+  const hasUnsavedReceivingDraft = editingLineKey !== null && isReceivingDirty(editingLineKey);
+  useEffect(() => {
+    if (!hasUnsavedReceivingDraft) return;
+    function handler(e: BeforeUnloadEvent) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [hasUnsavedReceivingDraft]);
 
   if (loading || lines === null) {
     return (
@@ -650,18 +835,6 @@ export function ItemsAndReceivingPanel({
     return c.outcome === "expense";
   });
 
-  function isEditingOpen(lineKey: string, outcome: LineOutcome): boolean {
-    return isCardExpanded(outcome, toggledLineKeys.has(lineKey));
-  }
-  function toggleEditingOpen(lineKey: string) {
-    setToggledLineKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(lineKey)) next.delete(lineKey);
-      else next.add(lineKey);
-      return next;
-    });
-  }
-
   const bulkLocationSummary = summarizeBulkLocations(receivingLineState.map((l) => l.locationId || null));
   const bulkEligibleForCondition = receivingLineState.filter((l) => l.receivedQuantity.trim() !== "").length;
 
@@ -677,37 +850,51 @@ export function ItemsAndReceivingPanel({
         </div>
       ) : null}
 
-      {/* ============ PAGE-LEVEL COMPLETION PANEL ============ */}
-      <CompletionPanel
-        summary={summary}
-        onGoToFirstIssue={() =>
-          scrollToFirstIssue(combinedLines.filter((c) => c.outcome === "needs_attention").map((c) => ({ id: `classification-line-${c.line.lineKey}`, reason: "" })))
-        }
-      />
-
-      {/* ============ TOOLBAR ============ */}
+      {/* ============ TOOLBAR -- the compact readiness summary lives
+          right beside the title, never a second, redundant full-width
+          banner repeating the same counts. ============ */}
       <div className={panelClass}>
         <div className={`${panelHeaderClass} flex-wrap`}>
-          <h2 className={panelTitleClass}>Confirm Items &amp; Receiving</h2>
-          {!readOnly ? (
-            <div className="relative">
-              <button type="button" onClick={() => setMoreActionsOpen((v) => !v)} className={secondaryButtonClass}>
-                More actions ▾
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h2 className={panelTitleClass}>Confirm Items &amp; Receiving</h2>
+            {summary.totalLines > 0 ? (
+              <span className={`text-xs font-medium ${summary.allResolved ? "text-emerald-400" : "text-amber-300"}`}>
+                {summary.allResolved ? "✓ " : ""}
+                {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {summary.readyCount} ready · {summary.expenseCount} expense
+                {summary.expenseCount === 1 ? "" : "s"} · {summary.allResolved ? "0 issues" : `${summary.needsAttentionCount} issue${summary.needsAttentionCount === 1 ? "" : "s"}`}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {!summary.allResolved && summary.needsAttentionCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => scrollToFirstIssue(combinedLines.filter((c) => c.outcome === "needs_attention").map((c) => ({ id: `classification-line-${c.line.lineKey}`, reason: "" })))}
+                className={secondaryButtonClassCompact}
+              >
+                Go to first issue
               </button>
-              {moreActionsOpen ? (
-                <div className="absolute right-0 z-20 mt-1 w-56 rounded-lg border border-zinc-700 bg-zinc-900 p-2 shadow-xl">
-                  <button
-                    type="button"
-                    onClick={() => setRerunConfirmOpen(true)}
-                    disabled={runningMatch}
-                    className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
-                  >
-                    {runningMatch ? "Matching…" : "Re-run Matching"}
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+            ) : null}
+            {!readOnly ? (
+              <div className="relative">
+                <button type="button" onClick={() => setMoreActionsOpen((v) => !v)} className={secondaryButtonClass}>
+                  More actions ▾
+                </button>
+                {moreActionsOpen ? (
+                  <div className="absolute right-0 z-20 mt-1 w-56 rounded-lg border border-zinc-700 bg-zinc-900 p-2 shadow-xl">
+                    <button
+                      type="button"
+                      onClick={() => setRerunConfirmOpen(true)}
+                      disabled={runningMatch}
+                      className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+                    >
+                      {runningMatch ? "Matching…" : "Re-run Matching"}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         </div>
         <div className={panelBodyClass}>
         <p className="text-sm text-zinc-400">Confirm each item match, purchase package, received quantity and destination.</p>
@@ -771,55 +958,49 @@ export function ItemsAndReceivingPanel({
           ) : null}
         </div>
 
-        {/* ============ BULK RECEIVING ACTIONS -- never mapping/units/conversions ============ */}
+        {/* ============ BULK RECEIVING ACTIONS -- a compact toolbar row,
+            never a large nested box -- still never touches mapping/
+            units/conversions. ============ */}
         {!readOnly ? (
-          <div className="mt-3 rounded-lg border border-zinc-700 bg-zinc-950/50 p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-200">Apply receiving details to multiple items</p>
-            <div className="mt-2 flex flex-wrap items-end gap-3">
-              <label className="flex flex-col gap-1 text-xs text-zinc-300">
-                Location
-                <select value={bulkLocationId} onChange={(e) => setBulkLocationId(e.target.value)} className="rounded-lg border border-zinc-600 bg-zinc-950 px-2 py-1.5 text-xs text-white">
-                  <option value="">{bulkLocationSummary.kind === "multiple" ? "Multiple locations" : "Select…"}</option>
-                  {locations.map((loc) => (
-                    <option key={loc.id} value={loc.id}>
-                      {loc.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                onClick={handleApplyLocationToAll}
-                disabled={!bulkLocationId}
-                title={!bulkLocationId ? "Choose a location above first" : undefined}
-                className="rounded-md border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 disabled:opacity-40"
-              >
-                Apply location to all inventory items
-              </button>
-              <label className="flex flex-col gap-1 text-xs text-zinc-300">
-                Condition
-                <select
-                  value={bulkConditionValue}
-                  onChange={(e) => setBulkConditionValue(e.target.value as ReceivingLineDraft["conditionStatus"])}
-                  className="rounded-lg border border-zinc-600 bg-zinc-950 px-2 py-1.5 text-xs text-white"
-                >
-                  {CONDITION_OPTIONS.map((c) => (
-                    <option key={c.value} value={c.value}>
-                      {c.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                onClick={handleApplyConditionToAll}
-                disabled={bulkEligibleForCondition === 0}
-                title={bulkEligibleForCondition === 0 ? "No lines have a received quantity entered yet" : undefined}
-                className="rounded-md border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-100 disabled:opacity-40"
-              >
-                Apply condition to all
-              </button>
-            </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-800 pt-3 text-xs text-zinc-400">
+            <span className="font-medium text-zinc-500">Apply to multiple:</span>
+            <select value={bulkLocationId} onChange={(e) => setBulkLocationId(e.target.value)} className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-white">
+              <option value="">{bulkLocationSummary.kind === "multiple" ? "Multiple locations" : "Location…"}</option>
+              {locations.map((loc) => (
+                <option key={loc.id} value={loc.id}>
+                  {loc.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handleApplyLocationToAll}
+              disabled={!bulkLocationId}
+              title={!bulkLocationId ? "Choose a location above first" : undefined}
+              className={secondaryButtonClassCompact}
+            >
+              Apply location
+            </button>
+            <select
+              value={bulkConditionValue}
+              onChange={(e) => setBulkConditionValue(e.target.value as ReceivingLineDraft["conditionStatus"])}
+              className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-white"
+            >
+              {CONDITION_OPTIONS.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handleApplyConditionToAll}
+              disabled={bulkEligibleForCondition === 0}
+              title={bulkEligibleForCondition === 0 ? "No lines have a received quantity entered yet" : undefined}
+              className={secondaryButtonClassCompact}
+            >
+              Apply condition
+            </button>
           </div>
         ) : null}
         </div>
@@ -828,7 +1009,7 @@ export function ItemsAndReceivingPanel({
       {/* ============ Work-queue table -- one aligned row per line ============ */}
       <div className={panelClass}>
         {filtered.length > 0 ? (
-          <div className="hidden border-b border-zinc-800 px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-zinc-500 sm:grid sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.3fr_84px_112px] sm:gap-3">
+          <div className="hidden border-b border-zinc-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 sm:grid sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.4fr_84px_112px] sm:gap-3">
             <span>Invoice line</span>
             <span>Item match</span>
             <span>Purchase package</span>
@@ -844,8 +1025,9 @@ export function ItemsAndReceivingPanel({
             outcome={outcome}
             line={line}
             receiving={receiving}
-            editingOpen={isEditingOpen(line.lineKey, outcome)}
-            onToggleEditing={() => toggleEditingOpen(line.lineKey)}
+            editingOpen={editingLineKey === line.lineKey}
+            onEditLine={() => handleEditLine(line.lineKey)}
+            onCloseEditor={() => handleCloseEditor(line.lineKey)}
             readOnly={readOnly}
             items={items}
             units={units}
@@ -861,7 +1043,6 @@ export function ItemsAndReceivingPanel({
             onReviewPackage={() => {
               setOverrideFormLineKey(line.lineKey);
               setPackageReviewLineKey(line.lineKey);
-              setToggledLineKeys((prev) => new Set(prev).add(line.lineKey));
             }}
             onNavigateToStep1={onNavigateToStep1}
             onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
@@ -873,17 +1054,23 @@ export function ItemsAndReceivingPanel({
             correctionDraft={correctingLineKey === line.lineKey ? correctionDraft : null}
             correctionPending={correctionPending}
             correctionError={correctingLineKey === line.lineKey ? correctionError : null}
-            onOpenCorrection={() => handleOpenCorrection(line.lineKey)}
             onCancelCorrection={() => {
               setCorrectingLineKey(null);
               setCorrectionDraft(null);
               setCorrectionError(null);
+              setEditingLineKey(null);
+              setReceivingDraftSnapshot(null);
+              focusRow(line.lineKey);
             }}
             onCorrectionChange={(patch) => setCorrectionDraft((prev) => (prev ? { ...prev, ...patch } : prev))}
             onSaveCorrection={handleSaveCorrection}
             onReceivingChange={(patch) => updateReceivingLine(line.lineKey, patch)}
             onReceivedQtyOrUnitChange={(patch) => updateReceivedQuantityOrUnit(line.lineKey, patch)}
             onInvoiceUnitChoice={(unit) => handleInvoiceUnitChoice(line.lineKey, unit)}
+            receivingSavePending={receivingSavePending}
+            receivingSaveError={editingLineKey === line.lineKey ? receivingSaveError : null}
+            onSaveReceivingDraft={() => handleSaveReceivingDraft(line.lineKey)}
+            onCancelReceivingDraft={() => handleCancelReceivingDraft(line.lineKey)}
             savedFlash={savedFlashLineKey === line.lineKey}
           />
         ))}
@@ -925,51 +1112,11 @@ export function ItemsAndReceivingPanel({
 }
 
 // ============================================================
-// Page-level completion panel
-// ============================================================
-
-function CompletionPanel({
-  summary,
-  onGoToFirstIssue,
-}: {
-  summary: ReturnType<typeof summarizeCombinedStep>;
-  onGoToFirstIssue: () => void;
-}) {
-  if (summary.totalLines === 0) return null;
-  const inventoryReady = summary.readyCount;
-
-  if (summary.allResolved) {
-    // "Complete," never "reviewed" -- readiness is a persisted fact (every
-    // line is either ready or a classified expense), but no "review" event
-    // is actually recorded here. One compact line, not a large box -- the
-    // work below is the thing that deserves the visual weight.
-    return (
-      <p className={inlineSuccessClass}>
-        ✓ {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {inventoryReady} inventory ready · {summary.expenseCount} expense
-        {summary.expenseCount === 1 ? "" : "s"} · 0 issues
-      </p>
-    );
-  }
-
-  return (
-    <div className={`${inlineWarningClass} flex flex-wrap items-center justify-between gap-3`}>
-      <span>
-        {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {inventoryReady} ready · {summary.expenseCount} expense
-        {summary.expenseCount === 1 ? "" : "s"} · {summary.needsAttentionCount} issue{summary.needsAttentionCount === 1 ? "" : "s"}
-      </span>
-      <button type="button" onClick={onGoToFirstIssue} className={secondaryButtonClassCompact}>
-        Go to first issue
-      </button>
-    </div>
-  );
-}
-
-// ============================================================
 // LineCard -- the visible verification checklist per line
 // ============================================================
 
 interface CorrectionDraft {
-  receiptLineId: string;
+  receiptLineIds: string[];
   receivedQuantity: string;
   receivedUnit: string;
   verifiedQuantity: string;
@@ -1000,18 +1147,8 @@ function ProvenanceLine({ provenance }: { provenance: ReturnType<typeof deriveLi
   );
 }
 
-function ChecklistPanel({ title, ok, warn, children }: { title: string; ok: boolean; warn?: boolean; children: React.ReactNode }) {
-  return (
-    <div className={`rounded-lg border p-3 ${ok ? "border-emerald-700 bg-emerald-950/10" : warn ? "border-red-700 bg-red-950/10" : "border-amber-600 bg-amber-950/10"}`}>
-      <p
-        className={`flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide ${ok ? "text-emerald-400" : warn ? "text-red-400" : "text-amber-400"}`}
-      >
-        <span aria-hidden>{ok ? "✓" : "!"}</span>
-        {title}
-      </p>
-      <div className="mt-1.5">{children}</div>
-    </div>
-  );
+function SectionStatusDot({ ok, warn }: { ok: boolean; warn?: boolean }) {
+  return <span aria-hidden className={`text-[11px] font-medium ${ok ? "text-emerald-400" : warn ? "text-red-400" : "text-zinc-600"}`}>{ok ? "✓" : warn ? "!" : ""}</span>;
 }
 
 function formatPurchasePackageDescription(line: LineClassificationRow): string {
@@ -1030,7 +1167,8 @@ function LineCard({
   line,
   receiving,
   editingOpen,
-  onToggleEditing,
+  onEditLine,
+  onCloseEditor,
   readOnly,
   items,
   units,
@@ -1051,13 +1189,16 @@ function LineCard({
   correctionDraft,
   correctionPending,
   correctionError,
-  onOpenCorrection,
   onCancelCorrection,
   onCorrectionChange,
   onSaveCorrection,
   onReceivingChange,
   onReceivedQtyOrUnitChange,
   onInvoiceUnitChoice,
+  receivingSavePending,
+  receivingSaveError,
+  onSaveReceivingDraft,
+  onCancelReceivingDraft,
   savedFlash,
 }: {
   id: string;
@@ -1065,7 +1206,8 @@ function LineCard({
   line: LineClassificationRow;
   receiving: ReceivingLineDraft | null;
   editingOpen: boolean;
-  onToggleEditing: () => void;
+  onEditLine: () => void;
+  onCloseEditor: () => void;
   readOnly?: boolean;
   items: InventoryItemSummary[];
   units: UnitSummary[];
@@ -1086,17 +1228,21 @@ function LineCard({
   correctionDraft: CorrectionDraft | null;
   correctionPending: boolean;
   correctionError: string | null;
-  onOpenCorrection: () => void;
   onCancelCorrection: () => void;
   onCorrectionChange: (patch: Partial<CorrectionDraft>) => void;
   onSaveCorrection: () => void;
   onReceivingChange: (patch: Partial<ReceivingLineDraft>) => void;
   onReceivedQtyOrUnitChange: (patch: { receivedQuantity?: string; receivedUnit?: string }) => void;
   onInvoiceUnitChoice: (unit: string) => void;
+  receivingSavePending: boolean;
+  receivingSaveError: string | null;
+  onSaveReceivingDraft: () => void;
+  onCancelReceivingDraft: () => void;
   savedFlash?: boolean;
 }) {
   const orderedQuantity = formatSourceQuantity(line);
   const provenance = deriveLineProvenance({ status: line.status, resolutionSource: line.resolutionSource, resolvedByName: line.resolvedByName, resolvedAt: line.resolvedAt });
+  const toggleLabel = readOnly ? (editingOpen ? "Hide details" : "View details") : editingOpen ? "Hide line" : "Edit line";
 
   // ============ EXPENSE -- a quiet, clearly-labeled row, never styled
   // like an incomplete inventory line ============
@@ -1110,11 +1256,9 @@ function LineCard({
           <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
           Expense
         </span>
-        {!readOnly ? (
-          <button type="button" onClick={onToggleEditing} className={secondaryButtonClassCompact}>
-            Edit details
-          </button>
-        ) : null}
+        <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
+          {toggleLabel}
+        </button>
       </div>
     );
   }
@@ -1134,15 +1278,13 @@ function LineCard({
               <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
               Expense — no stock
             </span>
-            {!readOnly ? (
-              <button type="button" onClick={onToggleEditing} className={secondaryButtonClassCompact}>
-                Hide details
-              </button>
-            ) : null}
+            <button type="button" onClick={onCloseEditor} className={secondaryButtonClassCompact}>
+              {toggleLabel}
+            </button>
           </div>
         </div>
         {savedFlash ? <p className="mt-1 text-xs font-semibold text-emerald-400">✓ Saved</p> : null}
-        <div className={`mt-3 ${inlineNeutralClass} !border-emerald-800/60`}>
+        <div className={`mt-3 ${inlineNeutralClass}`}>
           <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-400">
             <span aria-hidden>✓</span> Expense classified
           </p>
@@ -1152,10 +1294,10 @@ function LineCard({
           <p className="mt-1 text-xs font-semibold text-zinc-300">Will not add inventory</p>
           <ProvenanceLine provenance={provenance} />
         </div>
-        {editingOpen && !readOnly ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-700 pt-3">
+        {!readOnly ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-800 pt-3">
             <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className={secondaryButtonClassCompact}>
-              Choose Different Item
+              Change item match
             </button>
             {overrideFormOpen ? (
               <div className="w-full">
@@ -1192,8 +1334,8 @@ function LineCard({
     });
     // FIXED_CONVERSION's block form is 3 lines (Invoice/Conversion/Inventory
     // received) meant for the expanded checklist -- the compact row instead
-    // collapses it to the same "X UNIT -> Y UNIT" shape as the inline
-    // (SAME_UNIT) case, e.g. "2 PACK -> 20 LB", so this column always reads
+    // collapses it to the same "X UNIT → Y UNIT" shape as the inline
+    // (SAME_UNIT) case, e.g. "2 PACK → 20 LB", so this column always reads
     // as a package conversion rather than duplicating the Receiving column.
     const packageLine = packageSummary
       ? packageSummary.mode === "inline"
@@ -1202,7 +1344,7 @@ function LineCard({
             line.packageQuantity !== null &&
             line.effectiveConversionFactor &&
             line.inventoryBaseUnitCode
-          ? `${line.packageQuantity} ${line.effectivePurchaseUnitCode} -> ${line.packageQuantity * line.effectiveConversionFactor} ${line.inventoryBaseUnitCode}`
+          ? `${line.packageQuantity} ${line.effectivePurchaseUnitCode} → ${line.packageQuantity * line.effectiveConversionFactor} ${line.inventoryBaseUnitCode}`
           : (packageSummary.lines[packageSummary.lines.length - 1] ?? packageSummary.lines[0])
       : "—";
     const locationName = receiving ? (locations.find((l) => l.id === receiving.locationId)?.name ?? "—") : "—";
@@ -1218,10 +1360,9 @@ function LineCard({
         : receiving
           ? `${receiving.receivedQuantity} ${receiving.receivedUnit}`
           : null;
-    const receivingLine = receivedQuantityDisplay ? `${receivedQuantityDisplay} · ${locationName} · ${conditionLabel}` : "—";
 
     return (
-      <div id={id} className="grid grid-cols-1 gap-1.5 border-b border-zinc-800 px-3 py-2.5 last:border-0 hover:bg-zinc-800/20 sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.3fr_84px_112px] sm:items-center sm:gap-3">
+      <div id={id} tabIndex={-1} className="grid grid-cols-1 gap-1.5 border-b border-zinc-800 px-3 py-2.5 last:border-0 hover:bg-zinc-800/20 focus:outline-none sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.4fr_84px_112px] sm:items-start sm:gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
           <p className="truncate text-xs text-zinc-500">{line.vendorSku ? `SKU ${line.vendorSku}` : "—"}{orderedQuantity ? ` · ${orderedQuantity}` : ""}</p>
@@ -1239,30 +1380,92 @@ function LineCard({
           <span className="sm:hidden">Package: </span>
           {packageLine}
         </p>
-        <p className="truncate text-sm text-zinc-300">
+        <div className="min-w-0 text-sm text-zinc-300">
           <span className="sm:hidden">Receiving: </span>
-          {receivingLine}
-        </p>
+          {receivedQuantityDisplay ? (
+            <>
+              <p className="truncate">
+                {receivedQuantityDisplay} · {conditionLabel}
+              </p>
+              <p className="truncate text-xs text-zinc-500">{locationName}</p>
+            </>
+          ) : (
+            "—"
+          )}
+        </div>
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
           <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
           Ready
         </span>
         <div className="flex items-center gap-2">
           {savedFlash ? <span className="text-[11px] font-medium text-emerald-400">Saved</span> : null}
-          {!readOnly ? (
-            <button type="button" onClick={onToggleEditing} className={`${secondaryButtonClassCompact}`}>
-              Edit details
-            </button>
-          ) : null}
+          <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
+            {toggleLabel}
+          </button>
         </div>
       </div>
     );
   }
 
+  // ============ Needs-attention compact row -- the specific blocking
+  // check surfaces inline (never a generic "needs attention" banner and
+  // never all three panels auto-expanded, which used to let more than
+  // one line sit in "edit mode" at a time). ============
+  if (outcome === "needs_attention" && !editingOpen) {
+    const issue = describeLineIssue({
+      status: line.status,
+      disposition: line.disposition,
+      isNewItemProposal: line.aiSuggestedIsNewProposal,
+      hasPackageMismatch: line.hasPackageMismatch,
+      receiving,
+    });
+    return (
+      <div
+        id={id}
+        tabIndex={-1}
+        className="grid grid-cols-1 gap-1.5 border-b border-l-2 border-zinc-800 border-l-amber-500 bg-amber-950/5 px-3 py-2.5 last:border-b-0 hover:bg-amber-950/10 focus:outline-none sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.4fr_84px_112px] sm:items-start sm:gap-3"
+      >
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+          <p className="truncate text-xs text-zinc-500">{line.vendorSku ? `SKU ${line.vendorSku}` : "—"}{orderedQuantity ? ` · ${orderedQuantity}` : ""}</p>
+          {line.changedInAmendment ? (
+            <div className="mt-1">
+              <AmendmentChangedBadge previous={line.previousOrderedSummary} />
+            </div>
+          ) : null}
+        </div>
+        <p className={`truncate text-sm ${issue?.section === "item_match" ? "font-medium text-amber-300" : "text-zinc-500"}`}>
+          <span className="sm:hidden">Match: </span>
+          {issue?.section === "item_match" ? issue.text : (line.inventoryItemName ?? "—")}
+        </p>
+        <p className={`truncate text-sm ${issue?.section === "package" ? "font-medium text-amber-300" : "text-zinc-500"}`}>
+          <span className="sm:hidden">Package: </span>
+          {issue?.section === "package" ? issue.text : "—"}
+        </p>
+        <p className={`truncate text-sm ${issue?.section === "receiving" ? "font-medium text-amber-300" : "text-zinc-500"}`}>
+          <span className="sm:hidden">Receiving: </span>
+          {issue?.section === "receiving" ? issue.text : "—"}
+        </p>
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-400">
+          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+          Needs attention
+        </span>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
+            {toggleLabel}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const showPackageAndReceiving = itemMatchOk && line.disposition === "INVENTORY";
+  const canEditReceivingHere = !readOnly && line.disposition === "INVENTORY";
+
   return (
-    <div id={id} className={`border-b border-zinc-800 p-3.5 last:border-0 ${isComplete ? "" : "border-l-2 border-l-amber-500 bg-amber-950/10"}`}>
-      {/* ============ Header ============ */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <div id={id} tabIndex={-1} className={`border-b border-zinc-800 last:border-0 focus:outline-none ${isComplete ? "" : "border-l-2 border-l-amber-500 bg-amber-950/5"}`}>
+      {/* ============ Row header -- stays visible in edit mode too ============ */}
+      <div className="flex flex-wrap items-start justify-between gap-3 px-3.5 pt-3.5">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-zinc-100">{line.description ?? "—"}</p>
           <p className="mt-0.5 text-xs text-zinc-400">
@@ -1275,7 +1478,7 @@ function LineCard({
             </div>
           ) : null}
         </div>
-        <div className="flex shrink-0 flex-col items-end gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {isComplete ? (
             <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
               <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
@@ -1287,162 +1490,143 @@ function LineCard({
               Needs attention
             </span>
           )}
-          {!readOnly ? (
-            <button type="button" onClick={onToggleEditing} className={secondaryButtonClassCompact}>
-              {editingOpen ? "Hide details" : "Edit details"}
-            </button>
-          ) : null}
+          <button type="button" onClick={onCloseEditor} className={secondaryButtonClassCompact}>
+            {toggleLabel}
+          </button>
         </div>
       </div>
 
-      {savedFlash ? <p className="mt-1 text-xs font-semibold text-emerald-400">✓ Saved</p> : null}
+      {savedFlash ? <p className="px-3.5 pt-1 text-xs font-semibold text-emerald-400">✓ Saved</p> : null}
 
-      {/* ============ Always-visible three-panel checklist ============ */}
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {/* A. Item Match */}
-        <ChecklistPanel title="Item Match" ok={itemMatchOk}>
+      {/* ============ ONE neutral work surface, three sections divided
+          by subtle dividers -- never large colored cards. ============ */}
+      <div className="mx-3.5 my-3 grid grid-cols-1 divide-y divide-zinc-800 rounded-lg border border-zinc-700 bg-zinc-950/40 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+        {/* A. Item match */}
+        <div className="flex flex-col gap-2 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Item match</p>
+            <SectionStatusDot ok={itemMatchOk} />
+          </div>
           {itemMatchOk ? (
             line.disposition === "INVENTORY" ? (
               <>
-                <p className="text-sm font-semibold text-white">{line.inventoryItemName ?? "—"}</p>
-                <p className="mt-0.5 text-xs text-zinc-300">
+                <p className="text-sm font-semibold text-zinc-100">{line.inventoryItemName ?? "—"}</p>
+                <p className="text-xs text-zinc-400">
                   {line.inventoryItemNumber ? `${line.inventoryItemNumber} · ` : ""}
                   {line.inventoryCategoryName ?? "No category"}
                 </p>
-                <p className="text-xs text-zinc-300">Tracked in: {line.inventoryBaseUnitCode ?? "—"}</p>
+                <p className="text-xs text-zinc-400">Base inventory unit: {line.inventoryBaseUnitCode ?? "—"}</p>
                 <ProvenanceLine provenance={provenance} />
               </>
             ) : (
-              <p className="text-xs text-zinc-300">Classified as an expense -- see the panel below.</p>
+              <p className="text-xs text-zinc-400">Classified as an expense.</p>
             )
           ) : (
             <>
               <p className="text-sm font-semibold text-amber-200">{line.aiSuggestedIsNewProposal ? "New item needs verification" : "No item match yet"}</p>
               {line.aiSuggestedInventoryItemId && !line.aiSuggestedIsNewProposal ? (
-                <p className="mt-1 text-xs text-zinc-300">
+                <p className="text-xs text-zinc-400">
                   Suggested: {line.aiSuggestedInventoryItemName}
                   {line.aiConfidence !== null ? ` (${Math.round(line.aiConfidence * 100)}%)` : ""}
                 </p>
               ) : null}
-              {!readOnly ? (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {line.aiSuggestedIsNewProposal ? (
-                    <button type="button" onClick={onReviewNewItem} className="rounded-md bg-emerald-500 px-2.5 py-1 text-[11px] font-semibold text-zinc-950">
-                      Review new item →
-                    </button>
-                  ) : (
-                    <>
-                      {line.aiSuggestedInventoryItemId ? (
-                        <button
-                          type="button"
-                          disabled={actionPending}
-                          onClick={() => onApproveExisting(line.aiSuggestedInventoryItemId!)}
-                          className="rounded-md border border-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
-                        >
-                          {actionPending ? "Confirming…" : "Confirm item"}
-                        </button>
-                      ) : null}
-                      <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
-                        Change match
-                      </button>
-                      <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
-                        {actionPending ? "Marking…" : "Mark as expense"}
-                      </button>
-                    </>
-                  )}
-                </div>
-              ) : null}
-              {overrideFormOpen ? (
-                <div className="mt-2">
-                  <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} />
-                </div>
-              ) : null}
             </>
           )}
-        </ChecklistPanel>
-
-        {/* B. Purchase Package */}
-        <ChecklistPanel title="Purchase Package" ok={packageOk} warn={itemMatchOk && line.disposition === "INVENTORY" && line.hasPackageMismatch}>
-          {!itemMatchOk || line.disposition !== "INVENTORY" ? (
-            <p className="text-xs text-zinc-300">Waiting on item match.</p>
-          ) : line.hasPackageMismatch ? (
-            <>
-              <p className="text-sm font-semibold text-red-200">Purchase package needs review</p>
-              <p className="mt-1 text-xs text-zinc-200">
-                Invoice unit: <span className="font-semibold text-white">{line.resolvedInvoiceUnitCode}</span>
-              </p>
-              <p className="text-xs text-zinc-200">
-                Configured unit: <span className="font-semibold text-white">{formatPurchasePackageDescription(line)}</span>
-              </p>
-              {!readOnly ? (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {onNavigateToStep1 ? (
-                    <button type="button" onClick={onNavigateToStep1} className="rounded-md border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
-                      Correct invoice unit
+          {!readOnly ? (
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {!itemMatchOk && line.aiSuggestedIsNewProposal ? (
+                <button type="button" onClick={onReviewNewItem} className="rounded-md bg-emerald-500 px-2.5 py-1 text-[11px] font-semibold text-zinc-950">
+                  Review new item →
+                </button>
+              ) : (
+                <>
+                  {!itemMatchOk && line.aiSuggestedInventoryItemId ? (
+                    <button
+                      type="button"
+                      disabled={actionPending}
+                      onClick={() => onApproveExisting(line.aiSuggestedInventoryItemId!)}
+                      className="rounded-md border border-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
+                    >
+                      {actionPending ? "Confirming…" : "Confirm item"}
                     </button>
                   ) : null}
-                  <button type="button" onClick={onReviewPackage} className="rounded-md border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
-                    Review purchase package
+                  <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
+                    Change item match
                   </button>
-                  <button type="button" onClick={onToggleEditing} className="rounded-md border border-red-600 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-900/30">
-                    Return to item verification
-                  </button>
-                </div>
+                  {line.disposition === "INVENTORY" ? (
+                    <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
+                      {actionPending ? "Marking…" : "Mark as expense"}
+                    </button>
+                  ) : null}
+                </>
+              )}
+            </div>
+          ) : null}
+          {overrideFormOpen && !reviewingPackage ? (
+            <div className="mt-1">
+              <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} />
+            </div>
+          ) : null}
+        </div>
+
+        {/* B. Purchase package */}
+        <div className="flex flex-col gap-2 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Purchase package</p>
+            <SectionStatusDot ok={packageOk} warn={itemMatchOk && line.disposition === "INVENTORY" && line.hasPackageMismatch} />
+          </div>
+          {!itemMatchOk || line.disposition !== "INVENTORY" ? (
+            <p className="text-xs text-zinc-400">Waiting on item match.</p>
+          ) : line.hasPackageMismatch ? (
+            <>
+              <p className="text-sm font-semibold text-red-300">Purchase package needs review</p>
+              <p className="text-xs text-zinc-300">
+                Invoice unit: <span className="font-semibold text-white">{line.resolvedInvoiceUnitCode}</span>
+              </p>
+              <p className="text-xs text-zinc-300">
+                Configured unit: <span className="font-semibold text-white">{formatPurchasePackageDescription(line)}</span>
+              </p>
+              {!readOnly && onNavigateToStep1 ? (
+                <button type="button" onClick={onNavigateToStep1} className="self-start text-[11px] font-medium text-red-300 underline underline-offset-2 hover:text-red-200">
+                  Correct invoice unit
+                </button>
               ) : null}
             </>
           ) : (
             <PackageChecklistBody line={line} />
           )}
-          {editingOpen && itemMatchOk && line.disposition === "INVENTORY" && !readOnly ? (
-            <div className="mt-2 border-t border-zinc-700 pt-2">
-              <button type="button" onClick={onToggleOverrideForm} className="text-[11px] font-medium text-zinc-300 underline underline-offset-2 hover:text-zinc-100">
-                Review purchase package
-              </button>
-              {overrideFormOpen ? (
-                <div className="mt-2">
-                  <ExistingItemOverrideForm
-                    items={items}
-                    units={units}
-                    onCancel={onToggleOverrideForm}
-                    onConfirm={onApproveExisting}
-                    defaultItemId={reviewingPackage ? (line.inventoryItemId ?? undefined) : undefined}
-                    defaultRegisteringPackage={reviewingPackage}
-                  />
-                </div>
-              ) : null}
+          {!readOnly && showPackageAndReceiving ? (
+            <button type="button" onClick={onReviewPackage} className="mt-1 self-start text-[11px] font-medium text-zinc-300 underline underline-offset-2 hover:text-zinc-100">
+              Edit purchase package
+            </button>
+          ) : null}
+          {overrideFormOpen && reviewingPackage ? (
+            <div className="mt-1">
+              <ExistingItemOverrideForm
+                items={items}
+                units={units}
+                onCancel={onToggleOverrideForm}
+                onConfirm={onApproveExisting}
+                defaultItemId={line.inventoryItemId ?? undefined}
+                defaultRegisteringPackage
+              />
             </div>
           ) : null}
-        </ChecklistPanel>
+        </div>
 
         {/* C. Receiving */}
-        <ChecklistPanel title="Receiving" ok={receivingReadyOk}>
-          {!itemMatchOk || line.disposition !== "INVENTORY" ? (
-            <p className="text-xs text-zinc-300">Waiting on item match.</p>
-          ) : receiving ? (
-            <ReceivingChecklistBody receiving={receiving} locations={locations} alreadyReceived={alreadyReceived} />
-          ) : null}
-        </ChecklistPanel>
-      </div>
-
-      {priceComparison?.available ? (
-        <p className="mt-2 text-[11px] leading-tight text-zinc-300">
-          <span className="text-zinc-200">
-            ${priceComparison.currentUnitCost.toFixed(2)} / {priceComparison.baseUnitCode}
-          </span>
-          <span className={`ml-1.5 font-medium ${priceChangeTone(priceComparison.direction).colorClass}`}>
-            {priceChangeTone(priceComparison.direction).glyph} {Math.abs(priceComparison.deltaPct).toFixed(1)}%
-          </span>
-          <span className="ml-1 text-zinc-400">vs previous purchase</span>
-        </p>
-      ) : null}
-
-      {/* ============ Editing controls -- collapsed unless editingOpen ============ */}
-      {editingOpen && itemMatchOk && line.disposition === "INVENTORY" ? (
-        <div className="mt-3 flex flex-col gap-2 border-t border-zinc-700 pt-3">
-          {alreadyReceived ? (
+        <div className="flex flex-col gap-2 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Receiving</p>
+            <SectionStatusDot ok={receivingReadyOk} />
+          </div>
+          {!showPackageAndReceiving ? (
+            <p className="text-xs text-zinc-400">Waiting on item match.</p>
+          ) : !canEditReceivingHere ? (
+            receiving ? <ReceivingChecklistBody receiving={receiving} locations={locations} alreadyReceived={alreadyReceived} /> : <p className="text-xs text-zinc-400">Not yet received.</p>
+          ) : alreadyReceived ? (
             correcting && correctionDraft ? (
-              <div className="flex flex-col gap-2">
-                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-300">Correct receiving details</p>
+              <>
                 <ReceivingFields
                   requiresVerifiedMeasurement={receiving?.info.requiresVerifiedMeasurement ?? false}
                   baseUnitCode={receiving?.info.baseUnitCode ?? null}
@@ -1453,7 +1637,6 @@ function LineCard({
                   locationId={correctionDraft.locationId}
                   conditionStatus={correctionDraft.conditionStatus}
                   locations={locations}
-                  disabled={readOnly}
                   onChange={(patch) => onCorrectionChange(patch)}
                   onReceivedQtyOrUnitChange={(patch) => {
                     if (!receiving) return onCorrectionChange(patch);
@@ -1464,24 +1647,22 @@ function LineCard({
                   }}
                 />
                 {correctionError ? <p className="text-xs text-red-300">{correctionError}</p> : null}
-                <div className="flex items-center gap-3">
-                  <button type="button" onClick={onSaveCorrection} disabled={correctionPending} className="rounded-md bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40">
-                    {correctionPending ? "Saving…" : "Save correction"}
-                  </button>
-                  <button type="button" onClick={onCancelCorrection} className="text-xs text-zinc-300 underline underline-offset-2">
+                <div className="mt-1 flex items-center gap-2">
+                  <button type="button" onClick={onCancelCorrection} disabled={correctionPending} className="rounded-md border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-200 disabled:opacity-40">
                     Cancel
                   </button>
+                  <button type="button" onClick={onSaveCorrection} disabled={correctionPending} className="rounded-md bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40">
+                    {correctionPending ? "Saving…" : "Save changes"}
+                  </button>
                 </div>
-              </div>
+              </>
             ) : (
-              <button type="button" onClick={onOpenCorrection} className="self-start rounded-md border border-zinc-500 px-3 py-1.5 text-xs font-semibold text-zinc-100">
-                Correct receiving details
-              </button>
+              <p className="text-xs text-zinc-400">Loading…</p>
             )
           ) : receiving ? (
-            <div className="flex flex-col gap-2">
-              {!readOnly && needsInvoiceUnitResolution(receiving) ? (
-                <div className="flex flex-col gap-2 rounded-lg border border-amber-700 bg-amber-950/20 p-3">
+            <>
+              {needsInvoiceUnitResolution(receiving) ? (
+                <div className="flex flex-col gap-2 rounded-lg border border-amber-700 bg-amber-950/20 p-2.5">
                   {receiving.invoiceUnitConflict ? (
                     <p className="text-xs text-amber-200">
                       Invoice says: <span className="font-semibold">{receiving.invoiceUnitConflict.invoiceUnit}</span> · Previously remembered:{" "}
@@ -1517,14 +1698,42 @@ function LineCard({
                 locationId={receiving.locationId}
                 conditionStatus={receiving.conditionStatus}
                 locations={locations}
-                disabled={readOnly}
                 onChange={onReceivingChange}
                 onReceivedQtyOrUnitChange={onReceivedQtyOrUnitChange}
               />
-            </div>
+              {receivingSaveError ? <p className="text-xs text-red-300">{receivingSaveError}</p> : null}
+              <div className="mt-1 flex items-center gap-2">
+                <button type="button" onClick={onCancelReceivingDraft} disabled={receivingSavePending} className="rounded-md border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-200 disabled:opacity-40">
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={onSaveReceivingDraft}
+                  disabled={receivingSavePending || receiving.receivedQuantity.trim() === ""}
+                  title={receiving.receivedQuantity.trim() === "" ? "Enter a received quantity to save" : undefined}
+                  className="rounded-md bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40"
+                >
+                  {receivingSavePending ? "Saving…" : "Save changes"}
+                </button>
+              </div>
+            </>
           ) : null}
         </div>
-      ) : null}
+      </div>
+
+      {priceComparison?.available ? (
+        <p className="px-3.5 pb-3.5 text-[11px] leading-tight text-zinc-400">
+          <span className="text-zinc-300">
+            ${priceComparison.currentUnitCost.toFixed(2)} / {priceComparison.baseUnitCode}
+          </span>
+          <span className={`ml-1.5 font-medium ${priceChangeTone(priceComparison.direction).colorClass}`}>
+            {priceChangeTone(priceComparison.direction).glyph} {Math.abs(priceComparison.deltaPct).toFixed(1)}%
+          </span>
+          <span className="ml-1 text-zinc-500">vs previous purchase</span>
+        </p>
+      ) : (
+        <div className="pb-3.5" />
+      )}
     </div>
   );
 }

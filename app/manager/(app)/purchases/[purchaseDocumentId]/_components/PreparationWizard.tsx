@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { savePurchaseDocumentDraft, submitPurchaseDocumentForVerification, getPurchaseDocumentPreparationStatus } from "@/app/actions/purchaseDocuments";
 import { getPurchaseDocumentLineClassifications } from "@/app/actions/itemClassification";
 import { reconcileStaleUnitFlags, buildResolvedUnitNotes, type ResolvedUnitNote } from "@/app/lib/purchaseDocuments/lineUnitResolution";
+import { useCompactAskGansevoort } from "@/app/components/manager/askGansevoort/AskGansevoortDensityContext";
 import { Stepper } from "./Stepper";
 import { Step1ReviewInvoice, emptyStep1Line } from "./Step1ReviewInvoice";
 import { ItemsAndReceivingPanel } from "./ItemsAndReceivingPanel";
@@ -98,6 +99,7 @@ export function PreparationWizard({
   preparedAt: string | null;
   onSubmitted: () => void;
 }) {
+  useCompactAskGansevoort();
   const [header, setHeader] = useState<PurchaseDocumentHeaderDraft>(initialHeader);
   const [lines, setLines] = useState<PurchaseDocumentLine[]>(initialLines);
   // What's actually persisted as of the last successful save -- compared
@@ -314,6 +316,7 @@ export function PreparationWizard({
         furthestReachableStep={furthestReachableStep}
         onNavigate={setRequestedStep}
         stepStatusText={step2StatusText ? { 2: step2StatusText } : undefined}
+        readyToContinue={{ 1: step1Complete, 2: (step2Progress?.needsAttentionCount ?? 0) === 0 && (step2Progress?.totalLines ?? 0) > 0 }}
       />
 
       {activeStep === 1 ? (
