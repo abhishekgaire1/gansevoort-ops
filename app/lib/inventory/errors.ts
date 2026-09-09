@@ -71,6 +71,19 @@ export const INVENTORY_SQLSTATE = {
    * purchase-only unit, or a unit deactivated as a usage slot since the
    * kiosk loaded it. Never trust the client's own unit choice alone. */
   KIOSK_USAGE_UNIT_NOT_AUTHORIZED: "GA066",
+  /** record_inventory_correction / correct_receipt_package_factor
+   * (20260811100141/100142) -- an adjustment mode/quantity combination or
+   * a package-version's conversion factor was invalid (null/zero/
+   * negative/NaN, or a measured-receiving package used where a fixed
+   * conversion is required). Same SQLSTATE as the Admin domain's
+   * INVALID_CONVERSION_FACTOR (app/lib/admin/errors.ts) -- one code, one
+   * meaning, reused across domains per this schema's existing convention. */
+  INVALID_CORRECTION_INPUT: "GA079",
+  /** correct_receipt_package_factor (20260811100142) -- a referenced
+   * posting line, package version, or app user does not belong to the
+   * caller's organization. Same SQLSTATE as the Admin domain's
+   * CROSS_ORGANIZATION_REFERENCE. */
+  CROSS_ORGANIZATION_REFERENCE: "GA081",
 } as const;
 
 export interface InventoryPostingBlocker {
@@ -186,6 +199,26 @@ export class KioskUsageUnitNotAuthorizedError extends Error {
   }
 }
 
+/** record_inventory_correction / correct_receipt_package_factor refused:
+ * an adjustment mode/quantity combination or a package-version's
+ * conversion factor was invalid. */
+export class InvalidCorrectionInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidCorrectionInputError";
+  }
+}
+
+/** correct_receipt_package_factor refused: a referenced posting line,
+ * package version, or app user does not belong to the caller's
+ * organization. */
+export class CrossOrganizationReferenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CrossOrganizationReferenceError";
+  }
+}
+
 /** post_purchase_document_inventory refused: this document is one
  * revision in an amendment lineage (revision_group_id) where another
  * revision already posted inventory -- fix for a confirmed defect where
@@ -226,6 +259,12 @@ export function mapInventoryRpcError(error: { code?: string; message: string; de
   }
   if (error.code === INVENTORY_SQLSTATE.KIOSK_USAGE_UNIT_NOT_AUTHORIZED) {
     return new KioskUsageUnitNotAuthorizedError(error.message);
+  }
+  if (error.code === INVENTORY_SQLSTATE.INVALID_CORRECTION_INPUT) {
+    return new InvalidCorrectionInputError(error.message);
+  }
+  if (error.code === INVENTORY_SQLSTATE.CROSS_ORGANIZATION_REFERENCE) {
+    return new CrossOrganizationReferenceError(error.message);
   }
   return new Error(error.message);
 }

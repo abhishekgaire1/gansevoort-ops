@@ -539,7 +539,46 @@ export async function lookupItemPurchaseCost(
   const baseUnitCode = (unitRow?.code as string | undefined) ?? "unit";
   const item: ResolvedItem = { id: resolved.id, name: resolved.name, baseUnitCode };
 
-  const discovery = await discoverVendorIds(ctx.supabase, ctx.organizationId, resolved.id);
+  return computeCostForResolvedItem(ctx, item, windowDays);
+}
+
+/**
+ * Item-workspace / inventory-correction entry point (Safe editing of
+ * confirmed items) -- the item id is already known (no fuzzy name
+ * resolution needed), so this skips resolveItemByName entirely and
+ * resolves the item directly by id before running the IDENTICAL
+ * discovery/completeness/revision-safety pipeline as lookupItemPurchaseCost
+ * above (computeCostForResolvedItem), never a separate, looser
+ * calculation. Used ONLY for this feature's valuation-impact previews
+ * (Adjust Inventory, receipt-package-factor correction, the item
+ * overview's "Current inventory value" display) -- same "operational
+ * estimate, not accounting valuation" posture as everywhere else this
+ * module is used.
+ */
+export async function lookupItemPurchaseCostById(
+  ctx: ItemPurchaseCostContext,
+  itemId: string,
+  windowDays: 7 | 30 | 90 = 30
+): Promise<ItemPurchaseCostLookup> {
+  const { data: itemRow } = await ctx.supabase
+    .from("inventory_items")
+    .select("id, name, base_unit_id")
+    .eq("id", itemId)
+    .eq("organization_id", ctx.organizationId)
+    .maybeSingle();
+  const row = itemRow as { id: string; name: string; base_unit_id: string } | null;
+  if (!row) return { status: "not_found" };
+
+  const { data: unitRow } = await ctx.supabase.from("units").select("code").eq("id", row.base_unit_id).maybeSingle();
+  const baseUnitCode = (unitRow?.code as string | undefined) ?? "unit";
+  const item: ResolvedItem = { id: row.id, name: row.name, baseUnitCode };
+
+  return computeCostForResolvedItem(ctx, item, windowDays);
+}
+
+async function computeCostForResolvedItem(ctx: ItemPurchaseCostContext, item: ResolvedItem, windowDays: 7 | 30 | 90): Promise<ItemPurchaseCostLookup> {
+  const baseUnitCode = item.baseUnitCode;
+  const discovery = await discoverVendorIds(ctx.supabase, ctx.organizationId, item.id);
   if (discovery.status === "page_error") {
     return {
       status: "incomplete",
@@ -564,7 +603,7 @@ export async function lookupItemPurchaseCost(
   const vendorIdsAll = discovery.vendorIds;
   if (vendorIdsAll.length === 0) return { status: "no_verified_cost", item };
 
-  const legacyUnitConfigByCode = await fetchLegacyItemUnitConfigByCode(ctx.supabase, resolved.id);
+  const legacyUnitConfigByCode = await fetchLegacyItemUnitConfigByCode(ctx.supabase, item.id);
 
   const windowStart = new Date(ctx.now);
   windowStart.setUTCDate(windowStart.getUTCDate() - windowDays);
@@ -579,10 +618,10 @@ export async function lookupItemPurchaseCost(
       ctx.supabase.rpc("get_inventory_item_price_history", {
         p_organization_id: ctx.organizationId,
         p_vendor_id: vendorId,
-        p_inventory_item_ids: [resolved.id],
+        p_inventory_item_ids: [item.id],
         p_limit_per_item: AGGREGATE_HISTORY_LIMIT_PER_VENDOR,
       }),
-      fetchVendorPackageVersions(ctx.supabase, ctx.organizationId, resolved.id, vendorId),
+      fetchVendorPackageVersions(ctx.supabase, ctx.organizationId, item.id, vendorId),
     ]);
     vendorPackageVersionsByVendorId.set(vendorId, versions);
     const vendorRows = (data ?? []) as PriceHistoryRow[];

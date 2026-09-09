@@ -1,6 +1,6 @@
 "use server";
 
-import { requireAdmin } from "@/app/lib/auth/managerAuth";
+import { requireAdmin, requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { mapItemMasterRpcError, UsageUnitStateError, InvalidUsageUnitConfigurationError } from "@/app/lib/itemMaster/errors";
 
@@ -39,8 +39,12 @@ interface UsageUnitRow {
   inventory_item_units: { unit_id: string; requires_actual_measurement: boolean; units: { code: string; name: string } | { code: string; name: string }[] | null } | null;
 }
 
+/** Read-only, so Manager-or-Admin (Safe editing of confirmed items,
+ * tiered-permissions decision) -- a plain Manager viewing the item
+ * workspace needs to see kiosk usage units even though only an Admin can
+ * change them (the three mutation actions below stay requireAdmin()). */
 export async function listItemUsageUnitsAction(itemId: string): Promise<ListItemUsageUnitsResult> {
-  const auth = await requireAdmin();
+  const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();

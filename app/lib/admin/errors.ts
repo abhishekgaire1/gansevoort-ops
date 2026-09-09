@@ -39,6 +39,11 @@ export const ADMIN_SQLSTATE = {
    * manager_set_employee_station_assignments -- one or more requested
    * station ids are not active stations in the caller's organization. */
   INVALID_STATION_ASSIGNMENT: "GA074",
+  /** Safe editing of confirmed items (20260811100140/100141/100142) -- a
+   * package/adjustment factor, receiving-behavior combination, or unit
+   * code was invalid where a specific value is required (null/zero/
+   * negative/NaN, or a mode/behavior mismatch). */
+  INVALID_CONVERSION_FACTOR: "GA079",
 } as const;
 
 /** One error shape for every Admin mutation -- `code` lets the action
@@ -114,6 +119,8 @@ export function mapAdminRpcError(error: { code?: string; message: string; detail
       return new AdminActionError("CATEGORY_HAS_DEPENDENTS", error.message, error.details ?? undefined);
     case ADMIN_SQLSTATE.INVALID_STATION_ASSIGNMENT:
       return new AdminActionError("INVALID_STATION_ASSIGNMENT", "One or more selected stations are not active. Refresh and try again.");
+    case ADMIN_SQLSTATE.INVALID_CONVERSION_FACTOR:
+      return new AdminActionError("INVALID_CONVERSION_FACTOR", "Check the unit, receiving behavior, and conversion factor and try again.");
     default:
       return new AdminActionError("UNKNOWN", "Unable to save. Try again.");
   }

@@ -17,6 +17,8 @@ import { mapAdminRpcError } from "@/app/lib/admin/errors";
 
 export type ItemStatus = "active" | "inactive";
 
+export type AdminItemSort = "name" | "item_number" | "category" | "updated";
+
 export interface AdminItemSummary {
   itemId: string;
   itemNumber: string;
@@ -24,6 +26,7 @@ export interface AdminItemSummary {
   categoryName: string | null;
   baseUnitCode: string | null;
   status: ItemStatus;
+  updatedAt: string;
 }
 
 interface AdminItemRow {
@@ -33,6 +36,7 @@ interface AdminItemRow {
   out_category_name: string | null;
   out_base_unit_code: string | null;
   out_status: ItemStatus;
+  out_updated_at: string;
 }
 
 function mapItemRow(row: AdminItemRow): AdminItemSummary {
@@ -43,6 +47,7 @@ function mapItemRow(row: AdminItemRow): AdminItemSummary {
     categoryName: row.out_category_name,
     baseUnitCode: row.out_base_unit_code,
     status: row.out_status,
+    updatedAt: row.out_updated_at,
   };
 }
 
@@ -52,8 +57,15 @@ export interface ListAdminItemsInput {
   categoryId?: string | null;
   baseUnitCode?: string | null;
   status?: ItemStatus | null;
+  sort?: AdminItemSort | null;
 }
 
+/** Admin Item Master is deliberately INVENTORY-catalog-only (spend/
+ * expense-classification rows are a different domain concept, never
+ * shown here -- see tests/adminItemMaster.rpc.test.ts's dedicated
+ * "Non-inventory / pending-review items never appear in the Admin Item
+ * Master surfaces" coverage). There is no disposition filter parameter:
+ * this RPC always scopes to disposition = 'INVENTORY' server-side. */
 export async function listAdminItems(supabase: SupabaseClient, input: ListAdminItemsInput): Promise<AdminItemSummary[]> {
   const { data, error } = await supabase.rpc("list_admin_items", {
     p_organization_id: input.organizationId,
@@ -61,6 +73,7 @@ export async function listAdminItems(supabase: SupabaseClient, input: ListAdminI
     p_category_id: input.categoryId ?? null,
     p_base_unit_code: input.baseUnitCode ?? null,
     p_status: input.status ?? null,
+    p_sort: input.sort ?? "name",
   });
   if (error) throw new Error(error.message);
   return ((data ?? []) as AdminItemRow[]).map(mapItemRow);
@@ -81,6 +94,16 @@ export interface AdminItemDetail {
    * can disable/explain the control before the Admin even attempts it,
    * though the RPC re-checks server-side regardless. */
   hasMovementHistory: boolean;
+  /** Always "INVENTORY" -- get_admin_item is scoped to disposition =
+   * 'INVENTORY' server-side (Admin Item Master never surfaces a
+   * NON_INVENTORY/expense row); kept as a field only so
+   * ItemOverviewSection's existing display doesn't need a separate
+   * conditional for a value that can never actually vary here. */
+  disposition: "INVENTORY";
+  spendCategoryId: string | null;
+  spendCategoryName: string | null;
+  defaultReceivingLocationId: string | null;
+  defaultReceivingLocationName: string | null;
 }
 
 export async function getAdminItem(supabase: SupabaseClient, organizationId: string, itemId: string): Promise<AdminItemDetail | null> {
@@ -99,6 +122,10 @@ export async function getAdminItem(supabase: SupabaseClient, organizationId: str
         out_created_at: string;
         out_updated_at: string;
         out_has_movement_history: boolean;
+        out_spend_category_id: string | null;
+        out_spend_category_name: string | null;
+        out_default_receiving_location_id: string | null;
+        out_default_receiving_location_name: string | null;
       }
     | undefined;
   if (!row) return null;
@@ -114,6 +141,11 @@ export async function getAdminItem(supabase: SupabaseClient, organizationId: str
     createdAt: row.out_created_at,
     updatedAt: row.out_updated_at,
     hasMovementHistory: row.out_has_movement_history,
+    disposition: "INVENTORY",
+    spendCategoryId: row.out_spend_category_id,
+    spendCategoryName: row.out_spend_category_name,
+    defaultReceivingLocationId: row.out_default_receiving_location_id,
+    defaultReceivingLocationName: row.out_default_receiving_location_name,
   };
 }
 

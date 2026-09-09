@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { requireAdmin } from "@/app/lib/auth/managerAuth";
+import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { listAdminItems } from "@/app/lib/admin/items";
 import { listInventoryCategories } from "@/app/actions/itemMaster";
@@ -10,20 +10,22 @@ import { AdminItemsView } from "./_components/AdminItemsView";
 import { AddItemButton } from "./_components/AddItemButton";
 
 /**
- * Admin -> Item Master (Canonical Item Master + Inventory Relevance
- * Classification milestone, Part 7/8) -- a child of the Admin sidebar
- * group, deliberately NOT under Current Inventory: this is organization
- * master data, not an operational inventory view. Server-enforces
- * requireAdmin() itself (Part 56) -- a Manager hitting this route
- * directly is redirected, never merely hidden from the sidebar.
+ * Items (redesigned, "Safe editing of confirmed items" feature) -- full-
+ * width desktop list, Manager-or-Admin readable (a plain Manager needs to
+ * browse and open the workspace to make no-impact metadata edits, per
+ * the tiered-permissions decision). Create/Bulk Import stay Admin-only
+ * structural actions -- hidden from a plain Manager's view here, and
+ * still independently re-gated server-side by their own actions
+ * regardless of what's rendered.
  */
 export const dynamic = "force-dynamic";
 
 export default async function AdminItemsPage() {
-  const auth = await requireAdmin();
+  const auth = await requireManagerOrAdmin();
   if (!auth.ok) {
     redirect(auth.reason === "not_authenticated" ? "/manager/login" : "/manager");
   }
+  const isAdmin = auth.manager.roles.includes("admin");
 
   const supabase = getServiceRoleClient();
   const [items, categoriesResult, unitsResult] = await Promise.all([
@@ -35,17 +37,19 @@ export default async function AdminItemsPage() {
   const units = (unitsResult.data ?? []).map((u) => ({ id: u.id as string, code: u.code as string, name: u.name as string }));
 
   return (
-    <div className="mx-auto max-w-4xl">
+    <div className="mx-auto max-w-7xl">
       <PageHeader
-        title="Item Master"
-        description="Manage the canonical inventory catalog used across purchasing and receiving."
+        title="Items"
+        description="Maintain the canonical inventory catalog used across purchasing and receiving."
         action={
-          <div className="flex gap-3">
-            <Link href="/manager/admin/items/import" className={secondaryButtonClass}>
-              Bulk Import
-            </Link>
-            <AddItemButton categories={categories} units={units} />
-          </div>
+          isAdmin ? (
+            <div className="flex gap-3">
+              <Link href="/manager/admin/items/import" className={secondaryButtonClass}>
+                Bulk Import
+              </Link>
+              <AddItemButton categories={categories} units={units} />
+            </div>
+          ) : undefined
         }
       />
       <AdminItemsView initialItems={items} categories={categories} units={units} />

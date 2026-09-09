@@ -12,6 +12,8 @@ import {
   bulkImportAdminItems,
 } from "@/app/lib/admin/items";
 import { AdminActionError } from "@/app/lib/admin/errors";
+import { createVerifiedPostingDocument } from "./inventoryPostingTestHelpers";
+import { postPurchaseDocumentInventoryRpc } from "@/app/lib/inventory/postingRpcs";
 
 /**
  * MANUAL / ON-DEMAND ONLY -- see adminFoundation.rpc.test.ts's header
@@ -30,11 +32,14 @@ import { AdminActionError } from "@/app/lib/admin/errors";
 
 let fx: RpcTestFixtures;
 let categoryId: string;
+let locationId: string;
 
 beforeAll(async () => {
   fx = await setupRpcTestFixtures();
   const { data: item } = await fx.supabase.from("inventory_items").select("category_id").eq("id", fx.noRuleItemId).single();
   categoryId = item!.category_id as string;
+  const { data: location } = await fx.supabase.from("locations").select("id").eq("organization_id", fx.organizationId).limit(1).single();
+  locationId = location!.id as string;
 });
 
 function uniqueName(label: string): string {
@@ -163,6 +168,32 @@ describe("setAdminItemStatus -- deactivate/reactivate, no hard delete", () => {
     fetched = await getAdminItem(fx.supabase, fx.organizationId, created.itemId);
     expect(fetched?.status).toBe("active");
     expect(fetched?.itemId).toBe(created.itemId); // same identity, never recreated
+  });
+
+  // Spec test #20 ("Archive with non-zero stock is blocked or requires
+  // explicit resolution") -- this exact GA050 rejection path had no test
+  // coverage before this feature (found during exploration). A dedicated,
+  // freshly-posted item guarantees deterministic positive stock, rather
+  // than relying on fx.variableWeightItemId's balance after whatever
+  // other concurrently-running .rpc.test.ts files have done to it.
+  it("blocks deactivation while positive stock remains at any location (GA050)", async () => {
+    const runTag = randomUUID().slice(0, 8);
+    const verified = await createVerifiedPostingDocument(fx.supabase, fx, locationId, [
+      {
+        description: `Archive Block Test ${runTag}`,
+        receiving: { behavior: "SAME_UNIT", baseUnitCode: "PIECE", receivedQuantity: 5, receivedUnit: "PIECE", locationId },
+      },
+    ]);
+    const itemId = verified.itemIds[0]!;
+    await postPurchaseDocumentInventoryRpc(fx.supabase, { purchaseDocumentId: verified.purchaseDocumentId, organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId });
+
+    await expect(setAdminItemStatus(fx.supabase, fx.organizationId, fx.changeableEmployeeAppUserId, itemId, "inactive")).rejects.toMatchObject({
+      code: "ITEM_HAS_POSITIVE_STOCK",
+    });
+
+    // Untouched: still active, stock still present.
+    const fetched = await getAdminItem(fx.supabase, fx.organizationId, itemId);
+    expect(fetched?.status).toBe("active");
   });
 });
 

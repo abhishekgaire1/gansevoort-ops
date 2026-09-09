@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // reprioritize an already-confirmed item's kiosk usage units, gated the
 // same way every other Admin Item Master action is (requireAdmin).
 
-const { requireAdminMock } = vi.hoisted(() => ({ requireAdminMock: vi.fn() }));
-vi.mock("@/app/lib/auth/managerAuth", () => ({ requireAdmin: requireAdminMock }));
+const { requireAdminMock, requireManagerOrAdminMock } = vi.hoisted(() => ({ requireAdminMock: vi.fn(), requireManagerOrAdminMock: vi.fn() }));
+vi.mock("@/app/lib/auth/managerAuth", () => ({ requireAdmin: requireAdminMock, requireManagerOrAdmin: requireManagerOrAdminMock }));
 
 const { rpcMock, fromMock } = vi.hoisted(() => ({ rpcMock: vi.fn(), fromMock: vi.fn() }));
 const { getServiceRoleClientMock } = vi.hoisted(() => ({ getServiceRoleClientMock: vi.fn(() => ({ rpc: rpcMock, from: fromMock })) }));
@@ -29,6 +29,7 @@ function fakeSelectChain(rows: Record<string, unknown>[]) {
 
 beforeEach(() => {
   requireAdminMock.mockReset().mockResolvedValue(ADMIN);
+  requireManagerOrAdminMock.mockReset().mockResolvedValue(ADMIN);
   rpcMock.mockReset().mockResolvedValue({ data: null, error: null });
   fromMock.mockReset();
 });
@@ -37,9 +38,8 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Item Master usage-unit management actions -- authorization gate", () => {
+describe("Item Master usage-unit MUTATION actions -- authorization gate (requireAdmin)", () => {
   const cases: { name: string; call: () => Promise<{ ok: boolean }> }[] = [
-    { name: "listItemUsageUnitsAction", call: () => listItemUsageUnitsAction("item-1") },
     { name: "addSecondaryUsageUnitAction", call: () => addSecondaryUsageUnitAction("item-1", "CASE", 24) },
     { name: "deactivateSecondaryUsageUnitAction", call: () => deactivateSecondaryUsageUnitAction("item-1") },
     { name: "setPrimaryUsageUnitAction", call: () => setPrimaryUsageUnitAction("item-1", "usage-2") },
@@ -54,6 +54,22 @@ describe("Item Master usage-unit management actions -- authorization gate", () =
       expect(rpcMock).not.toHaveBeenCalled();
     });
   }
+});
+
+describe("listItemUsageUnitsAction -- read-only, Manager-or-Admin (Safe editing of confirmed items, tiered-permissions decision)", () => {
+  it("rejects an unauthenticated caller before ever reaching Supabase", async () => {
+    requireManagerOrAdminMock.mockResolvedValue({ ok: false as const, reason: "not_authenticated" as const });
+    fromMock.mockReturnValue(fakeSelectChain([]));
+    const result = await listItemUsageUnitsAction("item-1");
+    expect(result.ok).toBe(false);
+  });
+
+  it("succeeds for a plain manager caller (no admin role required)", async () => {
+    requireManagerOrAdminMock.mockResolvedValue({ ok: true as const, manager: { appUserId: "mgr-1", organizationId: "org-1", authUserId: "auth-2", roles: ["manager"] } });
+    fromMock.mockReturnValue(fakeSelectChain([]));
+    const result = await listItemUsageUnitsAction("item-1");
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe("listItemUsageUnitsAction", () => {
