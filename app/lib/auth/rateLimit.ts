@@ -171,7 +171,7 @@ export async function incrementPinRateLimit(
   rateLimitKey: string,
   windowSeconds: number
 ): Promise<number> {
-  const { data, error } = await supabase.rpc("increment_pin_rate_limit", {
+  const { data, error } = await supabase.rpc("increment_pin_rate_limit_scoped", {
     p_organization_id: organizationId,
     p_rate_limit_key: rateLimitKey,
     p_window_seconds: windowSeconds,

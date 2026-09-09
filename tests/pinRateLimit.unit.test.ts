@@ -91,7 +91,7 @@ function createFakeRateLimitStore() {
   });
 
   const rpc = vi.fn(async (name: string, params: Record<string, unknown>) => {
-    if (name === "increment_pin_rate_limit") {
+    if (name === "increment_pin_rate_limit_scoped") {
       const windowStart = windowStartFor(params.p_window_seconds as number);
       const key = storeKey(params.p_organization_id as string, params.p_rate_limit_key as string, windowStart);
       const next = (store.get(key)?.attempt_count ?? 0) + 1;
