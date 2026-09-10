@@ -4,6 +4,8 @@ import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { getInventoryItemLocationSummary, listInventoryItemActivity } from "@/app/lib/inventory/itemActivity";
 import { getInventoryItemLastReceived, getInventoryItemUsageTotals } from "@/app/lib/inventory/itemOverview";
 import { getInventoryItemUsageByStation, getInventoryItemUsageTrend } from "@/app/lib/inventory/itemUsage";
+import { getItemPriceHistorySummary, getLatestPurchasePriceForOverview, listItemPriceHistory } from "@/app/lib/inventory/priceHistory";
+import { periodStartDate, priceHistoryPeriodFromParam } from "@/app/lib/inventory/priceHistoryPresentation";
 import { ItemDetailView, type ItemDetailTab } from "./_components/ItemDetailView";
 import { textLinkClass } from "@/app/components/manager/buttonStyles";
 
@@ -30,7 +32,7 @@ function firstValue(value: string | string[] | undefined): string | undefined {
 }
 
 function tabFromParam(value: string | undefined): ItemDetailTab {
-  if (value === "activity" || value === "usage") return value;
+  if (value === "activity" || value === "usage" || value === "price-history") return value;
   return "overview";
 }
 
@@ -68,7 +70,22 @@ export default async function InventoryItemDetailPage({
       ? await Promise.all([
           getInventoryItemLastReceived(supabase, auth.manager.organizationId, itemId, locationId),
           getInventoryItemUsageTotals(supabase, auth.manager.organizationId, itemId, locationId),
-        ]).then(([lastReceived, usageTotals]) => ({ lastReceived, usageTotals }))
+          getLatestPurchasePriceForOverview(supabase, auth.manager.organizationId, itemId),
+        ]).then(([lastReceived, usageTotals, latestPurchasePrice]) => ({ lastReceived, usageTotals, latestPurchasePrice }))
+      : null;
+
+  const priceHistoryPeriod = priceHistoryPeriodFromParam(firstValue(sp.period));
+  const priceHistoryVendorId = firstValue(sp.vendor) ?? null;
+  const priceHistory =
+    tab === "price-history"
+      ? await (async () => {
+          const filters = { vendorId: priceHistoryVendorId, startDate: periodStartDate(priceHistoryPeriod, new Date()) };
+          const [summary, page] = await Promise.all([
+            getItemPriceHistorySummary(supabase, auth.manager.organizationId, itemId, filters),
+            listItemPriceHistory(supabase, auth.manager.organizationId, itemId, filters),
+          ]);
+          return { summary, page };
+        })()
       : null;
 
   const activity =
@@ -86,7 +103,7 @@ export default async function InventoryItemDetailPage({
       : null;
 
   return (
-    <div className="mx-auto max-w-4xl">
+    <div className={`mx-auto ${tab === "price-history" ? "max-w-6xl" : "max-w-4xl"}`}>
       <ItemDetailView
         itemId={itemId}
         locationId={locationId}
@@ -96,6 +113,9 @@ export default async function InventoryItemDetailPage({
         activity={activity}
         usage={usage}
         usagePeriod={usagePeriod}
+        priceHistory={priceHistory}
+        priceHistoryPeriod={priceHistoryPeriod}
+        priceHistoryVendorId={priceHistoryVendorId}
       />
     </div>
   );

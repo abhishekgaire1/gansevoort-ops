@@ -12,6 +12,16 @@ import {
 import { getInventoryItemLastReceived, getInventoryItemUsageTotals, type InventoryItemLastReceived, type InventoryItemUsageTotals } from "@/app/lib/inventory/itemOverview";
 import { getInventoryItemUsageByStation, getInventoryItemUsageTrend, type InventoryItemUsageByStation, type RawUsageTrendPoint } from "@/app/lib/inventory/itemUsage";
 import type { UsagePeriod, CustomUsageRange } from "@/app/lib/inventory/usagePeriods";
+import {
+  listItemPriceHistory,
+  getItemPriceHistorySummary,
+  getLatestPurchasePriceForOverview,
+  type PriceHistoryPage,
+  type PriceHistorySummary,
+  type PriceHistoryCursor,
+  type LatestPurchasePrice,
+} from "@/app/lib/inventory/priceHistory";
+import { periodStartDate, priceHistoryPeriodFromParam, type PriceHistoryPeriod } from "@/app/lib/inventory/priceHistoryPresentation";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -52,6 +62,10 @@ export async function listInventoryItemActivityAction(
 export interface InventoryItemOverviewExtras {
   lastReceived: InventoryItemLastReceived | null;
   usageTotals: InventoryItemUsageTotals;
+  /** Overview's "Latest Purchase Price" panel -- historical purchase
+   * pricing only, never an inventory valuation. Null when the item has
+   * no priced eligible purchase yet. */
+  latestPurchasePrice: LatestPurchasePrice | null;
 }
 
 export type GetInventoryItemOverviewExtrasResult = { ok: true; extras: InventoryItemOverviewExtras } | AuthFailure;
@@ -66,11 +80,12 @@ export async function getInventoryItemOverviewExtrasAction(inventoryItemId: stri
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();
-  const [lastReceived, usageTotals] = await Promise.all([
+  const [lastReceived, usageTotals, latestPurchasePrice] = await Promise.all([
     getInventoryItemLastReceived(supabase, auth.manager.organizationId, inventoryItemId, locationId),
     getInventoryItemUsageTotals(supabase, auth.manager.organizationId, inventoryItemId, locationId),
+    getLatestPurchasePriceForOverview(supabase, auth.manager.organizationId, inventoryItemId),
   ]);
-  return { ok: true, extras: { lastReceived, usageTotals } };
+  return { ok: true, extras: { lastReceived, usageTotals, latestPurchasePrice } };
 }
 
 export interface InventoryItemUsageData {
@@ -109,4 +124,38 @@ export async function getInventoryItemUsageAction(
     period === "TODAY" ? Promise.resolve([]) : getInventoryItemUsageTrend(supabase, auth.manager.organizationId, inventoryItemId, locationId, period, customRange),
   ]);
   return { ok: true, usage: { byStation, trend } };
+}
+
+export interface ItemPriceHistoryData {
+  summary: PriceHistorySummary;
+  page: PriceHistoryPage;
+}
+
+export type GetItemPriceHistoryResult = { ok: true; data: ItemPriceHistoryData } | AuthFailure;
+
+/**
+ * Price History tab -- summary + first (or a subsequent, when a cursor
+ * is supplied) page of eligible purchase events. Read-only historical
+ * purchase pricing; never modifies inventory, item configuration, or
+ * documents, and is never an inventory valuation. The organization is
+ * ALWAYS the authenticated manager's own -- an item id from another
+ * organization simply yields zero rows server-side.
+ */
+export async function getItemPriceHistoryAction(
+  inventoryItemId: string,
+  filters: { vendorId?: string | null; period?: string | null },
+  cursor: PriceHistoryCursor | null
+): Promise<GetItemPriceHistoryResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED;
+
+  const period: PriceHistoryPeriod = priceHistoryPeriodFromParam(filters.period);
+  const resolved = { vendorId: filters.vendorId ?? null, startDate: periodStartDate(period, new Date()) };
+
+  const supabase = getServiceRoleClient();
+  const [summary, page] = await Promise.all([
+    getItemPriceHistorySummary(supabase, auth.manager.organizationId, inventoryItemId, resolved),
+    listItemPriceHistory(supabase, auth.manager.organizationId, inventoryItemId, resolved, cursor),
+  ]);
+  return { ok: true, data: { summary, page } };
 }

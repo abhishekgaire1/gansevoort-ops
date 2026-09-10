@@ -1,18 +1,21 @@
 import Link from "next/link";
 import type { InventoryItemLocationSummary, InventoryItemActivityPage } from "@/app/lib/inventory/itemActivity";
-import type { InventoryItemOverviewExtras, InventoryItemUsageData } from "@/app/actions/inventoryItemActivity";
+import type { InventoryItemOverviewExtras, InventoryItemUsageData, ItemPriceHistoryData } from "@/app/actions/inventoryItemActivity";
 import type { UsagePeriod } from "@/app/lib/inventory/usagePeriods";
+import type { PriceHistoryPeriod } from "@/app/lib/inventory/priceHistoryPresentation";
 import { textLinkClass } from "@/app/components/manager/buttonStyles";
 import { OverviewTab } from "./OverviewTab";
 import { ActivityTab } from "./ActivityTab";
 import { UsageTab } from "./UsageTab";
+import { PriceHistoryTab } from "./PriceHistoryTab";
 
-export type ItemDetailTab = "overview" | "activity" | "usage";
+export type ItemDetailTab = "overview" | "activity" | "usage" | "price-history";
 
 const TABS: { key: ItemDetailTab; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "activity", label: "Activity" },
   { key: "usage", label: "Usage" },
+  { key: "price-history", label: "Price History" },
 ];
 
 /**
@@ -34,6 +37,9 @@ export function ItemDetailView({
   activity,
   usage,
   usagePeriod,
+  priceHistory,
+  priceHistoryPeriod,
+  priceHistoryVendorId,
 }: {
   itemId: string;
   locationId: string;
@@ -43,6 +49,9 @@ export function ItemDetailView({
   activity: InventoryItemActivityPage | null;
   usage: InventoryItemUsageData | null;
   usagePeriod: UsagePeriod;
+  priceHistory: ItemPriceHistoryData | null;
+  priceHistoryPeriod: PriceHistoryPeriod;
+  priceHistoryVendorId: string | null;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -70,7 +79,14 @@ export function ItemDetailView({
       </div>
 
       {activeTab === "overview" && overviewExtras ? (
-        <OverviewTab summary={summary} lastReceived={overviewExtras.lastReceived} usageTotals={overviewExtras.usageTotals} />
+        <OverviewTab
+          summary={summary}
+          lastReceived={overviewExtras.lastReceived}
+          usageTotals={overviewExtras.usageTotals}
+          latestPurchasePrice={overviewExtras.latestPurchasePrice}
+          itemId={itemId}
+          locationId={locationId}
+        />
       ) : null}
 
       {activeTab === "activity" && activity ? (
@@ -79,6 +95,17 @@ export function ItemDetailView({
 
       {activeTab === "usage" && usage ? (
         <UsageTab itemId={itemId} locationId={locationId} locationTimezone={summary.locationTimezone} initialPeriod={usagePeriod} initialUsage={usage} />
+      ) : null}
+
+      {activeTab === "price-history" && priceHistory ? (
+        <PriceHistoryTab
+          itemId={itemId}
+          locationId={locationId}
+          baseUnitCode={summary.baseUnitCode}
+          initialData={priceHistory}
+          initialPeriod={priceHistoryPeriod}
+          initialVendorId={priceHistoryVendorId}
+        />
       ) : null}
     </div>
   );
