@@ -243,7 +243,7 @@ async function resolveQueueRows(organizationId: string, results: SearchReceiving
   });
 }
 
-export const QUEUE_PAGE_SIZE = 50;
+export const QUEUE_PAGE_SIZE = 10;
 
 export interface ReceivingQueueCursor {
   beforeCreatedAt: string;

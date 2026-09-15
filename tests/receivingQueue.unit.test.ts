@@ -378,7 +378,7 @@ function pagedQueueRow(index: number): Record<string, unknown> {
 }
 
 describe("getReceivingQueuePage -- keyset pagination wrapper", () => {
-  it("forwards filters, the tab's status set, and a null cursor with p_limit 50 on the first page", async () => {
+  it("forwards filters, the tab's status set, and a null cursor with p_limit 10 on the first page", async () => {
     const { rpc, from } = fakeClient({ queueRows: [] });
     getServiceRoleClientMock.mockReturnValue({ rpc, from });
 
@@ -394,7 +394,7 @@ describe("getReceivingQueuePage -- keyset pagination wrapper", () => {
       p_date_from: null,
       p_date_to: null,
       p_query: "839291",
-      p_limit: 50,
+      p_limit: 10,
       p_statuses: ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"],
       p_before_created_at: null,
       p_before_document_id: null,
@@ -414,14 +414,14 @@ describe("getReceivingQueuePage -- keyset pagination wrapper", () => {
   });
 
   it("returns nextCursor from the last row of a FULL page, and null for a short page", async () => {
-    const fullPageRows = Array.from({ length: 50 }, (_, i) => pagedQueueRow(i));
+    const fullPageRows = Array.from({ length: 10 }, (_, i) => pagedQueueRow(i));
     const fakeFull = fakeClient({ queueRows: fullPageRows, appUsers: [{ id: "user-1", employees: { first_name: "Dev", last_name: "One" } }] });
     getServiceRoleClientMock.mockReturnValue(fakeFull);
     const fullPage = await getReceivingQueuePage("org-1");
-    expect(fullPage.items).toHaveLength(50);
+    expect(fullPage.items).toHaveLength(10);
     expect(fullPage.nextCursor).toEqual({
-      beforeCreatedAt: fullPage.items[49].createdAt,
-      beforeDocumentId: fullPage.items[49].documentId,
+      beforeCreatedAt: fullPage.items[9].createdAt,
+      beforeDocumentId: fullPage.items[9].documentId,
     });
 
     const fakeShort = fakeClient({ queueRows: fullPageRows.slice(0, 3), appUsers: [{ id: "user-1", employees: { first_name: "Dev", last_name: "One" } }] });
