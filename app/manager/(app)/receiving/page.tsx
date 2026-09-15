@@ -8,23 +8,30 @@ import { listVendors } from "@/app/actions/vendors";
 import { getActiveCaptureSessionAction } from "@/app/actions/invoiceCaptureDesktop";
 import { UploadDocumentForm } from "./_components/UploadDocumentForm";
 import { TakePhotoWithPhoneFlow } from "./_components/TakePhotoWithPhoneFlow";
-import { ReceivingQueueList } from "./_components/ReceivingQueueList";
 import type { PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 import { PageHeader } from "@/app/components/manager/PageHeader";
-import { RECEIVING_TABS, RECEIVING_TAB_STATUSES, receivingStatusPresentation, type ReceivingTabKey } from "./_lib/receivingPresentation";
+import { StatusBadge } from "@/app/components/manager/StatusBadge";
+import { EmptyState } from "@/app/components/manager/EmptyState";
+import {
+  RECEIVING_TABS,
+  RECEIVING_TAB_STATUSES,
+  receivingStatusPresentation,
+  viewerRelationshipFor,
+  type ReceivingTabKey,
+} from "./_lib/receivingPresentation";
 
 /**
  * The manager receiving work queue -- a document/extraction/
  * purchase-document queue, not yet physical receiving/inventory posting
  * (that starts in a later milestone). Statuses are always derived (see
- * documentStatus.ts); nothing here is stored redundantly. Filters are a
- * plain server-rendered GET form -- no client JS needed for filtering
- * itself, Next.js re-renders this Server Component from the URL's
- * searchParams. Since the pagination pass, the active tab's status SET
- * (Part 8) is pushed into search_receiving_queue itself -- applied
- * BEFORE its limit alongside every other filter -- and the page fetches
- * only the first QUEUE_PAGE_SIZE rows; older pages append client-side
- * via ReceivingQueueList's Load More. The tab remains composed with
+ * documentStatus.ts); nothing here is stored redundantly. Filters, tab,
+ * AND page number are all URL state rendered by a plain server
+ * component -- no client JS for filtering or paging, Next.js re-renders
+ * from searchParams. The active tab's status SET (Part 8) is pushed
+ * into search_receiving_queue itself -- applied BEFORE its limit
+ * alongside every other filter -- and the list is numbered-page
+ * paginated (QUEUE_PAGE_SIZE rows per page, Previous/Next + page links
+ * + "Showing X-Y of Z", 20260811100151). The tab remains composed with
  * (not a replacement for) the precise "Status" filter under More
  * Filters.
  */
@@ -84,8 +91,11 @@ export default async function ReceivingQueuePage({
     q: firstValue(params.q),
   };
 
+  const requestedPageRaw = Number(firstValue(params.page) ?? "1");
+  const requestedPage = Number.isFinite(requestedPageRaw) && requestedPageRaw >= 1 ? Math.floor(requestedPageRaw) : 1;
+
   const [queuePage, uploaders, vendorsResult, activeCaptureResult] = await Promise.all([
-    getReceivingQueuePage(auth.manager.organizationId, filters, RECEIVING_TAB_STATUSES[tab]),
+    getReceivingQueuePage(auth.manager.organizationId, filters, RECEIVING_TAB_STATUSES[tab], requestedPage),
     listReceivingQueueUploaders(auth.manager.organizationId),
     listVendors(),
     getActiveCaptureSessionAction(),
@@ -104,6 +114,11 @@ export default async function ReceivingQueuePage({
     const resolved = firstValue(value);
     if (resolved) urlParams.set(key, resolved);
   }
+  // Changing any filter, tab, or search resets to page one -- the page
+  // number never propagates through tab links or filter-chip removals
+  // (and the GET form drops it naturally, since only form fields
+  // submit).
+  urlParams.delete("page");
   const paramsWithoutTab = new URLSearchParams(urlParams);
   paramsWithoutTab.delete("tab");
 
@@ -254,13 +269,156 @@ export default async function ReceivingQueuePage({
         </div>
       ) : null}
 
-      <ReceivingQueueList
-        initialItems={queuePage.items}
-        initialNextCursor={queuePage.nextCursor}
-        filters={filters}
-        tab={tab}
-        currentAppUserId={auth.manager.appUserId}
-      />
+      <div className="mt-6 flex flex-col divide-y divide-zinc-800 rounded-2xl border border-zinc-800 bg-zinc-900">
+        {queuePage.items.length === 0 ? (
+          <div className="p-1">
+            <EmptyState
+              message="No documents match these filters."
+              action={
+                <Link href="/manager/receiving" className="text-xs text-amber-400 underline">
+                  Clear Filters
+                </Link>
+              }
+            />
+          </div>
+        ) : (
+          queuePage.items.map((item) => {
+            const href = item.purchaseDocumentId ? `/manager/purchases/${item.purchaseDocumentId}` : `/manager/receiving/${item.documentId}`;
+            const viewer = viewerRelationshipFor(item.createdByAppUserId, auth.manager.appUserId);
+            const presentation = receivingStatusPresentation(item.status, viewer, item.postingStatus);
+            return (
+              <Link key={item.documentId} href={href} className="flex items-center justify-between gap-4 px-4 py-4 hover:bg-zinc-800/50">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-sm font-semibold text-zinc-100">{item.vendorName ?? item.originalFilename}</p>
+                    {item.documentType ? <span className="shrink-0 text-xs text-zinc-500">{item.documentType}</span> : null}
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-zinc-500">
+                    {item.documentNumber ? `#${item.documentNumber} · ` : ""}
+                    {item.documentDate ? `${item.documentDate} · ` : ""}
+                    Uploaded by {item.uploadedByName} on {new Date(item.createdAt).toLocaleDateString()}
+                    {item.verifiedByName ? ` · Verified by ${item.verifiedByName}` : ""}
+                    {item.verificationMethod === "SOLE_APPROVER" ? " · Single-manager approval" : ""}
+                  </p>
+                  {/* Status Language -- Verification: viewer-relative context
+                      line, never a fabricated "sent at" time (the queue's own
+                      createdAt is the ORIGINAL upload time, not the later
+                      submit time -- shown truthfully as "Uploaded by" above). */}
+                  {item.status === "READY_FOR_VERIFICATION" && viewer === "preparer" ? (
+                    <p className="mt-0.5 text-xs text-zinc-500">Waiting for another manager to verify.</p>
+                  ) : null}
+                  {item.status === "READY_FOR_VERIFICATION" && viewer === "eligible_verifier" && item.createdByName ? (
+                    <p className="mt-0.5 text-xs text-zinc-500">Prepared by {item.createdByName}</p>
+                  ) : null}
+                  {item.originalVendorName || item.originalDocumentType ? (
+                    <p className="mt-0.5 truncate text-xs text-amber-500">
+                      Originally selected: {item.originalVendorName ?? ""}
+                      {item.originalVendorName && item.originalDocumentType ? " · " : ""}
+                      {item.originalDocumentType ?? ""}
+                    </p>
+                  ) : null}
+                </div>
+                <span className="flex shrink-0 flex-col items-end gap-1.5">
+                  <StatusBadge
+                    label={
+                      item.isAmendmentInProgress
+                        ? `Amendment ${presentation.label} · Rev ${item.revisionNumber}`
+                        : !item.isAmendmentInProgress && item.status === "VERIFIED" && item.revisionNumber && item.revisionNumber > 1
+                          ? `${presentation.label} · Rev ${item.revisionNumber} · Current`
+                          : presentation.label
+                    }
+                    tone={presentation.tone}
+                  />
+                  {item.isAmendmentInProgress && item.currentVerifiedRevisionNumber ? (
+                    <span className="text-[10px] text-zinc-500">Current verified: Rev {item.currentVerifiedRevisionNumber}</span>
+                  ) : null}
+                  {presentation.actionLabel ? <span className="text-xs font-medium text-amber-400">{presentation.actionLabel}</span> : null}
+                </span>
+              </Link>
+            );
+          })
+        )}
+      </div>
+
+      <PaginationBar page={queuePage.page} pageCount={queuePage.pageCount} pageSize={queuePage.pageSize} totalCount={queuePage.totalCount} baseParams={urlParams} />
+    </div>
+  );
+}
+
+/** Which page numbers to render as links: always first and last, a
+ * window around the current page, with a single ellipsis marker (0)
+ * covering each collapsed run. Pure so the windowing is unit-testable
+ * mentally; e.g. 10 pages at page 5 -> 1 … 4 5 6 … 10. */
+function pageNumbersToShow(page: number, pageCount: number): number[] {
+  const wanted = new Set<number>([1, pageCount, page - 1, page, page + 1]);
+  const pages = [...wanted].filter((p) => p >= 1 && p <= pageCount).sort((a, b) => a - b);
+  const withGaps: number[] = [];
+  for (let i = 0; i < pages.length; i += 1) {
+    if (i > 0 && pages[i] - pages[i - 1] > 1) withGaps.push(0);
+    withGaps.push(pages[i]);
+  }
+  return withGaps;
+}
+
+function PaginationBar({
+  page,
+  pageCount,
+  pageSize,
+  totalCount,
+  baseParams,
+}: {
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  totalCount: number;
+  baseParams: URLSearchParams;
+}) {
+  if (totalCount === 0) return null;
+  const from = (page - 1) * pageSize + 1;
+  const to = Math.min(page * pageSize, totalCount);
+  const hrefFor = (target: number) => withParam(baseParams, "page", target === 1 ? undefined : String(target));
+
+  const pageLinkClass = "rounded-lg border border-zinc-700 px-2.5 py-1 text-xs hover:bg-zinc-800";
+  const disabledClass = "rounded-lg border border-zinc-800 px-2.5 py-1 text-xs text-zinc-600";
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+      <p className="text-xs text-zinc-500">
+        Showing {from}–{to} of {totalCount} document{totalCount === 1 ? "" : "s"}
+      </p>
+      {pageCount > 1 ? (
+        <nav aria-label="Pagination" className="flex items-center gap-1.5 text-zinc-300">
+          {page > 1 ? (
+            <Link href={hrefFor(page - 1)} className={pageLinkClass}>
+              ← Previous
+            </Link>
+          ) : (
+            <span className={disabledClass}>← Previous</span>
+          )}
+          {pageNumbersToShow(page, pageCount).map((n, index) =>
+            n === 0 ? (
+              <span key={`gap-${index}`} className="px-1 text-xs text-zinc-600">
+                …
+              </span>
+            ) : n === page ? (
+              <span key={n} aria-current="page" className="rounded-lg border border-amber-500/60 bg-amber-950/30 px-2.5 py-1 text-xs font-semibold text-amber-300">
+                {n}
+              </span>
+            ) : (
+              <Link key={n} href={hrefFor(n)} className={pageLinkClass}>
+                {n}
+              </Link>
+            )
+          )}
+          {page < pageCount ? (
+            <Link href={hrefFor(page + 1)} className={pageLinkClass}>
+              Next →
+            </Link>
+          ) : (
+            <span className={disabledClass}>Next →</span>
+          )}
+        </nav>
+      ) : null}
     </div>
   );
 }

@@ -10,8 +10,6 @@ import { getReceivingLines, type ReceivingLineInfo } from "@/app/lib/receiving/g
 import { getEffectiveReceivingLines, applyReceivingEdits, type EffectiveReceivingLine, type ReceivingLineEdit } from "@/app/lib/receiving/effectiveReceivingEdit";
 import { ReceiptNotFoundOrInvalidError, EmployeeNotFoundOrInactiveError, FixedConversionQuantityMismatchError } from "@/app/lib/itemMaster/errors";
 import type { ReceiptKind, ReceiptLineInput } from "@/app/lib/receiving/types";
-import { getReceivingQueuePage, type ReceivingQueueFilters, type ReceivingQueueCursor, type ReceivingQueuePage } from "@/app/lib/documents/receivingQueue";
-import { RECEIVING_TAB_STATUSES, type ReceivingTabKey } from "@/app/manager/(app)/receiving/_lib/receivingPresentation";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -284,26 +282,4 @@ export async function correctEffectiveReceiving(input: {
     }
     return { ok: false, reason: "misconfigured", message: err instanceof Error && /effective receiving state/.test(err.message) ? err.message : "Could not save the receiving changes. Try again." };
   }
-}
-
-export type LoadReceivingQueuePageResult = { ok: true; page: ReceivingQueuePage } | AuthFailure;
-
-/**
- * Receiving Queue pagination -- loads one further (older) page for the
- * client-side Load More. The tab key is mapped to its canonical status
- * set server-side via RECEIVING_TAB_STATUSES (the same table the page's
- * initial server render uses), so a client can only ever request the
- * exact status sets the tabs define -- never an arbitrary status list.
- */
-export async function loadMoreReceivingQueueAction(
-  filters: ReceivingQueueFilters,
-  tab: ReceivingTabKey,
-  cursor: ReceivingQueueCursor
-): Promise<LoadReceivingQueuePageResult> {
-  const auth = await requireManagerOrAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
-
-  const statuses = RECEIVING_TAB_STATUSES[tab] ?? null;
-  const page = await getReceivingQueuePage(auth.manager.organizationId, filters, statuses, cursor);
-  return { ok: true, page };
 }

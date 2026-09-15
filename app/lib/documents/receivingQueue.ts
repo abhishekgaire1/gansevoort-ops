@@ -245,26 +245,30 @@ async function resolveQueueRows(organizationId: string, results: SearchReceiving
 
 export const QUEUE_PAGE_SIZE = 10;
 
-export interface ReceivingQueueCursor {
-  beforeCreatedAt: string;
-  beforeDocumentId: string;
-}
-
 export interface ReceivingQueuePage {
   items: ReceivingQueueItem[];
-  /** Cursor for the next (older) page; null when this page was short. */
-  nextCursor: ReceivingQueueCursor | null;
+  /** Exact filtered total, computed server-side (count(*) over () after
+   * every filter, before limit/offset). */
+  totalCount: number;
+  /** The page actually served (1-based) -- equals the requested page
+   * unless it was out of range, in which case page one was served. */
+  page: number;
+  pageCount: number;
+  pageSize: number;
 }
 
 /**
- * Receiving Queue pagination (20260811100150) -- keyset-paged sibling of
- * getReceivingQueue above. The active tab's status SET is pushed into
- * the SQL (p_statuses, applied before the LIMIT) so a page can never
- * show zero rows for the tab while older matching rows exist -- the
- * same filter-before-limit invariant tests/receivingQueue.rpc.test.ts
- * enforces for every other filter. The cursor is
- * (created_at, document_id): documents.created_at alone is not unique,
- * and document_id is the ORDER BY tiebreaker the SQL uses.
+ * Receiving Queue numbered pagination (20260811100151) -- desktop-style
+ * paged sibling of getReceivingQueue above. The active tab's status SET
+ * is pushed into the SQL (p_statuses, applied before the LIMIT) so a
+ * page can never show zero rows for the tab while older matching rows
+ * exist -- the same filter-before-limit invariant
+ * tests/receivingQueue.rpc.test.ts enforces for every other filter.
+ * Offset paging (not keyset) because numbered pages need random access
+ * and the filtered total; ordering stays deterministic via the
+ * (created_at desc, document_id desc) tiebreaker. A page beyond the end
+ * (stale bookmark, shrunk filter results) clamps to page one rather
+ * than rendering an empty page of a non-empty queue.
  *
  * getReceivingQueue stays untouched on purpose: the dashboard derives
  * counts from its full (bounded) array, and its call shape is pinned by
@@ -274,36 +278,48 @@ export async function getReceivingQueuePage(
   organizationId: string,
   filters: ReceivingQueueFilters = {},
   statuses: ReceivingItemStatus[] | null = null,
-  cursor: ReceivingQueueCursor | null = null
+  page: number = 1
 ): Promise<ReceivingQueuePage> {
   const serviceClient = getServiceRoleClient();
+  const requestedPage = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
 
-  const { data, error } = await serviceClient.rpc("search_receiving_queue", {
-    p_organization_id: organizationId,
-    p_vendor_id: filters.vendorId ?? null,
-    p_uploaded_by_app_user_id: filters.uploadedByAppUserId ?? null,
-    p_status: filters.status ?? null,
-    p_document_type: filters.documentType ?? null,
-    p_date_type: filters.dateType ?? "uploaded",
-    p_date_from: filters.dateFrom ?? null,
-    p_date_to: filters.dateTo ?? null,
-    p_query: filters.q ?? null,
-    p_limit: QUEUE_PAGE_SIZE,
-    p_statuses: statuses,
-    p_before_created_at: cursor?.beforeCreatedAt ?? null,
-    p_before_document_id: cursor?.beforeDocumentId ?? null,
-  });
+  const fetchPage = async (pageNumber: number) => {
+    const { data, error } = await serviceClient.rpc("search_receiving_queue", {
+      p_organization_id: organizationId,
+      p_vendor_id: filters.vendorId ?? null,
+      p_uploaded_by_app_user_id: filters.uploadedByAppUserId ?? null,
+      p_status: filters.status ?? null,
+      p_document_type: filters.documentType ?? null,
+      p_date_type: filters.dateType ?? "uploaded",
+      p_date_from: filters.dateFrom ?? null,
+      p_date_to: filters.dateTo ?? null,
+      p_query: filters.q ?? null,
+      p_limit: QUEUE_PAGE_SIZE,
+      p_statuses: statuses,
+      p_offset: (pageNumber - 1) * QUEUE_PAGE_SIZE,
+    });
+    if (error) {
+      // Same never-silently-empty rule as getReceivingQueue.
+      throw new Error(`search_receiving_queue failed: ${error.message}`);
+    }
+    return (data ?? []) as (SearchReceivingQueueRow & { out_total_count?: string | number })[];
+  };
 
-  if (error) {
-    // Same never-silently-empty rule as getReceivingQueue.
-    throw new Error(`search_receiving_queue failed: ${error.message}`);
+  let servedPage = requestedPage;
+  let results = await fetchPage(requestedPage);
+  if (results.length === 0 && requestedPage > 1) {
+    servedPage = 1;
+    results = await fetchPage(1);
   }
-  const results = (data ?? []) as SearchReceivingQueueRow[];
+
+  const totalCount = results.length > 0 ? Number(results[0].out_total_count ?? results.length) : 0;
   const items = await resolveQueueRows(organizationId, results);
-  const last = items[items.length - 1];
   return {
     items,
-    nextCursor: items.length === QUEUE_PAGE_SIZE && last ? { beforeCreatedAt: last.createdAt, beforeDocumentId: last.documentId } : null,
+    totalCount,
+    page: servedPage,
+    pageCount: Math.max(1, Math.ceil(totalCount / QUEUE_PAGE_SIZE)),
+    pageSize: QUEUE_PAGE_SIZE,
   };
 }
 

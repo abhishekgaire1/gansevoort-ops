@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { finalizeDocumentUploadRpc } from "@/app/lib/documents/finalizeDocumentUploadRpc";
 import { initializePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/initializePurchaseDocumentDraftRpc";
 import { savePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/savePurchaseDocumentDraftRpc";
-import { getReceivingQueue, getReceivingQueuePage, type ReceivingQueueCursor } from "@/app/lib/documents/receivingQueue";
+import { getReceivingQueue, getReceivingQueuePage } from "@/app/lib/documents/receivingQueue";
 import { setupRpcTestFixtures, type RpcTestFixtures } from "./testFixtures";
 import type { PurchaseDocumentLine } from "@/app/lib/purchaseDocuments/types";
 
@@ -192,7 +192,7 @@ describe("search_receiving_queue -- filtering happens before the limit, not afte
   );
 });
 
-describe("search_receiving_queue -- keyset pagination (20260811100150)", () => {
+describe("search_receiving_queue -- numbered pagination (20260811100151)", () => {
   /** Five bare documents (no extraction -> derived status FAILED) with a
    * run-unique filename tag so p_query scopes every assertion to exactly
    * these rows, and with EXPLICIT created_at values including one shared
@@ -217,30 +217,30 @@ describe("search_receiving_queue -- keyset pagination (20260811100150)", () => {
   }
 
   it(
-    "pages converge with no duplicates or gaps, deterministically, including same-timestamp rows",
+    "offset pages converge with no duplicates or gaps, deterministically, including same-timestamp rows, with an exact total on every row",
     async () => {
       const tag = `keyset-${randomUUID().slice(0, 8)}`;
       const insertedIds = await insertTaggedDocuments(tag);
 
       // Small pages via the RPC directly (the wrapper's page size is
-      // fixed at 50) -- exercising the exact cursor mechanics.
+      // fixed at 10) -- exercising offset paging mechanics.
       const walk = async (): Promise<string[]> => {
         const seen: string[] = [];
-        let cursor: ReceivingQueueCursor | null = null;
-        for (let page = 0; page < 6; page += 1) {
+        for (let offset = 0; offset < 12; offset += 2) {
           const { data, error } = await fx.supabase.rpc("search_receiving_queue", {
             p_organization_id: fx.organizationId,
             p_query: tag,
             p_limit: 2,
-            p_before_created_at: cursor?.beforeCreatedAt ?? null,
-            p_before_document_id: cursor?.beforeDocumentId ?? null,
+            p_offset: offset,
           });
           if (error) throw new Error(error.message);
-          const rows = (data ?? []) as { out_document_id: string; out_created_at: string }[];
-          if (rows.length === 0) break;
-          for (const row of rows) seen.push(row.out_document_id);
-          const last = rows[rows.length - 1];
-          cursor = { beforeCreatedAt: last.out_created_at, beforeDocumentId: last.out_document_id };
+          const rows = (data ?? []) as { out_document_id: string; out_total_count: number | string }[];
+          for (const row of rows) {
+            seen.push(row.out_document_id);
+            // The window count is the filtered total, identical on every
+            // row of every page.
+            expect(Number(row.out_total_count)).toBe(5);
+          }
           if (rows.length < 2) break;
         }
         return seen;
@@ -253,10 +253,18 @@ describe("search_receiving_queue -- keyset pagination (20260811100150)", () => {
       expect(new Set(first)).toEqual(new Set(insertedIds));
       expect(second).toEqual(first);
 
-      // The wrapper's single full page agrees with the walked order.
+      // The wrapper's single page agrees with the walked order and
+      // reports the same total.
       const wrapperPage = await getReceivingQueuePage(fx.organizationId, { q: tag });
       expect(wrapperPage.items.map((i) => i.documentId)).toEqual(first);
-      expect(wrapperPage.nextCursor).toBeNull();
+      expect(wrapperPage.totalCount).toBe(5);
+      expect(wrapperPage.page).toBe(1);
+      expect(wrapperPage.pageCount).toBe(1);
+
+      // A page past the end clamps back to page one.
+      const clamped = await getReceivingQueuePage(fx.organizationId, { q: tag }, null, 7);
+      expect(clamped.page).toBe(1);
+      expect(clamped.items.map((i) => i.documentId)).toEqual(first);
     },
     60_000
   );

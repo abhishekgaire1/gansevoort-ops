@@ -351,10 +351,10 @@ describe("getReceivingQueue -- batched inventory posting status", () => {
 });
 
 // ============================================================
-// Receiving Queue pagination (20260811100150)
+// Receiving Queue numbered pagination (20260811100151)
 // ============================================================
 
-function pagedQueueRow(index: number): Record<string, unknown> {
+function pagedQueueRow(index: number, totalCount: number): Record<string, unknown> {
   return {
     out_document_id: `doc-${String(index).padStart(3, "0")}`,
     out_original_filename: `invoice-${index}.pdf`,
@@ -374,15 +374,18 @@ function pagedQueueRow(index: number): Record<string, unknown> {
     out_current_verified_revision_number: null,
     out_created_by_app_user_id: null,
     out_verification_method: null,
+    out_total_count: totalCount,
   };
 }
 
-describe("getReceivingQueuePage -- keyset pagination wrapper", () => {
-  it("forwards filters, the tab's status set, and a null cursor with p_limit 10 on the first page", async () => {
+const PAGED_APP_USERS = [{ id: "user-1", employees: { first_name: "Dev", last_name: "One" } }];
+
+describe("getReceivingQueuePage -- numbered pagination wrapper", () => {
+  it("forwards filters, the tab's status set, and offset 0 with p_limit 10 for page one", async () => {
     const { rpc, from } = fakeClient({ queueRows: [] });
     getServiceRoleClientMock.mockReturnValue({ rpc, from });
 
-    await getReceivingQueuePage("org-1", { vendorId: "vendor-1", q: "839291" }, ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"], null);
+    await getReceivingQueuePage("org-1", { vendorId: "vendor-1", q: "839291" }, ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"], 1);
 
     expect(rpc).toHaveBeenCalledWith("search_receiving_queue", {
       p_organization_id: "org-1",
@@ -396,39 +399,62 @@ describe("getReceivingQueuePage -- keyset pagination wrapper", () => {
       p_query: "839291",
       p_limit: 10,
       p_statuses: ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"],
-      p_before_created_at: null,
-      p_before_document_id: null,
+      p_offset: 0,
     });
   });
 
-  it("threads the cursor through verbatim and passes null statuses for the All tab", async () => {
-    const { rpc, from } = fakeClient({ queueRows: [] });
+  it("computes the offset from the page number and clamps invalid pages to one; the All tab passes null statuses", async () => {
+    const { rpc, from } = fakeClient({ queueRows: [pagedQueueRow(0, 40)], appUsers: PAGED_APP_USERS });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+    await getReceivingQueuePage("org-1", {}, null, 3);
+    let params = rpc.mock.calls[0][1] as Record<string, unknown>;
+    expect(params.p_statuses).toBeNull();
+    expect(params.p_offset).toBe(20);
+
+    rpc.mockClear();
+    await getReceivingQueuePage("org-1", {}, null, Number.NaN);
+    params = rpc.mock.calls[0][1] as Record<string, unknown>;
+    expect(params.p_offset).toBe(0);
+  });
+
+  it("returns the exact filtered total and derived page count from the window count", async () => {
+    const fullPageRows = Array.from({ length: 10 }, (_, i) => pagedQueueRow(i, 23));
+    const { rpc, from } = fakeClient({ queueRows: fullPageRows, appUsers: PAGED_APP_USERS });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+    const page = await getReceivingQueuePage("org-1");
+    expect(page.items).toHaveLength(10);
+    expect(page.totalCount).toBe(23);
+    expect(page.pageCount).toBe(3);
+    expect(page.page).toBe(1);
+    expect(page.pageSize).toBe(10);
+  });
+
+  it("clamps a page beyond the end back to page one instead of serving an empty page of a non-empty queue", async () => {
+    // First call (page 9 -> offset 80) returns nothing; the wrapper
+    // refetches page one.
+    let call = 0;
+    const rpc = vi.fn((fnName: string, params?: Record<string, unknown>) => {
+      void fnName;
+      call += 1;
+      if (call === 1) {
+        expect(params?.p_offset).toBe(80);
+        return Promise.resolve({ data: [], error: null });
+      }
+      expect(params?.p_offset).toBe(0);
+      return Promise.resolve({ data: [pagedQueueRow(0, 3), pagedQueueRow(1, 3), pagedQueueRow(2, 3)], error: null });
+    });
+    const from = vi.fn((table: string) => {
+      if (table === "app_users") return { select: () => ({ in: () => Promise.resolve({ data: PAGED_APP_USERS }) }) };
+      return { select: () => ({ in: () => Promise.resolve({ data: [] }) }) };
+    });
     getServiceRoleClientMock.mockReturnValue({ rpc, from });
 
-    await getReceivingQueuePage("org-1", {}, null, { beforeCreatedAt: "2026-08-12T00:00:30Z", beforeDocumentId: "doc-030" });
-
-    const params = rpc.mock.calls[0][1] as Record<string, unknown>;
-    expect(params.p_statuses).toBeNull();
-    expect(params.p_before_created_at).toBe("2026-08-12T00:00:30Z");
-    expect(params.p_before_document_id).toBe("doc-030");
-  });
-
-  it("returns nextCursor from the last row of a FULL page, and null for a short page", async () => {
-    const fullPageRows = Array.from({ length: 10 }, (_, i) => pagedQueueRow(i));
-    const fakeFull = fakeClient({ queueRows: fullPageRows, appUsers: [{ id: "user-1", employees: { first_name: "Dev", last_name: "One" } }] });
-    getServiceRoleClientMock.mockReturnValue(fakeFull);
-    const fullPage = await getReceivingQueuePage("org-1");
-    expect(fullPage.items).toHaveLength(10);
-    expect(fullPage.nextCursor).toEqual({
-      beforeCreatedAt: fullPage.items[9].createdAt,
-      beforeDocumentId: fullPage.items[9].documentId,
-    });
-
-    const fakeShort = fakeClient({ queueRows: fullPageRows.slice(0, 3), appUsers: [{ id: "user-1", employees: { first_name: "Dev", last_name: "One" } }] });
-    getServiceRoleClientMock.mockReturnValue(fakeShort);
-    const shortPage = await getReceivingQueuePage("org-1");
-    expect(shortPage.items).toHaveLength(3);
-    expect(shortPage.nextCursor).toBeNull();
+    const page = await getReceivingQueuePage("org-1", {}, null, 9);
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(page.page).toBe(1);
+    expect(page.totalCount).toBe(3);
+    expect(page.pageCount).toBe(1);
+    expect(page.items).toHaveLength(3);
   });
 
   it("throws (never a silently-empty page) if the RPC errors", async () => {
