@@ -151,7 +151,14 @@ export async function getReceivingQueue(organizationId: string, filters: Receivi
     // read as empty with no signal anywhere.
     throw new Error(`search_receiving_queue failed: ${error.message}`);
   }
-  const results = (data ?? []) as SearchReceivingQueueRow[];
+  return resolveQueueRows(organizationId, (data ?? []) as SearchReceivingQueueRow[]);
+}
+
+/** Shared name/posting-status resolution + row mapping for both the
+ * bounded legacy fetch above and the paged fetch below -- every lookup
+ * is batched over the already-filtered result set only. */
+async function resolveQueueRows(organizationId: string, results: SearchReceivingQueueRow[]): Promise<ReceivingQueueItem[]> {
+  const serviceClient = getServiceRoleClient();
   if (results.length === 0) {
     return [];
   }
@@ -234,4 +241,99 @@ export async function getReceivingQueue(organizationId: string, filters: Receivi
       verificationMethod: row.out_verification_method,
     };
   });
+}
+
+export const QUEUE_PAGE_SIZE = 50;
+
+export interface ReceivingQueueCursor {
+  beforeCreatedAt: string;
+  beforeDocumentId: string;
+}
+
+export interface ReceivingQueuePage {
+  items: ReceivingQueueItem[];
+  /** Cursor for the next (older) page; null when this page was short. */
+  nextCursor: ReceivingQueueCursor | null;
+}
+
+/**
+ * Receiving Queue pagination (20260811100150) -- keyset-paged sibling of
+ * getReceivingQueue above. The active tab's status SET is pushed into
+ * the SQL (p_statuses, applied before the LIMIT) so a page can never
+ * show zero rows for the tab while older matching rows exist -- the
+ * same filter-before-limit invariant tests/receivingQueue.rpc.test.ts
+ * enforces for every other filter. The cursor is
+ * (created_at, document_id): documents.created_at alone is not unique,
+ * and document_id is the ORDER BY tiebreaker the SQL uses.
+ *
+ * getReceivingQueue stays untouched on purpose: the dashboard derives
+ * counts from its full (bounded) array, and its call shape is pinned by
+ * exact-args unit tests -- callers that need pagination use this.
+ */
+export async function getReceivingQueuePage(
+  organizationId: string,
+  filters: ReceivingQueueFilters = {},
+  statuses: ReceivingItemStatus[] | null = null,
+  cursor: ReceivingQueueCursor | null = null
+): Promise<ReceivingQueuePage> {
+  const serviceClient = getServiceRoleClient();
+
+  const { data, error } = await serviceClient.rpc("search_receiving_queue", {
+    p_organization_id: organizationId,
+    p_vendor_id: filters.vendorId ?? null,
+    p_uploaded_by_app_user_id: filters.uploadedByAppUserId ?? null,
+    p_status: filters.status ?? null,
+    p_document_type: filters.documentType ?? null,
+    p_date_type: filters.dateType ?? "uploaded",
+    p_date_from: filters.dateFrom ?? null,
+    p_date_to: filters.dateTo ?? null,
+    p_query: filters.q ?? null,
+    p_limit: QUEUE_PAGE_SIZE,
+    p_statuses: statuses,
+    p_before_created_at: cursor?.beforeCreatedAt ?? null,
+    p_before_document_id: cursor?.beforeDocumentId ?? null,
+  });
+
+  if (error) {
+    // Same never-silently-empty rule as getReceivingQueue.
+    throw new Error(`search_receiving_queue failed: ${error.message}`);
+  }
+  const results = (data ?? []) as SearchReceivingQueueRow[];
+  const items = await resolveQueueRows(organizationId, results);
+  const last = items[items.length - 1];
+  return {
+    items,
+    nextCursor: items.length === QUEUE_PAGE_SIZE && last ? { beforeCreatedAt: last.createdAt, beforeDocumentId: last.documentId } : null,
+  };
+}
+
+export interface ReceivingQueueUploader {
+  appUserId: string;
+  name: string;
+}
+
+/**
+ * All distinct uploaders of this organization's non-archived documents
+ * -- the Uploaded By filter's option list. Before pagination the page
+ * derived this from the full fetched queue; a single page can no longer
+ * see every uploader, so the dropdown gets its own dedicated, bounded
+ * query instead of silently shrinking to page one's uploaders.
+ */
+export async function listReceivingQueueUploaders(organizationId: string): Promise<ReceivingQueueUploader[]> {
+  const serviceClient = getServiceRoleClient();
+  const { data, error } = await serviceClient
+    .from("documents")
+    .select("uploaded_by_app_user_id")
+    .eq("organization_id", organizationId)
+    .limit(2000);
+  if (error) {
+    throw new Error(`listReceivingQueueUploaders failed: ${error.message}`);
+  }
+  const uploaderIds = Array.from(new Set((data ?? []).map((r) => r.uploaded_by_app_user_id as string).filter(Boolean)));
+  if (uploaderIds.length === 0) return [];
+
+  const { data: appUserRows } = await serviceClient.from("app_users").select("id, employees(first_name, last_name)").in("id", uploaderIds);
+  return ((appUserRows ?? []) as EmployeeNameRow[])
+    .map((row) => ({ appUserId: row.id, name: displayName(row) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }

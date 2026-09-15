@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { getServiceRoleClientMock } = vi.hoisted(() => ({ getServiceRoleClientMock: vi.fn() }));
 vi.mock("@/app/lib/supabase/serviceClient", () => ({ getServiceRoleClient: getServiceRoleClientMock }));
 
-import { getReceivingQueue } from "@/app/lib/documents/receivingQueue";
+import { getReceivingQueue, getReceivingQueuePage } from "@/app/lib/documents/receivingQueue";
+import { RECEIVING_TAB_STATUSES, matchesReceivingTab } from "@/app/manager/(app)/receiving/_lib/receivingPresentation";
 
 function fakeClient(opts: {
   queueRows: Record<string, unknown>[];
@@ -346,5 +347,106 @@ describe("getReceivingQueue -- batched inventory posting status", () => {
     const result = await getReceivingQueue("org-1");
 
     expect(result[0].postingStatus).toBeNull();
+  });
+});
+
+// ============================================================
+// Receiving Queue pagination (20260811100150)
+// ============================================================
+
+function pagedQueueRow(index: number): Record<string, unknown> {
+  return {
+    out_document_id: `doc-${String(index).padStart(3, "0")}`,
+    out_original_filename: `invoice-${index}.pdf`,
+    out_content_type: "application/pdf",
+    out_created_at: `2026-08-12T00:00:${String(59 - (index % 60)).padStart(2, "0")}Z`,
+    out_uploaded_by_app_user_id: "user-1",
+    out_purchase_document_id: null,
+    out_effective_vendor_id: null,
+    out_effective_document_type: null,
+    out_declared_vendor_id: null,
+    out_declared_document_type: null,
+    out_document_number: null,
+    out_document_date: null,
+    out_status: "NEEDS_REVIEW",
+    out_verified_by_app_user_id: null,
+    out_revision_number: null,
+    out_current_verified_revision_number: null,
+    out_created_by_app_user_id: null,
+    out_verification_method: null,
+  };
+}
+
+describe("getReceivingQueuePage -- keyset pagination wrapper", () => {
+  it("forwards filters, the tab's status set, and a null cursor with p_limit 50 on the first page", async () => {
+    const { rpc, from } = fakeClient({ queueRows: [] });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+
+    await getReceivingQueuePage("org-1", { vendorId: "vendor-1", q: "839291" }, ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"], null);
+
+    expect(rpc).toHaveBeenCalledWith("search_receiving_queue", {
+      p_organization_id: "org-1",
+      p_vendor_id: "vendor-1",
+      p_uploaded_by_app_user_id: null,
+      p_status: null,
+      p_document_type: null,
+      p_date_type: "uploaded",
+      p_date_from: null,
+      p_date_to: null,
+      p_query: "839291",
+      p_limit: 50,
+      p_statuses: ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"],
+      p_before_created_at: null,
+      p_before_document_id: null,
+    });
+  });
+
+  it("threads the cursor through verbatim and passes null statuses for the All tab", async () => {
+    const { rpc, from } = fakeClient({ queueRows: [] });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from });
+
+    await getReceivingQueuePage("org-1", {}, null, { beforeCreatedAt: "2026-08-12T00:00:30Z", beforeDocumentId: "doc-030" });
+
+    const params = rpc.mock.calls[0][1] as Record<string, unknown>;
+    expect(params.p_statuses).toBeNull();
+    expect(params.p_before_created_at).toBe("2026-08-12T00:00:30Z");
+    expect(params.p_before_document_id).toBe("doc-030");
+  });
+
+  it("returns nextCursor from the last row of a FULL page, and null for a short page", async () => {
+    const fullPageRows = Array.from({ length: 50 }, (_, i) => pagedQueueRow(i));
+    const fakeFull = fakeClient({ queueRows: fullPageRows, appUsers: [{ id: "user-1", employees: { first_name: "Dev", last_name: "One" } }] });
+    getServiceRoleClientMock.mockReturnValue(fakeFull);
+    const fullPage = await getReceivingQueuePage("org-1");
+    expect(fullPage.items).toHaveLength(50);
+    expect(fullPage.nextCursor).toEqual({
+      beforeCreatedAt: fullPage.items[49].createdAt,
+      beforeDocumentId: fullPage.items[49].documentId,
+    });
+
+    const fakeShort = fakeClient({ queueRows: fullPageRows.slice(0, 3), appUsers: [{ id: "user-1", employees: { first_name: "Dev", last_name: "One" } }] });
+    getServiceRoleClientMock.mockReturnValue(fakeShort);
+    const shortPage = await getReceivingQueuePage("org-1");
+    expect(shortPage.items).toHaveLength(3);
+    expect(shortPage.nextCursor).toBeNull();
+  });
+
+  it("throws (never a silently-empty page) if the RPC errors", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: { message: "boom" } });
+    getServiceRoleClientMock.mockReturnValue({ rpc, from: vi.fn() });
+    await expect(getReceivingQueuePage("org-1")).rejects.toThrow(/search_receiving_queue failed: boom/);
+  });
+});
+
+describe("RECEIVING_TAB_STATUSES -- one source of truth for tab filtering", () => {
+  it("agrees with matchesReceivingTab for every status and tab", () => {
+    const statuses = ["PROCESSING", "STALLED", "NEEDS_REVIEW", "FAILED", "DRAFT", "READY_FOR_VERIFICATION", "VERIFIED"] as const;
+    for (const tab of ["ALL", "NEEDS_ATTENTION", "READY_FOR_VERIFICATION", "VERIFIED"] as const) {
+      const set = RECEIVING_TAB_STATUSES[tab];
+      for (const status of statuses) {
+        const viaSet = set === null || set.includes(status);
+        expect(viaSet).toBe(matchesReceivingTab(status, tab));
+      }
+    }
   });
 });

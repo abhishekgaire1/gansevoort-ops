@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
-import { getReceivingQueue, type ReceivingQueueFilters } from "@/app/lib/documents/receivingQueue";
+import { getReceivingQueuePage, listReceivingQueueUploaders, type ReceivingQueueFilters } from "@/app/lib/documents/receivingQueue";
 import type { ReceivingItemStatus } from "@/app/lib/documents/documentStatus";
 import { shouldPollForStatuses } from "@/app/lib/documents/pollingDecision";
 import { StatusPoller } from "@/app/components/documents/StatusPoller";
@@ -8,17 +8,10 @@ import { listVendors } from "@/app/actions/vendors";
 import { getActiveCaptureSessionAction } from "@/app/actions/invoiceCaptureDesktop";
 import { UploadDocumentForm } from "./_components/UploadDocumentForm";
 import { TakePhotoWithPhoneFlow } from "./_components/TakePhotoWithPhoneFlow";
+import { ReceivingQueueList } from "./_components/ReceivingQueueList";
 import type { PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 import { PageHeader } from "@/app/components/manager/PageHeader";
-import { StatusBadge } from "@/app/components/manager/StatusBadge";
-import { EmptyState } from "@/app/components/manager/EmptyState";
-import {
-  RECEIVING_TABS,
-  matchesReceivingTab,
-  receivingStatusPresentation,
-  viewerRelationshipFor,
-  type ReceivingTabKey,
-} from "./_lib/receivingPresentation";
+import { RECEIVING_TABS, RECEIVING_TAB_STATUSES, receivingStatusPresentation, type ReceivingTabKey } from "./_lib/receivingPresentation";
 
 /**
  * The manager receiving work queue -- a document/extraction/
@@ -27,9 +20,13 @@ import {
  * documentStatus.ts); nothing here is stored redundantly. Filters are a
  * plain server-rendered GET form -- no client JS needed for filtering
  * itself, Next.js re-renders this Server Component from the URL's
- * searchParams. Tabs (Part 8) are a client-side grouping over the same
- * already-fetched rows, composed with (not a replacement for) the
- * precise "Status" filter under More Filters.
+ * searchParams. Since the pagination pass, the active tab's status SET
+ * (Part 8) is pushed into search_receiving_queue itself -- applied
+ * BEFORE its limit alongside every other filter -- and the page fetches
+ * only the first QUEUE_PAGE_SIZE rows; older pages append client-side
+ * via ReceivingQueueList's Load More. The tab remains composed with
+ * (not a replacement for) the precise "Status" filter under More
+ * Filters.
  */
 export const dynamic = "force-dynamic";
 
@@ -87,19 +84,20 @@ export default async function ReceivingQueuePage({
     q: firstValue(params.q),
   };
 
-  const [fullQueue, vendorsResult, activeCaptureResult] = await Promise.all([
-    getReceivingQueue(auth.manager.organizationId, filters),
+  const [queuePage, uploaders, vendorsResult, activeCaptureResult] = await Promise.all([
+    getReceivingQueuePage(auth.manager.organizationId, filters, RECEIVING_TAB_STATUSES[tab]),
+    listReceivingQueueUploaders(auth.manager.organizationId),
     listVendors(),
     getActiveCaptureSessionAction(),
   ]);
   const vendors = vendorsResult.ok ? vendorsResult.vendors : [];
   const initialActiveCaptureSession = activeCaptureResult.ok ? activeCaptureResult.session : null;
-  const queue = fullQueue.filter((item) => matchesReceivingTab(item.status, tab));
-  const statuses = fullQueue.map((item) => item.status);
+  // Extraction-status polling watches the FIRST page only -- PROCESSING/
+  // STALLED documents are by definition recent uploads, and the queue is
+  // newest-first, so anything still extracting is on page one.
+  const statuses = queuePage.items.map((item) => item.status);
 
-  const uploaderOptions = Array.from(
-    new Map(fullQueue.map((item) => [item.uploadedByAppUserId, item.uploadedByName])).entries()
-  ).sort((a, b) => a[1].localeCompare(b[1]));
+  const uploaderOptions = uploaders.map((u) => [u.appUserId, u.name] as [string, string]);
 
   const urlParams = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -256,76 +254,13 @@ export default async function ReceivingQueuePage({
         </div>
       ) : null}
 
-      <div className="mt-6 flex flex-col divide-y divide-zinc-800 rounded-2xl border border-zinc-800 bg-zinc-900">
-        {queue.length === 0 ? (
-          <div className="p-1">
-            <EmptyState
-              message="No documents match these filters."
-              action={
-                <Link href="/manager/receiving" className="text-xs text-amber-400 underline">
-                  Clear Filters
-                </Link>
-              }
-            />
-          </div>
-        ) : (
-          queue.map((item) => {
-            const href = item.purchaseDocumentId ? `/manager/purchases/${item.purchaseDocumentId}` : `/manager/receiving/${item.documentId}`;
-            const viewer = viewerRelationshipFor(item.createdByAppUserId, auth.manager.appUserId);
-            const presentation = receivingStatusPresentation(item.status, viewer, item.postingStatus);
-            return (
-              <Link key={item.documentId} href={href} className="flex items-center justify-between gap-4 px-4 py-4 hover:bg-zinc-800/50">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="truncate text-sm font-semibold text-zinc-100">{item.vendorName ?? item.originalFilename}</p>
-                    {item.documentType ? <span className="shrink-0 text-xs text-zinc-500">{item.documentType}</span> : null}
-                  </div>
-                  <p className="mt-0.5 truncate text-xs text-zinc-500">
-                    {item.documentNumber ? `#${item.documentNumber} · ` : ""}
-                    {item.documentDate ? `${item.documentDate} · ` : ""}
-                    Uploaded by {item.uploadedByName} on {new Date(item.createdAt).toLocaleDateString()}
-                    {item.verifiedByName ? ` · Verified by ${item.verifiedByName}` : ""}
-                    {item.verificationMethod === "SOLE_APPROVER" ? " · Single-manager approval" : ""}
-                  </p>
-                  {/* Status Language -- Verification: viewer-relative context
-                      line, never a fabricated "sent at" time (the queue's own
-                      createdAt is the ORIGINAL upload time, not the later
-                      submit time -- shown truthfully as "Uploaded by" above). */}
-                  {item.status === "READY_FOR_VERIFICATION" && viewer === "preparer" ? (
-                    <p className="mt-0.5 text-xs text-zinc-500">Waiting for another manager to verify.</p>
-                  ) : null}
-                  {item.status === "READY_FOR_VERIFICATION" && viewer === "eligible_verifier" && item.createdByName ? (
-                    <p className="mt-0.5 text-xs text-zinc-500">Prepared by {item.createdByName}</p>
-                  ) : null}
-                  {item.originalVendorName || item.originalDocumentType ? (
-                    <p className="mt-0.5 truncate text-xs text-amber-500">
-                      Originally selected: {item.originalVendorName ?? ""}
-                      {item.originalVendorName && item.originalDocumentType ? " · " : ""}
-                      {item.originalDocumentType ?? ""}
-                    </p>
-                  ) : null}
-                </div>
-                <span className="flex shrink-0 flex-col items-end gap-1.5">
-                  <StatusBadge
-                    label={
-                      item.isAmendmentInProgress
-                        ? `Amendment ${presentation.label} · Rev ${item.revisionNumber}`
-                        : !item.isAmendmentInProgress && item.status === "VERIFIED" && item.revisionNumber && item.revisionNumber > 1
-                          ? `${presentation.label} · Rev ${item.revisionNumber} · Current`
-                          : presentation.label
-                    }
-                    tone={presentation.tone}
-                  />
-                  {item.isAmendmentInProgress && item.currentVerifiedRevisionNumber ? (
-                    <span className="text-[10px] text-zinc-500">Current verified: Rev {item.currentVerifiedRevisionNumber}</span>
-                  ) : null}
-                  {presentation.actionLabel ? <span className="text-xs font-medium text-amber-400">{presentation.actionLabel}</span> : null}
-                </span>
-              </Link>
-            );
-          })
-        )}
-      </div>
+      <ReceivingQueueList
+        initialItems={queuePage.items}
+        initialNextCursor={queuePage.nextCursor}
+        filters={filters}
+        tab={tab}
+        currentAppUserId={auth.manager.appUserId}
+      />
     </div>
   );
 }

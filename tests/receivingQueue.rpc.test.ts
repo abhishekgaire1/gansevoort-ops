@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { finalizeDocumentUploadRpc } from "@/app/lib/documents/finalizeDocumentUploadRpc";
 import { initializePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/initializePurchaseDocumentDraftRpc";
 import { savePurchaseDocumentDraftRpc } from "@/app/lib/purchaseDocuments/savePurchaseDocumentDraftRpc";
-import { getReceivingQueue } from "@/app/lib/documents/receivingQueue";
+import { getReceivingQueue, getReceivingQueuePage, type ReceivingQueueCursor } from "@/app/lib/documents/receivingQueue";
 import { setupRpcTestFixtures, type RpcTestFixtures } from "./testFixtures";
 import type { PurchaseDocumentLine } from "@/app/lib/purchaseDocuments/types";
 
@@ -188,6 +188,100 @@ describe("search_receiving_queue -- filtering happens before the limit, not afte
     // tighter still when 22 .rpc.test.ts files run concurrently against the
     // same instance -- a longer timeout, not a weaker assertion, is the
     // correct fix for a genuinely slower integration test.
+    60_000
+  );
+});
+
+describe("search_receiving_queue -- keyset pagination (20260811100150)", () => {
+  /** Five bare documents (no extraction -> derived status FAILED) with a
+   * run-unique filename tag so p_query scopes every assertion to exactly
+   * these rows, and with EXPLICIT created_at values including one shared
+   * timestamp -- proving the (created_at, document_id) tiebreaker keeps
+   * ordering and cursors deterministic where created_at alone could not. */
+  async function insertTaggedDocuments(tag: string): Promise<string[]> {
+    const baseTimeMs = Date.now() - 60_000;
+    const rows = Array.from({ length: 5 }, (_, i) => ({
+      organization_id: fx.organizationId,
+      uploaded_by_app_user_id: fx.changeableEmployeeAppUserId,
+      storage_path: `org/${fx.organizationId}/documents/${tag}-${randomUUID()}/original.pdf`,
+      original_filename: `${tag}-${i}.pdf`,
+      content_type: "application/pdf",
+      byte_size: 1000,
+      file_sha256: randomBytes(32).toString("hex"),
+      // Rows 2 and 3 share ONE timestamp on purpose.
+      created_at: new Date(baseTimeMs + (i === 3 ? 2 : i) * 1000).toISOString(),
+    }));
+    const { data, error } = await fx.supabase.from("documents").insert(rows).select("id");
+    if (error) throw error;
+    return (data ?? []).map((r) => r.id as string);
+  }
+
+  it(
+    "pages converge with no duplicates or gaps, deterministically, including same-timestamp rows",
+    async () => {
+      const tag = `keyset-${randomUUID().slice(0, 8)}`;
+      const insertedIds = await insertTaggedDocuments(tag);
+
+      // Small pages via the RPC directly (the wrapper's page size is
+      // fixed at 50) -- exercising the exact cursor mechanics.
+      const walk = async (): Promise<string[]> => {
+        const seen: string[] = [];
+        let cursor: ReceivingQueueCursor | null = null;
+        for (let page = 0; page < 6; page += 1) {
+          const { data, error } = await fx.supabase.rpc("search_receiving_queue", {
+            p_organization_id: fx.organizationId,
+            p_query: tag,
+            p_limit: 2,
+            p_before_created_at: cursor?.beforeCreatedAt ?? null,
+            p_before_document_id: cursor?.beforeDocumentId ?? null,
+          });
+          if (error) throw new Error(error.message);
+          const rows = (data ?? []) as { out_document_id: string; out_created_at: string }[];
+          if (rows.length === 0) break;
+          for (const row of rows) seen.push(row.out_document_id);
+          const last = rows[rows.length - 1];
+          cursor = { beforeCreatedAt: last.out_created_at, beforeDocumentId: last.out_document_id };
+          if (rows.length < 2) break;
+        }
+        return seen;
+      };
+
+      const first = await walk();
+      const second = await walk();
+      expect(first).toHaveLength(5);
+      expect(new Set(first).size).toBe(5);
+      expect(new Set(first)).toEqual(new Set(insertedIds));
+      expect(second).toEqual(first);
+
+      // The wrapper's single full page agrees with the walked order.
+      const wrapperPage = await getReceivingQueuePage(fx.organizationId, { q: tag });
+      expect(wrapperPage.items.map((i) => i.documentId)).toEqual(first);
+      expect(wrapperPage.nextCursor).toBeNull();
+    },
+    60_000
+  );
+
+  it(
+    "the tab's status SET filters before the limit, matching the tab semantics",
+    async () => {
+      const tag = `keyset-${randomUUID().slice(0, 8)}`;
+      await insertTaggedDocuments(tag); // bare docs derive status FAILED
+
+      const needsAttention = await getReceivingQueuePage(fx.organizationId, { q: tag }, ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"]);
+      expect(needsAttention.items).toHaveLength(5);
+      for (const item of needsAttention.items) expect(item.status).toBe("FAILED");
+
+      const verifiedOnly = await getReceivingQueuePage(fx.organizationId, { q: tag }, ["VERIFIED"]);
+      expect(verifiedOnly.items).toHaveLength(0);
+
+      // A DRAFT document (full pipeline) matches the Needs Attention set.
+      const documentNumber = `KEYSET-DRAFT-${randomUUID().slice(0, 8)}`;
+      const draft = await createDraftPurchaseDocument(documentNumber);
+      const draftInSet = await getReceivingQueuePage(fx.organizationId, { q: documentNumber }, ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"]);
+      expect(draftInSet.items.map((i) => i.documentId)).toContain(draft.documentId);
+      const draftOutOfSet = await getReceivingQueuePage(fx.organizationId, { q: documentNumber }, ["READY_FOR_VERIFICATION"]);
+      expect(draftOutOfSet.items).toHaveLength(0);
+    },
     60_000
   );
 });

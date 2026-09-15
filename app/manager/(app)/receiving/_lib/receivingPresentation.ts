@@ -25,10 +25,25 @@ export const RECEIVING_TABS: { key: ReceivingTabKey; label: string }[] = [
 // they're each a distinct, high-volume workflow stage on their own.
 const NEEDS_ATTENTION_STATUSES: ReceivingItemStatus[] = ["NEEDS_REVIEW", "STALLED", "FAILED", "DRAFT"];
 
+/**
+ * The ONE source of truth for which canonical statuses each tab shows --
+ * null means "no status filter" (the All tab). Since Receiving Queue
+ * pagination (20260811100150) the active tab's set is pushed into
+ * search_receiving_queue's own WHERE (before its LIMIT), so this table
+ * is what keeps the SQL filter and this module's own
+ * matchesReceivingTab/receivingTabForStatus from ever diverging.
+ */
+export const RECEIVING_TAB_STATUSES: Record<ReceivingTabKey, ReceivingItemStatus[] | null> = {
+  ALL: null,
+  NEEDS_ATTENTION: NEEDS_ATTENTION_STATUSES,
+  READY_FOR_VERIFICATION: ["READY_FOR_VERIFICATION"],
+  VERIFIED: ["VERIFIED"],
+};
+
 export function receivingTabForStatus(status: ReceivingItemStatus): ReceivingTabKey {
-  if (status === "READY_FOR_VERIFICATION") return "READY_FOR_VERIFICATION";
-  if (status === "VERIFIED") return "VERIFIED";
-  if (NEEDS_ATTENTION_STATUSES.includes(status)) return "NEEDS_ATTENTION";
+  if (RECEIVING_TAB_STATUSES.READY_FOR_VERIFICATION?.includes(status)) return "READY_FOR_VERIFICATION";
+  if (RECEIVING_TAB_STATUSES.VERIFIED?.includes(status)) return "VERIFIED";
+  if (RECEIVING_TAB_STATUSES.NEEDS_ATTENTION?.includes(status)) return "NEEDS_ATTENTION";
   return "ALL"; // PROCESSING (still automatically working, no action yet) and the unreachable DISCARDED
 }
 
