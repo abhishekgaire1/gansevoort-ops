@@ -19,6 +19,7 @@ export function AdminVendorDetailView({ vendor, aliases, mappings }: { vendor: A
   const router = useRouter();
   const [form, setForm] = useState<VendorDetailsInput>({
     name: vendor.name,
+    classification: vendor.classification,
     legalName: vendor.legalName ?? "",
     accountNumber: vendor.accountNumber ?? "",
     contactName: vendor.contactName ?? "",
@@ -42,6 +43,7 @@ export function AdminVendorDetailView({ vendor, aliases, mappings }: { vendor: A
   const isActive = vendor.isActive;
   const dirty =
     form.name !== vendor.name ||
+    (form.classification ?? "INVENTORY") !== vendor.classification ||
     (form.legalName ?? "") !== (vendor.legalName ?? "") ||
     (form.accountNumber ?? "") !== (vendor.accountNumber ?? "") ||
     (form.contactName ?? "") !== (vendor.contactName ?? "") ||
@@ -117,8 +119,9 @@ export function AdminVendorDetailView({ vendor, aliases, mappings }: { vendor: A
 
       <div>
         <h1 className="text-xl font-semibold text-zinc-100">{vendor.name}</h1>
-        <div className="mt-1">
+        <div className="mt-1 flex items-center gap-2">
           <StatusBadge label={isActive ? "Active" : "Inactive"} tone={isActive ? "success" : "neutral"} />
+          {vendor.classification === "NON_INVENTORY" ? <StatusBadge label="Non-inventory" tone="neutral" /> : null}
         </div>
       </div>
 
@@ -135,6 +138,20 @@ export function AdminVendorDetailView({ vendor, aliases, mappings }: { vendor: A
               }}
               className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
             />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-zinc-400">
+            Classification
+            <select
+              value={form.classification ?? "INVENTORY"}
+              onChange={(e) => setForm((f) => ({ ...f, classification: e.target.value as "INVENTORY" | "NON_INVENTORY" }))}
+              className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+            >
+              <option value="INVENTORY">Inventory</option>
+              <option value="NON_INVENTORY">Non-inventory</option>
+            </select>
+            <span className="text-[10px] text-zinc-600">
+              Inventory vendors can still supply non-inventory items — this sets the default when classifying their new lines, never a restriction.
+            </span>
           </label>
           <label className="flex flex-col gap-1 text-xs text-zinc-400">
             Legal Name

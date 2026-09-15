@@ -14,6 +14,7 @@ import type { ResolvedUnitNote } from "@/app/lib/purchaseDocuments/lineUnitResol
 import { createVendorFromReceiving, type VendorSummary } from "@/app/actions/vendors";
 import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, inlineWarningClass, inlineSuccessClass, inlineNeutralClass } from "@/app/components/manager/surfaces";
 import { primaryButtonClass, textLinkClass } from "@/app/components/manager/buttonStyles";
+import { vendorOptionLabel } from "@/app/lib/vendors/vendorPresentation";
 
 const DOCUMENT_TYPE_OPTIONS: { value: PurchaseDocumentType; label: string }[] = [
   { value: "INVOICE", label: "Invoice" },
@@ -251,7 +252,7 @@ export function Step1ReviewInvoice({
                   value={header.vendorId ?? ""}
                   disabled={!editable}
                   onChange={(v) => onHeaderChange("vendorId", v || null)}
-                  options={[{ value: "", label: "Select vendor…" }, ...vendorList.map((v) => ({ value: v.id, label: v.name }))]}
+                  options={[{ value: "", label: "Select vendor…" }, ...vendorList.map((v) => ({ value: v.id, label: vendorOptionLabel(v) }))]}
                 />
                 <SelectField
                   label="Document type"

@@ -220,41 +220,112 @@ describe("set_inventory_category_active -- deactivation blocked by active depend
   });
 });
 
-describe("set_spend_category_active -- deactivation blocked by active child categories only, never by historical usage alone", () => {
-  it("blocks deactivating a parent with an active child (GA056), succeeds once the child is deactivated", async () => {
-    const { data: rootData } = await fx.supabase.rpc("create_spend_category", {
+describe("set_spend_category_active -- flat model (20260811100102): deactivation never blocked by historical usage", () => {
+  it("creates a flat spend category (3-arg signature) and deactivates it freely", async () => {
+    const { data: catData, error: createError } = await fx.supabase.rpc("create_spend_category", {
       p_organization_id: fx.organizationId,
       p_app_user_id: fx.changeableEmployeeAppUserId,
-      p_name: `TEST Blocking Parent ${randomUUID().slice(0, 8)}`,
-      p_parent_id: null,
+      p_name: `TEST Flat Spend ${randomUUID().slice(0, 8)}`,
     });
-    const rootId = (rootData as { out_category_id: string }[])[0].out_category_id;
-
-    const { data: childData } = await fx.supabase.rpc("create_spend_category", {
-      p_organization_id: fx.organizationId,
-      p_app_user_id: fx.changeableEmployeeAppUserId,
-      p_name: `TEST Blocking Child ${randomUUID().slice(0, 8)}`,
-      p_parent_id: rootId,
-    });
-    const childId = (childData as { out_category_id: string }[])[0].out_category_id;
-
-    const { error: blockedError } = await fx.supabase.rpc("set_spend_category_active", {
-      p_organization_id: fx.organizationId,
-      p_app_user_id: fx.changeableEmployeeAppUserId,
-      p_category_id: rootId,
-      p_is_active: false,
-    });
-    expect(blockedError).not.toBeNull();
-    expect(blockedError!.code).toBe("GA056");
-
-    await fx.supabase.rpc("set_spend_category_active", { p_organization_id: fx.organizationId, p_app_user_id: fx.changeableEmployeeAppUserId, p_category_id: childId, p_is_active: false });
+    expect(createError).toBeNull();
+    const categoryId = (catData as { out_category_id: string }[])[0].out_category_id;
 
     const { error: okError } = await fx.supabase.rpc("set_spend_category_active", {
       p_organization_id: fx.organizationId,
       p_app_user_id: fx.changeableEmployeeAppUserId,
-      p_category_id: rootId,
+      p_category_id: categoryId,
       p_is_active: false,
     });
     expect(okError).toBeNull();
+
+    const { data: row } = await fx.supabase.from("spend_categories").select("is_active").eq("id", categoryId).single();
+    expect(row!.is_active).toBe(false);
+  });
+});
+
+describe("vendor classification (20260811100152)", () => {
+  it("creates a NON_INVENTORY vendor, persists + audits the classification, and an omitted value defaults to INVENTORY", async () => {
+    const { data: nonInv, error: nonInvError } = await fx.supabase.rpc("create_vendor_admin", {
+      p_organization_id: fx.organizationId,
+      p_actor_app_user_id: fx.changeableEmployeeAppUserId,
+      p_name: vendorName(),
+      p_classification: "NON_INVENTORY",
+    });
+    expect(nonInvError).toBeNull();
+    const nonInvId = (nonInv as { out_vendor_id: string }[])[0].out_vendor_id;
+    const { data: nonInvRow } = await fx.supabase.from("vendors").select("classification").eq("id", nonInvId).single();
+    expect(nonInvRow!.classification).toBe("NON_INVENTORY");
+    const { data: audit } = await fx.supabase.from("audit_events").select("after_state").eq("entity_id", nonInvId).eq("action", "VENDOR_CREATED").maybeSingle();
+    expect((audit!.after_state as { classification?: string }).classification).toBe("NON_INVENTORY");
+
+    // Omitted classification -> the INVENTORY default (also the backfill
+    // value for every pre-existing vendor).
+    const { data: plain } = await fx.supabase.rpc("create_vendor_admin", {
+      p_organization_id: fx.organizationId,
+      p_actor_app_user_id: fx.changeableEmployeeAppUserId,
+      p_name: vendorName(),
+    });
+    const plainId = (plain as { out_vendor_id: string }[])[0].out_vendor_id;
+    const { data: plainRow } = await fx.supabase.from("vendors").select("classification").eq("id", plainId).single();
+    expect(plainRow!.classification).toBe("INVENTORY");
+  });
+
+  it("update_vendor_details reclassifies in place (same id) and audits before/after", async () => {
+    const name = vendorName();
+    const { data } = await fx.supabase.rpc("create_vendor_admin", {
+      p_organization_id: fx.organizationId,
+      p_actor_app_user_id: fx.changeableEmployeeAppUserId,
+      p_name: name,
+    });
+    const vendorId = (data as { out_vendor_id: string }[])[0].out_vendor_id;
+
+    const { error } = await fx.supabase.rpc("update_vendor_details", {
+      p_organization_id: fx.organizationId,
+      p_actor_app_user_id: fx.changeableEmployeeAppUserId,
+      p_vendor_id: vendorId,
+      p_name: name,
+      p_classification: "NON_INVENTORY",
+    });
+    expect(error).toBeNull();
+
+    const { data: row } = await fx.supabase.from("vendors").select("id, classification").eq("id", vendorId).single();
+    expect(row!.id).toBe(vendorId);
+    expect(row!.classification).toBe("NON_INVENTORY");
+
+    const { data: audit } = await fx.supabase
+      .from("audit_events")
+      .select("before_state, after_state")
+      .eq("entity_id", vendorId)
+      .eq("action", "VENDOR_UPDATED")
+      .maybeSingle();
+    expect((audit!.before_state as { classification?: string }).classification).toBe("INVENTORY");
+    expect((audit!.after_state as { classification?: string }).classification).toBe("NON_INVENTORY");
+  });
+
+  it("rejects an invalid classification value and leaves nothing behind", async () => {
+    const name = vendorName();
+    const { error } = await fx.supabase.rpc("create_vendor_admin", {
+      p_organization_id: fx.organizationId,
+      p_actor_app_user_id: fx.changeableEmployeeAppUserId,
+      p_name: name,
+      p_classification: "SOMETHING_ELSE",
+    });
+    expect(error).not.toBeNull();
+    expect(error!.code).toBe("GA033");
+    const { data: rows } = await fx.supabase.from("vendors").select("id").eq("organization_id", fx.organizationId).eq("name", name);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("create_vendor_from_receiving (the Manager quick-create) lands on the INVENTORY default", async () => {
+    const { data, error } = await fx.supabase.rpc("create_vendor_from_receiving", {
+      p_organization_id: fx.organizationId,
+      p_actor_app_user_id: fx.changeableEmployeeAppUserId,
+      p_vendor_name: vendorName(),
+      p_purchase_document_id: null,
+    });
+    expect(error).toBeNull();
+    const vendorId = (data as { out_vendor_id: string }[])[0].out_vendor_id;
+    const { data: row } = await fx.supabase.from("vendors").select("classification").eq("id", vendorId).single();
+    expect(row!.classification).toBe("INVENTORY");
   });
 });

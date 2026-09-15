@@ -18,6 +18,7 @@ const adminVendorsLib = vi.hoisted(() => ({
   getAdminVendor: vi.fn(async () => ({
     vendorId: "vendor-1",
     name: "Test Vendor",
+    classification: "INVENTORY",
     legalName: null,
     accountNumber: null,
     contactName: null,

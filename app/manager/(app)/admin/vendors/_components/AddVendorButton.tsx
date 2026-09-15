@@ -6,7 +6,7 @@ import { createAdminVendorAction, findSimilarVendorsAction } from "@/app/actions
 import type { SimilarVendorCandidate, VendorDetailsInput } from "@/app/lib/admin/vendors";
 import { primaryButtonClass, secondaryButtonClass } from "@/app/components/manager/buttonStyles";
 
-const EMPTY_FORM: VendorDetailsInput = { name: "", legalName: "", accountNumber: "", contactName: "", email: "", phone: "", notes: "" };
+const EMPTY_FORM: VendorDetailsInput = { name: "", classification: "INVENTORY", legalName: "", accountNumber: "", contactName: "", email: "", phone: "", notes: "" };
 
 /**
  * Admin -> Vendors "+ Add Vendor" (Part 3-6). Duplicate protection is
@@ -113,6 +113,20 @@ export function AddVendorButton() {
                   }}
                   className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
                 />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                Classification
+                <select
+                  value={form.classification ?? "INVENTORY"}
+                  onChange={(e) => setForm((f) => ({ ...f, classification: e.target.value as "INVENTORY" | "NON_INVENTORY" }))}
+                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-50"
+                >
+                  <option value="INVENTORY">Inventory</option>
+                  <option value="NON_INVENTORY">Non-inventory</option>
+                </select>
+                <span className="text-[10px] text-zinc-600">
+                  Sets the default when classifying this vendor&apos;s new invoice lines — never a restriction.
+                </span>
               </label>
               <label className="flex flex-col gap-1 text-xs text-zinc-400">
                 Legal Name

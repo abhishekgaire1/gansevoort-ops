@@ -50,12 +50,28 @@ describe("listVendors / searchVendors", () => {
     expect(result).toEqual({ ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." });
   });
 
-  it("maps rows to VendorSummary", async () => {
-    const from = vi.fn(() => createChainable({ data: [{ id: "v-1", name: "Baldor", is_active: true }], error: null }));
+  it("maps rows to VendorSummary, including the classification (defaulting a legacy null to INVENTORY)", async () => {
+    const from = vi.fn(() =>
+      createChainable({
+        data: [
+          { id: "v-1", name: "Baldor", is_active: true, classification: "INVENTORY" },
+          { id: "v-2", name: "Office Depot", is_active: true, classification: "NON_INVENTORY" },
+          { id: "v-3", name: "Legacy", is_active: true, classification: null },
+        ],
+        error: null,
+      })
+    );
     getServiceRoleClientMock.mockReturnValue({ from });
 
     const result = await listVendors();
-    expect(result).toEqual({ ok: true, vendors: [{ id: "v-1", name: "Baldor", isActive: true }] });
+    expect(result).toEqual({
+      ok: true,
+      vendors: [
+        { id: "v-1", name: "Baldor", isActive: true, classification: "INVENTORY" },
+        { id: "v-2", name: "Office Depot", isActive: true, classification: "NON_INVENTORY" },
+        { id: "v-3", name: "Legacy", isActive: true, classification: "INVENTORY" },
+      ],
+    });
   });
 });
 
@@ -110,7 +126,8 @@ describe("createVendorFromReceiving", () => {
       p_vendor_name: "Baldor Foods",
       p_purchase_document_id: "pd-1",
     });
-    expect(result).toEqual({ ok: true, vendor: { id: "v-new", name: "Baldor Foods", isActive: true } });
+    // Quick-created vendors land on the column default (INVENTORY).
+    expect(result).toEqual({ ok: true, vendor: { id: "v-new", name: "Baldor Foods", isActive: true, classification: "INVENTORY" } });
   });
 
   it("defaults p_purchase_document_id to null when the caller doesn't supply one (the pre-upload quick-create context, before any document exists)", async () => {

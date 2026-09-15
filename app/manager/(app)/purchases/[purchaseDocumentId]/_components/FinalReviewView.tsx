@@ -26,6 +26,7 @@ import type { EffectiveReceivingLine } from "@/app/lib/receiving/effectiveReceiv
 import type { ReceivingLineInfo } from "@/app/lib/receiving/getReceivingLines";
 import type { ReceiptLineConditionStatus } from "@/app/lib/receiving/types";
 import type { VendorSummary } from "@/app/actions/vendors";
+import { vendorOptionLabel } from "@/app/lib/vendors/vendorPresentation";
 
 /**
  * Manager 2's FINAL VERIFICATION -- the second/final pair of eyes, with the
@@ -603,7 +604,7 @@ export function FinalReviewView(props: {
                 disabled={false}
                 changed={changedHeaderFields.has("vendorId")}
                 onChange={(value) => updateHeader("vendorId", value === "" ? null : value)}
-                options={[{ value: "", label: "Select vendor…" }, ...props.vendors.map((vendor) => ({ value: vendor.id, label: vendor.name }))]}
+                options={[{ value: "", label: "Select vendor…" }, ...props.vendors.map((vendor) => ({ value: vendor.id, label: vendorOptionLabel(vendor) }))]}
               />
               <SelectField
                 label="Document Type"

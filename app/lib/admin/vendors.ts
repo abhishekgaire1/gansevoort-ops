@@ -10,10 +10,19 @@ import { mapAdminRpcError } from "@/app/lib/admin/errors";
  * already reads -- never a parallel vendor system.
  */
 
+/** INVENTORY vs NON_INVENTORY vendor -- an identity label plus the
+ * DEFAULT for new-line disposition when classifying that vendor's
+ * invoice lines. Never a restriction: an INVENTORY vendor may still
+ * supply non-inventory (expense) lines and vice versa; the per-line
+ * choice always wins. Deliberately named "classification", never
+ * "disposition" -- that word is the item-level concept. */
+export type VendorClassification = "INVENTORY" | "NON_INVENTORY";
+
 export interface AdminVendorSummary {
   vendorId: string;
   name: string;
   isActive: boolean;
+  classification: VendorClassification;
   accountNumber: string | null;
   contactName: string | null;
   mappingCount: number;
@@ -23,17 +32,19 @@ export interface ListAdminVendorsInput {
   organizationId: string;
   search?: string | null;
   status?: "active" | "inactive" | null;
+  classification?: VendorClassification | null;
 }
 
 export async function listAdminVendors(supabase: SupabaseClient, input: ListAdminVendorsInput): Promise<AdminVendorSummary[]> {
   let query = supabase
     .from("vendors")
-    .select("id, name, is_active, account_number, contact_name")
+    .select("id, name, is_active, classification, account_number, contact_name")
     .eq("organization_id", input.organizationId)
     .order("name");
 
   if (input.status === "active") query = query.eq("is_active", true);
   if (input.status === "inactive") query = query.eq("is_active", false);
+  if (input.classification) query = query.eq("classification", input.classification);
   if (input.search?.trim()) {
     const term = input.search.trim();
     query = query.or(`name.ilike.%${term}%,legal_name.ilike.%${term}%,account_number.ilike.%${term}%`);
@@ -46,6 +57,7 @@ export async function listAdminVendors(supabase: SupabaseClient, input: ListAdmi
     vendorId: row.id as string,
     name: row.name as string,
     isActive: row.is_active as boolean,
+    classification: (row.classification as VendorClassification | null) ?? "INVENTORY",
     accountNumber: (row.account_number as string | null) ?? null,
     contactName: (row.contact_name as string | null) ?? null,
     mappingCount: mappingCounts.get(row.id as string) ?? 0,
@@ -72,6 +84,7 @@ async function countActiveVendorMappings(supabase: SupabaseClient, organizationI
 export interface AdminVendorDetail {
   vendorId: string;
   name: string;
+  classification: VendorClassification;
   legalName: string | null;
   accountNumber: string | null;
   contactName: string | null;
@@ -85,7 +98,7 @@ export interface AdminVendorDetail {
 export async function getAdminVendor(supabase: SupabaseClient, organizationId: string, vendorId: string): Promise<AdminVendorDetail | null> {
   const { data, error } = await supabase
     .from("vendors")
-    .select("id, name, legal_name, account_number, contact_name, email, phone, notes, is_active, created_at")
+    .select("id, name, classification, legal_name, account_number, contact_name, email, phone, notes, is_active, created_at")
     .eq("organization_id", organizationId)
     .eq("id", vendorId)
     .maybeSingle();
@@ -94,6 +107,7 @@ export async function getAdminVendor(supabase: SupabaseClient, organizationId: s
   return {
     vendorId: data.id as string,
     name: data.name as string,
+    classification: (data.classification as VendorClassification | null) ?? "INVENTORY",
     legalName: data.legal_name as string | null,
     accountNumber: data.account_number as string | null,
     contactName: data.contact_name as string | null,
@@ -190,6 +204,7 @@ export async function findSimilarVendors(supabase: SupabaseClient, organizationI
 
 export interface VendorDetailsInput {
   name: string;
+  classification?: VendorClassification | null;
   legalName?: string | null;
   accountNumber?: string | null;
   contactName?: string | null;
@@ -209,6 +224,7 @@ export async function createAdminVendor(supabase: SupabaseClient, organizationId
     p_email: input.email ?? null,
     p_phone: input.phone ?? null,
     p_notes: input.notes ?? null,
+    p_classification: input.classification ?? "INVENTORY",
   });
   if (error) throw mapAdminRpcError(error);
   const row = (Array.isArray(data) ? data[0] : data) as { out_vendor_id: string } | undefined;
@@ -228,6 +244,7 @@ export async function updateAdminVendorDetails(supabase: SupabaseClient, organiz
     p_email: input.email ?? null,
     p_phone: input.phone ?? null,
     p_notes: input.notes ?? null,
+    p_classification: input.classification ?? "INVENTORY",
   });
   if (error) throw mapAdminRpcError(error);
 }

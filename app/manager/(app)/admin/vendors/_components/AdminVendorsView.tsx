@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { listAdminVendorsAction } from "@/app/actions/adminVendors";
-import type { AdminVendorSummary } from "@/app/lib/admin/vendors";
+import type { AdminVendorSummary, VendorClassification } from "@/app/lib/admin/vendors";
+import { vendorClassificationLabel } from "@/app/lib/vendors/vendorPresentation";
 import { StatusBadge } from "@/app/components/manager/StatusBadge";
 import { secondaryButtonClass } from "@/app/components/manager/buttonStyles";
 
@@ -12,11 +13,14 @@ const SEARCH_DEBOUNCE_MS = 300;
 /**
  * Admin -> Vendors list (Part 3) -- compact rows: name, status, mapping
  * count, "View/Edit →". No vendor spend charts/reporting (Part 61).
+ * Classification chip is shown only for Non-inventory vendors --
+ * inventory suppliers are the norm and badging every row says nothing.
  */
 export function AdminVendorsView({ initialVendors }: { initialVendors: AdminVendorSummary[] }) {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"active" | "inactive" | "ALL">("active");
+  const [classification, setClassification] = useState<VendorClassification | "ALL">("ALL");
   const [vendors, setVendors] = useState<AdminVendorSummary[]>(initialVendors);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,7 +39,7 @@ export function AdminVendorsView({ initialVendors }: { initialVendors: AdminVend
     let cancelled = false;
     setLoading(true);
     setError(null);
-    listAdminVendorsAction(search.trim() || null, status === "ALL" ? null : status).then((result) => {
+    listAdminVendorsAction(search.trim() || null, status === "ALL" ? null : status, classification === "ALL" ? null : classification).then((result) => {
       if (cancelled) return;
       setLoading(false);
       if (!result.ok) {
@@ -47,14 +51,15 @@ export function AdminVendorsView({ initialVendors }: { initialVendors: AdminVend
     return () => {
       cancelled = true;
     };
-  }, [search, status]);
+  }, [search, status, classification]);
 
-  const hasActiveFilters = search.trim() !== "" || status !== "active";
+  const hasActiveFilters = search.trim() !== "" || status !== "active" || classification !== "ALL";
 
   function clearFilters() {
     setSearchInput("");
     setSearch("");
     setStatus("active");
+    setClassification("ALL");
   }
 
   return (
@@ -68,6 +73,18 @@ export function AdminVendorsView({ initialVendors }: { initialVendors: AdminVend
             placeholder="Search vendors…"
             className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100"
           />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-zinc-400">
+          Classification
+          <select
+            value={classification}
+            onChange={(e) => setClassification(e.target.value as VendorClassification | "ALL")}
+            className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
+          >
+            <option value="ALL">All</option>
+            <option value="INVENTORY">Inventory</option>
+            <option value="NON_INVENTORY">Non-inventory</option>
+          </select>
         </label>
         <label className="flex flex-col gap-1 text-xs text-zinc-400">
           Status
@@ -107,6 +124,9 @@ export function AdminVendorsView({ initialVendors }: { initialVendors: AdminVend
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-3">
+                {vendor.classification === "NON_INVENTORY" ? (
+                  <StatusBadge label={vendorClassificationLabel(vendor.classification)} tone="neutral" />
+                ) : null}
                 <StatusBadge label={vendor.isActive ? "Active" : "Inactive"} tone={vendor.isActive ? "success" : "neutral"} />
                 <span className="text-xs font-medium text-amber-400">View / Edit →</span>
               </div>

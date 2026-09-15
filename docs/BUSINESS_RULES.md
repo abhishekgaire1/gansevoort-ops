@@ -30,6 +30,12 @@ Chicken Thigh — Boneless Skinless
 
 Different vendor descriptions must map to the same canonical item when they represent the same product.
 
+Vendors are classified as Inventory or Non-inventory. The classification
+defaults the disposition when classifying that vendor's new invoice
+lines, but never restricts it: an Inventory vendor may supply
+non-inventory (expense) lines, and a Non-inventory vendor may supply an
+inventory item. The per-line decision always wins.
+
 Creating or merging sensitive master data must support approval controls.
 
 The system must avoid duplicate canonical records.

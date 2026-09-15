@@ -1,5 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { defaultDispositionForVendor } from "@/app/lib/itemMaster/defaultDispositionForVendor";
 
 export interface AiProposedPurchaseUnit {
   vendorPurchaseUnitCode: string | null;
@@ -74,8 +75,11 @@ export async function listUnresolvedClassifications(supabase: SupabaseClient, or
   const lineByKey = new Map((lines ?? []).map((l) => [`${l.purchase_document_id}:${l.line_key}`, l]));
 
   const vendorIds = Array.from(new Set((purchaseDocuments ?? []).map((pd) => pd.vendor_id as string | null).filter((id): id is string => Boolean(id))));
-  const { data: vendors } = vendorIds.length > 0 ? await supabase.from("vendors").select("id, name").in("id", vendorIds) : { data: [] };
+  const { data: vendors } = vendorIds.length > 0 ? await supabase.from("vendors").select("id, name, classification").in("id", vendorIds) : { data: [] };
   const vendorNameById = new Map((vendors ?? []).map((v) => [v.id as string, v.name as string]));
+  const vendorClassificationById = new Map(
+    (vendors ?? []).map((v) => [v.id as string, ((v.classification as string | null) ?? "INVENTORY") as "INVENTORY" | "NON_INVENTORY"])
+  );
 
   const itemIds = Array.from(
     new Set(
@@ -123,7 +127,16 @@ export async function listUnresolvedClassifications(supabase: SupabaseClient, or
       aiProposedPurchaseUnit: (c.ai_proposed_purchase_unit as AiProposedPurchaseUnit | null) ?? null,
       aiNewItemProposal: isNewProposal
         ? {
-            disposition: (aiItem?.disposition as "INVENTORY" | "NON_INVENTORY" | undefined) ?? "INVENTORY",
+            // Vendor-aware default (vendor classification feature): a
+            // NON_INVENTORY vendor's lines start from Non-inventory
+            // regardless of the AI's description-only guess; INVENTORY
+            // vendors keep the AI proposal exactly as before. Only a
+            // DEFAULT -- the disposition select stays visible and
+            // overridable per line.
+            disposition: defaultDispositionForVendor(
+              purchaseDocument.vendor_id ? vendorClassificationById.get(purchaseDocument.vendor_id as string) : null,
+              (aiItem?.disposition as "INVENTORY" | "NON_INVENTORY" | undefined) ?? null
+            ),
             categoryId: (aiItem?.category_id as string | null | undefined) ?? null,
             baseUnitCode: (aiItemUnit?.code as string | undefined) ?? null,
             spendCategoryId: (aiItem?.spend_category_id as string | null | undefined) ?? null,

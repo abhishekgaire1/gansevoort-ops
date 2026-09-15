@@ -7,6 +7,7 @@ import { createVendorFromReceiving, type VendorSummary } from "@/app/actions/ven
 import { primaryButtonClass, secondaryButtonClass } from "@/app/components/manager/buttonStyles";
 import { initiateUpload, uploadAndFinalize as sharedUploadAndFinalize, type InitiatedUpload } from "../_lib/uploadFileToDocument";
 import { DocumentTypeSelector } from "./DocumentTypeSelector";
+import { vendorOptionLabel } from "@/app/lib/vendors/vendorPresentation";
 
 /**
  * Vendor-first + document-type-first intake (Milestone 2A.2): the manager
@@ -136,7 +137,7 @@ export function UploadDocumentForm({
                   <option value="">Select vendor…</option>
                   {vendorList.map((vendor) => (
                     <option key={vendor.id} value={vendor.id}>
-                      {vendor.name}
+                      {vendorOptionLabel(vendor)}
                     </option>
                   ))}
                 </select>

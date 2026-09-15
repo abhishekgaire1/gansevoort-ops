@@ -27,6 +27,7 @@ import type { DeclaredDocumentType } from "@/app/actions/documentUpload";
 import type { VendorSummary } from "@/app/actions/vendors";
 import { primaryButtonClass, secondaryButtonClass } from "@/app/components/manager/buttonStyles";
 import { DocumentTypeSelector } from "./DocumentTypeSelector";
+import { vendorOptionLabel } from "@/app/lib/vendors/vendorPresentation";
 
 const LAST_SCANNER_STORAGE_KEY = "gansevoort-last-scanner-id";
 const POLL_INTERVAL_MS = 400;
@@ -405,7 +406,7 @@ function ScanInvoiceModal({
                 <option value="">Select vendor…</option>
                 {vendors.map((vendor) => (
                   <option key={vendor.id} value={vendor.id}>
-                    {vendor.name}
+                    {vendorOptionLabel(vendor)}
                   </option>
                 ))}
               </select>

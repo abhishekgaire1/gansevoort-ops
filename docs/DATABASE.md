@@ -58,6 +58,10 @@ vendor_item_pack_versions
 
 Vendor aliases and vendor SKUs map to canonical inventory items.
 
+Vendors carry a classification (INVENTORY or NON_INVENTORY). It is an
+identity label and a classification default, never a restriction on
+what the vendor's lines may be classified as.
+
 ### Purchasing
 
 purchase_orders

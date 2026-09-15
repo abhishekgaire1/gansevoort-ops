@@ -17,6 +17,7 @@ import type { DeclaredDocumentType } from "@/app/actions/documentUpload";
 import { initiateUpload, uploadAndFinalize } from "../_lib/uploadFileToDocument";
 import { primaryButtonClass, secondaryButtonClass } from "@/app/components/manager/buttonStyles";
 import { DocumentTypeSelector } from "./DocumentTypeSelector";
+import { vendorOptionLabel } from "@/app/lib/vendors/vendorPresentation";
 
 const POLL_INTERVAL_MS = 1500;
 
@@ -308,7 +309,7 @@ export function TakePhotoWithPhoneFlow({
                     <option value="">Select vendor…</option>
                     {vendorList.map((vendor) => (
                       <option key={vendor.id} value={vendor.id}>
-                        {vendor.name}
+                        {vendorOptionLabel(vendor)}
                       </option>
                     ))}
                   </select>

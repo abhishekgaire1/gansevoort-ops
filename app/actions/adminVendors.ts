@@ -19,6 +19,7 @@ import {
   type VendorItemMapping,
   type SimilarVendorCandidate,
   type VendorDetailsInput,
+  type VendorClassification,
 } from "@/app/lib/admin/vendors";
 import { AdminActionError } from "@/app/lib/admin/errors";
 
@@ -40,11 +41,15 @@ const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", messa
 
 export type ListAdminVendorsResult = { ok: true; vendors: AdminVendorSummary[] } | AuthFailure;
 
-export async function listAdminVendorsAction(search: string | null, status: "active" | "inactive" | null): Promise<ListAdminVendorsResult> {
+export async function listAdminVendorsAction(
+  search: string | null,
+  status: "active" | "inactive" | null,
+  classification: VendorClassification | null = null
+): Promise<ListAdminVendorsResult> {
   const auth = await requireAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
-  const vendors = await listAdminVendors(getServiceRoleClient(), { organizationId: auth.manager.organizationId, search, status });
+  const vendors = await listAdminVendors(getServiceRoleClient(), { organizationId: auth.manager.organizationId, search, status, classification });
   return { ok: true, vendors };
 }
 

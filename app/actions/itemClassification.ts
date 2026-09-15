@@ -20,6 +20,7 @@ import { NotPreparerError } from "@/app/lib/purchaseDocuments/errors";
 import { resolveLineMismatchFields, resolveUnitCode } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
 import { resolveVendorPurchasePackages } from "@/app/lib/purchaseDocuments/resolveVendorPurchasePackage";
 import { amendmentDiff, type AmendmentDiffLine } from "@/app/lib/purchaseDocuments/lineProvenance";
+import { defaultDispositionForVendor } from "@/app/lib/itemMaster/defaultDispositionForVendor";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -173,6 +174,16 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
   ]);
 
   const recognizedUnitCodes = new Set((allUnits ?? []).map((u) => (u.code as string).trim().toUpperCase()));
+
+  // Vendor classification (INVENTORY vs NON_INVENTORY vendor) -- drives
+  // only the DEFAULT disposition for new-item proposals below, never a
+  // restriction; see defaultDispositionForVendor's own doc comment.
+  const documentVendorId = (purchaseDocument?.vendor_id as string | null | undefined) ?? null;
+  let documentVendorClassification: "INVENTORY" | "NON_INVENTORY" | null = null;
+  if (documentVendorId) {
+    const { data: vendorRow } = await supabase.from("vendors").select("classification").eq("id", documentVendorId).eq("organization_id", auth.manager.organizationId).maybeSingle();
+    documentVendorClassification = ((vendorRow?.classification as string | null | undefined) ?? "INVENTORY") as "INVENTORY" | "NON_INVENTORY";
+  }
 
   const classificationByLineKey = new Map((classifications ?? []).map((c) => [c.line_key as string, c]));
 
@@ -362,7 +373,7 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
       previousOrderedSummary,
       aiNewItemProposal: isNewProposal
         ? {
-            disposition: (aiItem?.disposition as "INVENTORY" | "NON_INVENTORY" | undefined) ?? "INVENTORY",
+            disposition: defaultDispositionForVendor(documentVendorClassification, (aiItem?.disposition as "INVENTORY" | "NON_INVENTORY" | undefined) ?? null),
             categoryId: (aiItem?.category_id as string | null | undefined) ?? null,
             baseUnitCode: (aiItemUnit?.code as string | undefined) ?? null,
             spendCategoryId: (aiItem?.spend_category_id as string | null | undefined) ?? null,

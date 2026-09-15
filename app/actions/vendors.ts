@@ -20,6 +20,10 @@ export interface VendorSummary {
   id: string;
   name: string;
   isActive: boolean;
+  /** INVENTORY vs NON_INVENTORY vendor -- an identity label + the
+   * default for new-line disposition, never a restriction (an INVENTORY
+   * vendor may still supply expense lines and vice versa). */
+  classification: "INVENTORY" | "NON_INVENTORY";
 }
 
 export type ListVendorsResult = { ok: true; vendors: VendorSummary[] } | { ok: false; reason: "not_authorized"; message: string };
@@ -33,7 +37,7 @@ export async function listVendors(includeInactive = false): Promise<ListVendorsR
   const serviceClient = getServiceRoleClient();
   let query = serviceClient
     .from("vendors")
-    .select("id, name, is_active")
+    .select("id, name, is_active, classification")
     .eq("organization_id", auth.manager.organizationId)
     .order("name");
 
@@ -42,7 +46,7 @@ export async function listVendors(includeInactive = false): Promise<ListVendorsR
   }
 
   const { data } = await query;
-  return { ok: true, vendors: (data ?? []).map((v) => ({ id: v.id, name: v.name, isActive: v.is_active })) };
+  return { ok: true, vendors: (data ?? []).map((v) => ({ id: v.id, name: v.name, isActive: v.is_active, classification: v.classification ?? "INVENTORY" })) };
 }
 
 export type SearchVendorsResult = { ok: true; vendors: VendorSummary[] } | { ok: false; reason: "not_authorized"; message: string };
@@ -59,7 +63,7 @@ export async function searchVendors(query: string): Promise<SearchVendorsResult>
   const trimmed = query.trim();
   let dbQuery = serviceClient
     .from("vendors")
-    .select("id, name, is_active")
+    .select("id, name, is_active, classification")
     .eq("organization_id", auth.manager.organizationId)
     .eq("is_active", true)
     .order("name")
@@ -70,7 +74,7 @@ export async function searchVendors(query: string): Promise<SearchVendorsResult>
   }
 
   const { data } = await dbQuery;
-  return { ok: true, vendors: (data ?? []).map((v) => ({ id: v.id, name: v.name, isActive: v.is_active })) };
+  return { ok: true, vendors: (data ?? []).map((v) => ({ id: v.id, name: v.name, isActive: v.is_active, classification: v.classification ?? "INVENTORY" })) };
 }
 
 export type CreateVendorFromReceivingResult =
@@ -127,5 +131,7 @@ export async function createVendorFromReceiving(name: string, purchaseDocumentId
     return { ok: false, reason: "misconfigured", message: "Could not create the vendor. Try again." };
   }
 
-  return { ok: true, vendor: { id: row.out_vendor_id, name: row.out_name, isActive: true } };
+  // Quick-created vendors land on the column default (INVENTORY) --
+  // reflected here so the appended picker entry matches the database.
+  return { ok: true, vendor: { id: row.out_vendor_id, name: row.out_name, isActive: true, classification: "INVENTORY" } };
 }
