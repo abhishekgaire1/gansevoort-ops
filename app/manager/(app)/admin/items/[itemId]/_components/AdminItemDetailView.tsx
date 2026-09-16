@@ -33,7 +33,6 @@ export function AdminItemDetailView({
   usageUnits,
   history,
   locations,
-  isAdmin,
 }: {
   overview: ItemWorkspaceOverview;
   categories: CategorySummary[];
@@ -42,7 +41,6 @@ export function AdminItemDetailView({
   usageUnits: ItemUsageUnitSummary[];
   history: ItemHistoryEntry[];
   locations: { locationId: string; locationName: string }[];
-  isAdmin: boolean;
 }) {
   const { item } = overview;
   const isActive = item.status === "active";
@@ -70,23 +68,19 @@ export function AdminItemDetailView({
           <button type="button" onClick={() => setEditOpen(true)} className={secondaryButtonClass}>
             Edit Item
           </button>
-          {isAdmin ? (
-            <>
-              <button type="button" onClick={() => setAdjustOpen(true)} className={secondaryButtonClass}>
-                Adjust Inventory
-              </button>
-              <button type="button" onClick={() => setArchiveOpen(true)} className={isActive ? destructiveButtonClass : primaryButtonClass}>
-                {isActive ? "Archive Item" : "Reactivate Item"}
-              </button>
-            </>
-          ) : null}
+          <button type="button" onClick={() => setAdjustOpen(true)} className={secondaryButtonClass}>
+            Adjust Inventory
+          </button>
+          <button type="button" onClick={() => setArchiveOpen(true)} className={isActive ? destructiveButtonClass : primaryButtonClass}>
+            {isActive ? "Archive Item" : "Reactivate Item"}
+          </button>
         </div>
       </div>
 
       <ItemOverviewSection overview={overview} actorSummary={lastEntry?.actorName ?? null} />
-      <PurchasePackagesSection packages={packages} canEdit={isAdmin} baseUnitCode={item.baseUnitCode ?? ""} />
-      {item.baseUnitId !== null ? <EmployeeWithdrawalOptionsSection itemId={item.itemId} units={units} usageUnits={usageUnits} canEdit={isAdmin} /> : null}
-      <InventorySettingsSection item={item} units={units} canEditBaseUnit={isAdmin} />
+      <PurchasePackagesSection packages={packages} canEdit baseUnitCode={item.baseUnitCode ?? ""} />
+      {item.baseUnitId !== null ? <EmployeeWithdrawalOptionsSection itemId={item.itemId} units={units} usageUnits={usageUnits} canEdit /> : null}
+      <InventorySettingsSection item={item} units={units} canEditBaseUnit />
       <ItemHistorySection entries={history} />
 
       {editOpen ? <EditItemDialog item={item} categories={categories} onClose={() => setEditOpen(false)} /> : null}

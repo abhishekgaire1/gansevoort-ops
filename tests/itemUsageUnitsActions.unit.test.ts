@@ -3,10 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // CI-safe: no network, no database. Covers the Item Master usage-unit
 // management actions (approved-plan §8) -- view/add/deactivate/
 // reprioritize an already-confirmed item's kiosk usage units, gated the
-// same way every other Admin Item Master action is (requireAdmin).
+// same way every other Item Master action is (requireManagerOrAdmin,
+// full manager capability per the 2026-09-16 product decision).
 
-const { requireAdminMock, requireManagerOrAdminMock } = vi.hoisted(() => ({ requireAdminMock: vi.fn(), requireManagerOrAdminMock: vi.fn() }));
-vi.mock("@/app/lib/auth/managerAuth", () => ({ requireAdmin: requireAdminMock, requireManagerOrAdmin: requireManagerOrAdminMock }));
+const { requireManagerOrAdminMock } = vi.hoisted(() => ({ requireManagerOrAdminMock: vi.fn() }));
+vi.mock("@/app/lib/auth/managerAuth", () => ({ requireManagerOrAdmin: requireManagerOrAdminMock }));
 
 const { rpcMock, fromMock } = vi.hoisted(() => ({ rpcMock: vi.fn(), fromMock: vi.fn() }));
 const { getServiceRoleClientMock } = vi.hoisted(() => ({ getServiceRoleClientMock: vi.fn(() => ({ rpc: rpcMock, from: fromMock })) }));
@@ -28,7 +29,6 @@ function fakeSelectChain(rows: Record<string, unknown>[]) {
 }
 
 beforeEach(() => {
-  requireAdminMock.mockReset().mockResolvedValue(ADMIN);
   requireManagerOrAdminMock.mockReset().mockResolvedValue(ADMIN);
   rpcMock.mockReset().mockResolvedValue({ data: null, error: null });
   fromMock.mockReset();
@@ -38,7 +38,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Item Master usage-unit MUTATION actions -- authorization gate (requireAdmin)", () => {
+describe("Item Master usage-unit MUTATION actions -- authorization gate (requireManagerOrAdmin)", () => {
   const cases: { name: string; call: () => Promise<{ ok: boolean }> }[] = [
     { name: "addSecondaryUsageUnitAction", call: () => addSecondaryUsageUnitAction("item-1", "CASE", 24) },
     { name: "deactivateSecondaryUsageUnitAction", call: () => deactivateSecondaryUsageUnitAction("item-1") },
@@ -46,17 +46,24 @@ describe("Item Master usage-unit MUTATION actions -- authorization gate (require
   ];
 
   for (const { name, call } of cases) {
-    it(`${name} rejects a non-admin caller before ever reaching Supabase`, async () => {
-      requireAdminMock.mockResolvedValue(NOT_ADMIN);
+    it(`${name} rejects a caller with no manager/admin role before ever reaching Supabase`, async () => {
+      requireManagerOrAdminMock.mockResolvedValue(NOT_ADMIN);
       fromMock.mockReturnValue(fakeSelectChain([]));
       const result = await call();
       expect(result.ok).toBe(false);
       expect(rpcMock).not.toHaveBeenCalled();
     });
+
+    it(`${name} succeeds for a plain manager caller (no admin role required)`, async () => {
+      requireManagerOrAdminMock.mockResolvedValue({ ok: true as const, manager: { appUserId: "mgr-1", organizationId: "org-1", authUserId: "auth-2", roles: ["manager"] } });
+      fromMock.mockReturnValue(fakeSelectChain([]));
+      const result = await call();
+      expect(result.ok).toBe(true);
+    });
   }
 });
 
-describe("listItemUsageUnitsAction -- read-only, Manager-or-Admin (Safe editing of confirmed items, tiered-permissions decision)", () => {
+describe("listItemUsageUnitsAction -- read-only, Manager-or-Admin", () => {
   it("rejects an unauthenticated caller before ever reaching Supabase", async () => {
     requireManagerOrAdminMock.mockResolvedValue({ ok: false as const, reason: "not_authenticated" as const });
     fromMock.mockReturnValue(fakeSelectChain([]));

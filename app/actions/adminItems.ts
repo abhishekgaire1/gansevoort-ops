@@ -1,6 +1,6 @@
 "use server";
 
-import { requireAdmin, requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
+import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import {
   listAdminItems,
@@ -35,27 +35,18 @@ import { recordInventoryCorrection, previewInventoryCorrection, type CorrectionM
 import { InvalidCorrectionInputError, CrossOrganizationReferenceError } from "@/app/lib/inventory/errors";
 
 /**
- * Canonical Item Master + Inventory Relevance Classification milestone --
- * Admin-only Server Actions for browsing/creating/editing/deactivating
- * the Item Master catalog, plus Admin-only bulk import. Every action here
- * gates on requireAdmin() -- a plain Manager (who already has read access
- * to inventory_items for Receiving matching via the existing
- * app/actions/itemMaster.ts) is rejected server-side, not merely hidden
- * from the sidebar (Part 56).
+ * Item Master Server Actions -- browsing/creating/editing/deactivating
+ * the catalog, vendor purchase packages, inventory corrections, and bulk
+ * import. Every action gates on requireManagerOrAdmin(): per the
+ * 2026-09-16 product decision, the Item Master is a full-capability
+ * surface for ALL managers, not an Admin-only configuration area (this
+ * deliberately replaced the earlier tiered-permissions design). Auth is
+ * enforced server-side here, never merely hidden in the sidebar.
  */
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
-const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as an Admin." };
 const NOT_AUTHORIZED_MANAGER: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a Manager or Admin." };
 
-/** Safe editing of confirmed items -- read access to the redesigned Items
- * list/workspace is now Manager-or-Admin (previously Admin-only): a
- * Manager needs to be able to browse items and open the workspace to make
- * the no-impact metadata edits the tiered-permissions decision opens up
- * to them. Every INVENTORY-AFFECTING or structural mutation below
- * (vendor package, usage unit, base unit, archive, bulk import, Adjust
- * Inventory, receipt correction) stays requireAdmin() -- only the read
- * surface and the plain metadata edit widen. */
 export type ListAdminItemsResult = { ok: true; items: AdminItemSummary[] } | AuthFailure;
 
 export async function listAdminItemsAction(
@@ -116,12 +107,10 @@ export async function listItemHistoryAction(itemId: string): Promise<ListItemHis
 
 export type GetAdminItemArchiveDependenciesResult = { ok: true; dependencies: ArchiveDependencies } | AuthFailure;
 
-/** Read-only, but still Admin-gated -- this is preparation specifically
- * for the Admin-only Archive confirmation flow, not a general Manager
- * read. */
+/** Preparation for the Archive confirmation flow. */
 export async function getAdminItemArchiveDependenciesAction(itemId: string): Promise<GetAdminItemArchiveDependenciesResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   const dependencies = await getAdminItemArchiveDependencies(getServiceRoleClient(), auth.manager.organizationId, itemId);
   return { ok: true, dependencies };
@@ -130,8 +119,8 @@ export async function getAdminItemArchiveDependenciesAction(itemId: string): Pro
 export type ListReceiptsUsingVendorPackageResult = { ok: true; receipts: ReceiptUsingPackageVersion[] } | AuthFailure;
 
 export async function listReceiptsUsingVendorPackageAction(vendorItemPurchaseUnitId: string): Promise<ListReceiptsUsingVendorPackageResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   const receipts = await listReceiptsUsingVendorPackage(getServiceRoleClient(), auth.manager.organizationId, vendorItemPurchaseUnitId);
   return { ok: true, receipts };
@@ -140,9 +129,8 @@ export async function listReceiptsUsingVendorPackageAction(vendorItemPurchaseUni
 export type SetVendorPurchasePackageResult = { ok: true; vendorItemPurchaseUnitId: string } | AuthFailure | { ok: false; reason: "error"; message: string };
 
 /** Future-transactions-only by construction (delegates to the existing
- * versioned upsert helper) -- Admin-only for now, matching every existing
- * vendor-package-adjacent RPC's gating (flagged in the plan as
- * revisitable, not a decision to relitigate here). */
+ * versioned upsert helper) -- previously posted receipts and current
+ * inventory are never silently recalculated. */
 export async function setVendorPurchasePackageAction(
   vendorItemMappingId: string,
   purchaseUnitCode: string,
@@ -150,8 +138,8 @@ export async function setVendorPurchasePackageAction(
   conversionFactor: number | null,
   requiresActualMeasurement: boolean
 ): Promise<SetVendorPurchasePackageResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   try {
     const result = await setVendorPurchasePackage(
@@ -173,17 +161,17 @@ export async function setVendorPurchasePackageAction(
 
 export type CorrectReceiptPackageFactorActionResult = { ok: true; correctionIds: string[]; replayed: boolean } | AuthFailure | { ok: false; reason: "error"; message: string };
 
-/** The flagship "current inventory will change" workflow -- Admin-only.
- * Never rewrites the original receipt/posting/movement rows; only inserts
- * new correction rows referencing them. */
+/** The flagship "current inventory will change" workflow. Never rewrites
+ * the original receipt/posting/movement rows; only inserts new correction
+ * rows referencing them. */
 export async function correctReceiptPackageFactorAction(
   postingLineIds: string[],
   newVendorItemPurchaseUnitId: string,
   reason: string,
   clientRequestId: string
 ): Promise<CorrectReceiptPackageFactorActionResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   try {
     const result = await correctReceiptPackageFactor(
@@ -214,8 +202,8 @@ export async function previewInventoryCorrectionAction(
   countedQuantity: number | null,
   deltaQuantity: number | null
 ): Promise<PreviewInventoryCorrectionResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   const preview = await previewInventoryCorrection(getServiceRoleClient(), auth.manager.organizationId, inventoryItemId, locationId, mode, countedQuantity, deltaQuantity);
   return { ok: true, preview };
@@ -226,7 +214,7 @@ export type RecordInventoryCorrectionActionResult =
   | AuthFailure
   | { ok: false; reason: "error"; message: string };
 
-/** The generic "Adjust Inventory" action -- Admin-only. Creates an
+/** The generic "Adjust Inventory" action. Creates an
  * inventory_corrections + inventory_movements row through
  * record_inventory_correction; never mutates a balance column directly
  * (none exists). */
@@ -239,8 +227,8 @@ export async function recordInventoryCorrectionAction(
   reason: string,
   clientRequestId: string
 ): Promise<RecordInventoryCorrectionActionResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   try {
     const result = await recordInventoryCorrection(getServiceRoleClient(), auth.manager.appUserId, inventoryItemId, locationId, mode, countedQuantity, deltaQuantity, reason, clientRequestId);
@@ -258,8 +246,8 @@ export type ListAllAdminItemKeysResult = { ok: true; items: { itemId: string; it
  * -- used only for client-side Bulk Import preview validation (in-file
  * vs. existing-catalog collisions), never rendered as a picker list. */
 export async function listAllAdminItemKeysAction(): Promise<ListAllAdminItemKeysResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   const items = await listAdminItems(getServiceRoleClient(), { organizationId: auth.manager.organizationId, status: null });
   return { ok: true, items: items.map((i) => ({ itemId: i.itemId, itemNumber: i.itemNumber, name: i.name })) };
@@ -268,8 +256,8 @@ export async function listAllAdminItemKeysAction(): Promise<ListAllAdminItemKeys
 export type FindSimilarItemsResult = { ok: true; candidates: SimilarItemCandidate[] } | AuthFailure;
 
 export async function findSimilarItemsAction(name: string, excludeItemId?: string): Promise<FindSimilarItemsResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   const candidates = await findSimilarItems(getServiceRoleClient(), auth.manager.organizationId, name, excludeItemId);
   return { ok: true, candidates };
@@ -298,8 +286,8 @@ function toMutationResult(err: unknown): AdminItemMutationResult {
 export type CreateAdminItemActionResult = { ok: true; itemId: string; itemNumber: string } | AuthFailure | { ok: false; reason: "error"; code: string; message: string; existingItemId?: string; existingItemName?: string };
 
 export async function createAdminItemAction(name: string, categoryId: string, baseUnitId: string): Promise<CreateAdminItemActionResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   if (!name.trim()) {
     return { ok: false, reason: "error", code: "VALIDATION", message: "Canonical name is required." };
@@ -315,10 +303,6 @@ export async function createAdminItemAction(name: string, categoryId: string, ba
   }
 }
 
-/** No-impact metadata edit (name/category only) -- Manager-or-Admin per
- * the tiered-permissions decision: this can never alter current
- * inventory, so it doesn't need the Admin-only bar every inventory-
- * affecting or structural action below keeps. */
 export async function updateAdminItemDetailsAction(itemId: string, name: string, categoryId: string): Promise<AdminItemMutationResult> {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
@@ -332,8 +316,8 @@ export async function updateAdminItemDetailsAction(itemId: string, name: string,
 }
 
 export async function setAdminItemBaseUnitAction(itemId: string, baseUnitId: string): Promise<AdminItemMutationResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   try {
     await setAdminItemBaseUnit(getServiceRoleClient(), auth.manager.organizationId, auth.manager.appUserId, itemId, baseUnitId);
@@ -344,8 +328,8 @@ export async function setAdminItemBaseUnitAction(itemId: string, baseUnitId: str
 }
 
 export async function setAdminItemStatusAction(itemId: string, status: ItemStatus): Promise<AdminItemMutationResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   try {
     await setAdminItemStatus(getServiceRoleClient(), auth.manager.organizationId, auth.manager.appUserId, itemId, status);
@@ -357,15 +341,14 @@ export async function setAdminItemStatusAction(itemId: string, status: ItemStatu
 
 export type BulkImportAdminItemsActionResult = { ok: true; results: BulkImportRowResult[] } | AuthFailure | { ok: false; reason: "error"; message: string };
 
-/** Admin-only (Part 16). Rows are already parsed AND client-side
- * pre-validated (required fields, category/unit name resolved to id) by
+/** Rows are already parsed AND client-side pre-validated (required fields, category/unit name resolved to id) by
  * the time they reach here -- this action's own job is only the
  * authorization gate and forwarding to the RPC, which re-validates
  * everything server-side regardless (Part 80: never trust the preview as
  * the final guarantee). */
 export async function bulkImportAdminItemsAction(filename: string | null, rows: BulkImportRow[]): Promise<BulkImportAdminItemsActionResult> {
-  const auth = await requireAdmin();
-  if (!auth.ok) return NOT_AUTHORIZED;
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) return NOT_AUTHORIZED_MANAGER;
 
   if (rows.length === 0) {
     return { ok: false, reason: "error", message: "No rows to import." };

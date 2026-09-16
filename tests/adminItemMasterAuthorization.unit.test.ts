@@ -1,15 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// CI-safe: no network, no database. Proves every Admin Item Master Server
-// Action gates correctly -- Manager-or-Admin for reads and the no-impact
-// metadata edit (Safe editing of confirmed items, tiered-permissions
-// decision), Admin-only for every structural or inventory-affecting
-// action -- a caller below the required tier is rejected before any RPC
-// is ever reached, matching the existing convention in
-// adminAuthorization.unit.test.ts.
+// CI-safe: no network, no database. Proves every Item Master Server
+// Action gates on requireManagerOrAdmin() -- per the 2026-09-16 product
+// decision the Item Master is a full-capability surface for ALL managers
+// (this replaced the earlier tiered-permissions design), so a plain
+// manager succeeds on every action while an unauthenticated or
+// non-manager caller is rejected before any RPC is ever reached.
 
-const { requireAdminMock, requireManagerOrAdminMock } = vi.hoisted(() => ({ requireAdminMock: vi.fn(), requireManagerOrAdminMock: vi.fn() }));
-vi.mock("@/app/lib/auth/managerAuth", () => ({ requireAdmin: requireAdminMock, requireManagerOrAdmin: requireManagerOrAdminMock }));
+const { requireManagerOrAdminMock } = vi.hoisted(() => ({ requireManagerOrAdminMock: vi.fn() }));
+vi.mock("@/app/lib/auth/managerAuth", () => ({ requireManagerOrAdmin: requireManagerOrAdminMock }));
 
 const { getServiceRoleClientMock } = vi.hoisted(() => ({ getServiceRoleClientMock: vi.fn(() => ({})) }));
 vi.mock("@/app/lib/supabase/serviceClient", () => ({ getServiceRoleClient: getServiceRoleClientMock }));
@@ -86,7 +85,6 @@ const NOT_ADMIN = { ok: false as const, reason: "not_authorized" as const };
 const NOT_AUTHENTICATED = { ok: false as const, reason: "not_authenticated" as const };
 
 beforeEach(() => {
-  requireAdminMock.mockReset().mockResolvedValue(ADMIN);
   requireManagerOrAdminMock.mockReset().mockResolvedValue(ADMIN);
 });
 
@@ -94,8 +92,14 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Admin-only Item Master actions -- authorization gate (requireAdmin)", () => {
+describe("Item Master actions -- authorization gate (requireManagerOrAdmin, full manager capability)", () => {
   const cases: { name: string; call: () => Promise<{ ok: boolean }> }[] = [
+    { name: "listAdminItemsAction", call: () => listAdminItemsAction(null, null, null, null) },
+    { name: "getAdminItemAction", call: () => getAdminItemAction("item-1") },
+    { name: "getItemWorkspaceOverviewAction", call: () => getItemWorkspaceOverviewAction("item-1") },
+    { name: "listItemVendorPackagesAction", call: () => listItemVendorPackagesAction("item-1") },
+    { name: "listItemHistoryAction", call: () => listItemHistoryAction("item-1") },
+    { name: "updateAdminItemDetailsAction", call: () => updateAdminItemDetailsAction("item-1", "Test Item", "cat-1") },
     { name: "createAdminItemAction", call: () => createAdminItemAction("Test Item", "cat-1", "unit-1") },
     { name: "findSimilarItemsAction", call: () => findSimilarItemsAction("Test Item") },
     { name: "listAllAdminItemKeysAction", call: () => listAllAdminItemKeysAction() },
@@ -111,41 +115,17 @@ describe("Admin-only Item Master actions -- authorization gate (requireAdmin)", 
   ];
 
   for (const { name, call } of cases) {
-    it(`${name} rejects a non-admin (manager) caller`, async () => {
-      requireAdminMock.mockResolvedValue(NOT_ADMIN);
-      const result = await call();
-      expect(result.ok).toBe(false);
-      expect((result as { reason?: string }).reason).toBe("not_authorized");
-    });
-
-    it(`${name} rejects an unauthenticated caller`, async () => {
-      requireAdminMock.mockResolvedValue(NOT_AUTHENTICATED);
-      const result = await call();
-      expect(result.ok).toBe(false);
-    });
-
-    it(`${name} succeeds for an admin caller`, async () => {
-      const result = await call();
-      expect(result.ok).toBe(true);
-    });
-  }
-});
-
-describe("Manager-or-Admin Item Master actions -- authorization gate (requireManagerOrAdmin)", () => {
-  const cases: { name: string; call: () => Promise<{ ok: boolean }> }[] = [
-    { name: "listAdminItemsAction", call: () => listAdminItemsAction(null, null, null, null) },
-    { name: "getAdminItemAction", call: () => getAdminItemAction("item-1") },
-    { name: "getItemWorkspaceOverviewAction", call: () => getItemWorkspaceOverviewAction("item-1") },
-    { name: "listItemVendorPackagesAction", call: () => listItemVendorPackagesAction("item-1") },
-    { name: "listItemHistoryAction", call: () => listItemHistoryAction("item-1") },
-    { name: "updateAdminItemDetailsAction", call: () => updateAdminItemDetailsAction("item-1", "Test Item", "cat-1") },
-  ];
-
-  for (const { name, call } of cases) {
     it(`${name} rejects an unauthenticated caller`, async () => {
       requireManagerOrAdminMock.mockResolvedValue(NOT_AUTHENTICATED);
       const result = await call();
       expect(result.ok).toBe(false);
+    });
+
+    it(`${name} rejects a caller with no manager/admin role`, async () => {
+      requireManagerOrAdminMock.mockResolvedValue(NOT_ADMIN);
+      const result = await call();
+      expect(result.ok).toBe(false);
+      expect((result as { reason?: string }).reason).toBe("not_authorized");
     });
 
     it(`${name} succeeds for a plain manager caller (no admin role required)`, async () => {
@@ -161,8 +141,8 @@ describe("Manager-or-Admin Item Master actions -- authorization gate (requireMan
   }
 });
 
-describe("createAdminItemAction -- always uses the authenticated admin's own org/actor, never a client-supplied one", () => {
-  it("passes organizationId/actorAppUserId derived from requireAdmin(), never from the caller", async () => {
+describe("createAdminItemAction -- always uses the authenticated caller's own org/actor, never a client-supplied one", () => {
+  it("passes organizationId/actorAppUserId derived from requireManagerOrAdmin(), never from the caller", async () => {
     await createAdminItemAction("Test Item", "cat-1", "unit-1");
     expect(adminItemsLib.createAdminItem).toHaveBeenCalledWith(expect.anything(), "org-1", "admin-1", "Test Item", "cat-1", "unit-1");
   });

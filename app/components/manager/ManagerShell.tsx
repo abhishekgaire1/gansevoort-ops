@@ -131,16 +131,21 @@ function buildNav(isAdmin: boolean): NavItem[] {
       label: "Admin",
       href: "/manager/admin/users",
       icon: <AdminIcon />,
-      isActive: (p) => p.startsWith("/manager/admin"),
+      // Item Master lives at /manager/admin/items but is no longer an
+      // Admin destination (it has its own top-level entry below, visible
+      // to every manager) -- exclude it so the Admin group doesn't also
+      // light up when a manager is on the Item Master.
+      isActive: (p) => p.startsWith("/manager/admin") && !p.startsWith("/manager/admin/items"),
       separatorBefore: true,
       children: [
         { label: "Users", href: "/manager/admin/users", isActive: (p) => p.startsWith("/manager/admin/users") },
         { label: "Stations", href: "/manager/admin/stations", isActive: (p) => p.startsWith("/manager/admin/stations") },
-        { label: "Item Master", href: "/manager/admin/items", isActive: (p) => p.startsWith("/manager/admin/items") },
         // Admin Master Data milestone: Vendors and Categories are
-        // Admin-only configuration, same as Item Master -- ONE Categories
-        // entry (Inventory + Spend live as tabs on that one page), never
-        // two sidebar entries (Part 2).
+        // Admin-only configuration -- ONE Categories entry (Inventory +
+        // Spend live as tabs on that one page), never two sidebar
+        // entries (Part 2). Item Master moved OUT of this group on
+        // 2026-09-16: it's a full-capability surface for every manager,
+        // not Admin-only configuration.
         { label: "Vendors", href: "/manager/admin/vendors", isActive: (p) => p.startsWith("/manager/admin/vendors") },
         { label: "Categories", href: "/manager/admin/categories", isActive: (p) => p.startsWith("/manager/admin/categories") },
         // AI Configuration + Usage/Cost Tracking milestone: the
@@ -152,20 +157,17 @@ function buildNav(isAdmin: boolean): NavItem[] {
     });
   }
 
-  // Settings previously held Categories/Items/Vendors; Categories and
-  // Vendors moved to Admin-only above (Part 15/23/41 -- general
-  // administration of organization master data is Admin-only, not
-  // something every Manager sees under "Settings"). Items is read-only
-  // browse and stays Manager-visible, now as its own top-level entry
-  // rather than a single-child "Settings" group. No separatorBefore here
-  // -- Items is an ordinary operational module like Reports/Categories,
-  // not a distinct section worth its own divider; a lone item sitting
-  // below an otherwise-unexplained line looked like a rendering bug.
+  // Item Master -- the ONE canonical items surface, visible to every
+  // manager with full capability (2026-09-16 product decision). Replaced
+  // the old read-only "Items" browse entry (/manager/items now redirects
+  // here; the /manager/items/review work queue stays its own route,
+  // reached from the Dashboard and the Item Master's Review Queue
+  // button, so it must NOT activate this entry).
   nav.push({
-    label: "Items",
-    href: "/manager/items",
+    label: "Item Master",
+    href: "/manager/admin/items",
     icon: <ItemsIcon />,
-    isActive: (p) => p.startsWith("/manager/items"),
+    isActive: (p) => p.startsWith("/manager/admin/items"),
   });
 
   return nav;

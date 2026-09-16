@@ -12,20 +12,16 @@ import { AdminItemDetailView } from "./_components/AdminItemDetailView";
 export const dynamic = "force-dynamic";
 
 /**
- * Item workspace (redesigned, "Safe editing of confirmed items" feature)
- * -- Manager-or-Admin readable, full width. Managers can view everything
- * and make no-impact metadata edits; every inventory-affecting or
- * structural action (vendor package, usage unit, base unit, archive,
- * Adjust Inventory) stays Admin-only at the action layer regardless of
- * what's rendered here.
+ * Item workspace -- full width, full capability for every Manager or
+ * Admin (2026-09-16 product decision: the Item Master is not an
+ * Admin-only configuration area). Every action is still independently
+ * re-gated server-side regardless of what's rendered here.
  */
 export default async function AdminItemDetailPage({ params }: { params: Promise<{ itemId: string }> }) {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) {
     redirect(auth.reason === "not_authenticated" ? "/manager/login" : "/manager");
   }
-  const isAdmin = auth.manager.roles.includes("admin");
-
   const { itemId } = await params;
   const supabase = getServiceRoleClient();
   const [overviewResult, categoriesResult, unitsResult, packagesResult, usageUnitsResult, historyResult, storageLocations] = await Promise.all([
@@ -68,7 +64,6 @@ export default async function AdminItemDetailPage({ params }: { params: Promise<
         usageUnits={usageUnits}
         history={history}
         locations={locations}
-        isAdmin={isAdmin}
       />
     </div>
   );

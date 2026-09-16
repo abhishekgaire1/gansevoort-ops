@@ -1,20 +1,19 @@
 "use server";
 
-import { requireAdmin, requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
+import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { mapItemMasterRpcError, UsageUnitStateError, InvalidUsageUnitConfigurationError } from "@/app/lib/itemMaster/errors";
 
 /**
- * Purchase-versus-usage unit model (approved-plan §8) -- lets an Admin
- * view/add/deactivate/reprioritize an already-confirmed INVENTORY item's
- * kiosk usage units from Item Master, independent of any purchase
- * document. Same requireAdmin gate as the rest of AdminItemDetailView
- * (base unit, deactivation) -- this is a structural Item Master change,
- * not a per-document approval.
+ * Purchase-versus-usage unit model (approved-plan §8) -- view/add/
+ * deactivate/reprioritize an already-confirmed INVENTORY item's kiosk
+ * usage units from Item Master, independent of any purchase document.
+ * Manager-or-Admin like the rest of the Item Master surface (2026-09-16
+ * product decision: managers have full Item Master capability).
  */
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
-const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as an Admin." };
+const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a Manager or Admin." };
 
 export interface ItemUsageUnitSummary {
   usageUnitId: string;
@@ -39,10 +38,6 @@ interface UsageUnitRow {
   inventory_item_units: { unit_id: string; requires_actual_measurement: boolean; units: { code: string; name: string } | { code: string; name: string }[] | null } | null;
 }
 
-/** Read-only, so Manager-or-Admin (Safe editing of confirmed items,
- * tiered-permissions decision) -- a plain Manager viewing the item
- * workspace needs to see kiosk usage units even though only an Admin can
- * change them (the three mutation actions below stay requireAdmin()). */
 export async function listItemUsageUnitsAction(itemId: string): Promise<ListItemUsageUnitsResult> {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
@@ -90,7 +85,7 @@ export async function addSecondaryUsageUnitAction(
   secondaryConversionFactor: number | null,
   requiresActualMeasurement = false
 ): Promise<UsageUnitMutationResult> {
-  const auth = await requireAdmin();
+  const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();
@@ -110,7 +105,7 @@ export async function addSecondaryUsageUnitAction(
 }
 
 export async function deactivateSecondaryUsageUnitAction(itemId: string): Promise<UsageUnitMutationResult> {
-  const auth = await requireAdmin();
+  const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();
@@ -124,7 +119,7 @@ export async function deactivateSecondaryUsageUnitAction(itemId: string): Promis
 }
 
 export async function setPrimaryUsageUnitAction(itemId: string, usageUnitId: string): Promise<UsageUnitMutationResult> {
-  const auth = await requireAdmin();
+  const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();
