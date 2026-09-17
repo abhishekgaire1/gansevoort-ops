@@ -125,7 +125,6 @@ const CONDITION_OPTIONS: { value: ReceivingLineDraft["conditionStatus"]; label: 
   { value: "OTHER", label: "Other" },
 ];
 
-type Filter = "all" | "needs_attention" | "ready" | "expenses";
 
 /** A smaller "Edit details" affordance sized for a table row -- the
  * shared secondaryButtonClass's h-9 height is right for a toolbar, but
@@ -196,7 +195,12 @@ export function ItemsAndReceivingPanel({
   const [receivingDraftSnapshot, setReceivingDraftSnapshot] = useState<ReceivingLineDraft | null>(null);
   const [receivingSavePending, setReceivingSavePending] = useState(false);
   const [receivingSaveError, setReceivingSaveError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
+  // Triage-first layout: needs-attention lines are always shown; finished
+  // work collapses into a Ready group and an Expenses group so the one
+  // thing that needs the manager isn't buried among identical done rows.
+  const [readyOpen, setReadyOpen] = useState(false);
+  const [expensesOpen, setExpensesOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkLocationId, setBulkLocationId] = useState("");
   const [bulkConditionValue, setBulkConditionValue] = useState<ReceivingLineDraft["conditionStatus"]>("RECEIVED_AS_INVOICED");
   const [continuePending, setContinuePending] = useState(false);
@@ -836,12 +840,67 @@ export function ItemsAndReceivingPanel({
 
   const spendCategoryPathById = new Map(flattenSpendCategoryPaths(spendCategories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId }))).map((p) => [p.id, p.path]));
 
-  const filtered = combinedLines.filter((c) => {
-    if (filter === "all") return true;
-    if (filter === "needs_attention") return c.outcome === "needs_attention";
-    if (filter === "ready") return c.outcome === "ready";
-    return c.outcome === "expense";
-  });
+  const attentionLines = combinedLines.filter((c) => c.outcome === "needs_attention");
+  const readyLines = combinedLines.filter((c) => c.outcome === "ready");
+  const expenseLines = combinedLines.filter((c) => c.outcome === "expense");
+
+  const renderLine = ({ line, receiving, outcome, postingBlockerReason }: (typeof combinedLines)[number]) => (
+    <LineCard
+      key={line.lineKey}
+      id={`classification-line-${line.lineKey}`}
+      outcome={outcome}
+      line={line}
+      receiving={receiving}
+      postingBlockerReason={postingBlockerReason}
+      editingOpen={editingLineKey === line.lineKey}
+      onEditLine={() => handleEditLine(line.lineKey)}
+      onCloseEditor={() => handleCloseEditor(line.lineKey)}
+      readOnly={readOnly}
+      items={items}
+      units={units}
+      locations={locations}
+      spendCategoryPath={line.spendCategoryId ? spendCategoryPathById.get(line.spendCategoryId) : undefined}
+      priceComparison={priceComparisons[line.lineKey]}
+      overrideFormOpen={overrideFormLineKey === line.lineKey}
+      reviewingPackage={packageReviewLineKey === line.lineKey}
+      onToggleOverrideForm={() => {
+        setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey);
+        setPackageReviewLineKey(null);
+      }}
+      onReviewPackage={() => {
+        setOverrideFormLineKey(line.lineKey);
+        setPackageReviewLineKey(line.lineKey);
+      }}
+      onNavigateToStep1={onNavigateToStep1}
+      onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
+      onMarkNonInventory={() => handleMarkNonInventory(line)}
+      onReviewNewItem={() => setShowNewItemModal(true)}
+      actionPending={actionPendingLineKey === line.lineKey}
+      alreadyReceived={alreadyReceived}
+      correcting={correctingLineKey === line.lineKey}
+      correctionDraft={correctingLineKey === line.lineKey ? correctionDraft : null}
+      correctionPending={correctionPending}
+      correctionError={correctingLineKey === line.lineKey ? correctionError : null}
+      onCancelCorrection={() => {
+        setCorrectingLineKey(null);
+        setCorrectionDraft(null);
+        setCorrectionError(null);
+        setEditingLineKey(null);
+        setReceivingDraftSnapshot(null);
+        focusRow(line.lineKey);
+      }}
+      onCorrectionChange={(patch) => setCorrectionDraft((prev) => (prev ? { ...prev, ...patch } : prev))}
+      onSaveCorrection={handleSaveCorrection}
+      onReceivingChange={(patch) => updateReceivingLine(line.lineKey, patch)}
+      onReceivedQtyOrUnitChange={(patch) => updateReceivedQuantityOrUnit(line.lineKey, patch)}
+      onInvoiceUnitChoice={(unit) => handleInvoiceUnitChoice(line.lineKey, unit)}
+      receivingSavePending={receivingSavePending}
+      receivingSaveError={editingLineKey === line.lineKey ? receivingSaveError : null}
+      onSaveReceivingDraft={() => handleSaveReceivingDraft(line.lineKey)}
+      onCancelReceivingDraft={() => handleCancelReceivingDraft(line.lineKey)}
+      savedFlash={savedFlashLineKey === line.lineKey}
+    />
+  );
 
   const bulkLocationSummary = summarizeBulkLocations(receivingLineState.map((l) => l.locationId || null));
   const bulkEligibleForCondition = receivingLineState.filter((l) => l.receivedQuantity.trim() !== "").length;
@@ -865,13 +924,7 @@ export function ItemsAndReceivingPanel({
         <div className={`${panelHeaderClass} flex-wrap`}>
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <h2 className={panelTitleClass}>Confirm Items &amp; Receiving</h2>
-            {summary.totalLines > 0 ? (
-              <span className={`text-xs font-medium ${summary.allResolved ? "text-emerald-400" : "text-amber-300"}`}>
-                {summary.allResolved ? "✓ " : ""}
-                {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {summary.readyCount} ready · {summary.expenseCount} expense
-                {summary.expenseCount === 1 ? "" : "s"} · {summary.allResolved ? "0 issues" : `${summary.needsAttentionCount} issue${summary.needsAttentionCount === 1 ? "" : "s"}`}
-              </span>
-            ) : null}
+            <span className="text-xs text-zinc-500">{summary.totalLines} line{summary.totalLines === 1 ? "" : "s"}</span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {!summary.allResolved && summary.needsAttentionCount > 0 ? (
@@ -923,54 +976,63 @@ export function ItemsAndReceivingPanel({
           </div>
         ) : null}
 
-        {/* ============ FILTERS -- compact, secondary ============ */}
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <div className="flex flex-wrap gap-1.5">
-            {(["all", "needs_attention", "ready", "expenses"] as Filter[]).map((f) => (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setFilter(f)}
-                className={`rounded-md border px-2.5 py-1 text-[11px] font-medium ${
-                  filter === f ? "border-amber-500 bg-amber-950/30 text-amber-200" : "border-zinc-700 text-zinc-300 hover:text-zinc-100"
-                }`}
-              >
-                {f === "all"
-                  ? `All (${summary.totalLines})`
-                  : f === "needs_attention"
-                    ? `Needs attention (${summary.needsAttentionCount})`
-                    : f === "ready"
-                      ? `Ready (${summary.readyCount})`
-                      : `Expenses (${summary.expenseCount})`}
-              </button>
-            ))}
-          </div>
-          {!readOnly ? (
-            <div className="flex flex-wrap gap-2">
-              {newItemCandidates.length > 0 ? (
-                <button type="button" onClick={() => setShowNewItemModal(true)} className="rounded-md bg-emerald-500 px-3 py-1 text-[11px] font-semibold text-zinc-950">
-                  Review New Items ({newItemCandidates.length})
-                </button>
-              ) : null}
-              {bulkEligible.length > 0 ? (
-                <button
-                  type="button"
-                  onClick={handleConfirmAllMatches}
-                  disabled={bulkConfirmPending}
-                  className="rounded-md border border-emerald-600 px-3 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
-                >
-                  {bulkConfirmPending ? "Confirming…" : `Confirm All Matches (${bulkEligible.length})`}
-                </button>
+        {/* ============ PROGRESS METER -- one glance replaces a repeated
+            per-row Status column: how much of the document is done and
+            what's left, colored by meaning. ============ */}
+        {summary.totalLines > 0 ? (
+          <div className="mt-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs tabular-nums">
+                <span className={summary.needsAttentionCount > 0 ? "text-amber-300" : "text-zinc-500"}>
+                  <b className="font-semibold">{summary.needsAttentionCount}</b> needs you
+                </span>
+                <span className="text-emerald-400">
+                  <b className="font-semibold">{summary.readyCount}</b> ready
+                </span>
+                <span className="text-zinc-500">
+                  <b className="font-semibold">{summary.expenseCount}</b> expense{summary.expenseCount === 1 ? "" : "s"}
+                </span>
+              </div>
+              {!readOnly && (newItemCandidates.length > 0 || bulkEligible.length > 0) ? (
+                <div className="flex flex-wrap gap-2">
+                  {newItemCandidates.length > 0 ? (
+                    <button type="button" onClick={() => setShowNewItemModal(true)} className="rounded-md bg-emerald-500 px-3 py-1 text-[11px] font-semibold text-zinc-950">
+                      Review New Items ({newItemCandidates.length})
+                    </button>
+                  ) : null}
+                  {bulkEligible.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={handleConfirmAllMatches}
+                      disabled={bulkConfirmPending}
+                      className="rounded-md border border-emerald-600 px-3 py-1 text-[11px] font-semibold text-emerald-200 disabled:opacity-40"
+                    >
+                      {bulkConfirmPending ? "Confirming…" : `Confirm All Matches (${bulkEligible.length})`}
+                    </button>
+                  ) : null}
+                </div>
               ) : null}
             </div>
-          ) : null}
-        </div>
+            <div className="mt-2 flex h-2 gap-0.5 overflow-hidden rounded-full bg-zinc-800" role="img" aria-label={`${summary.needsAttentionCount} need attention, ${summary.readyCount} ready, ${summary.expenseCount} expenses`}>
+              <span className="h-full bg-emerald-400 transition-[width] duration-500" style={{ width: `${(summary.readyCount / summary.totalLines) * 100}%` }} />
+              <span className="h-full bg-amber-400 transition-[width] duration-500" style={{ width: `${(summary.needsAttentionCount / summary.totalLines) * 100}%` }} />
+              <span className="h-full bg-zinc-600 transition-[width] duration-500" style={{ width: `${(summary.expenseCount / summary.totalLines) * 100}%` }} />
+            </div>
+          </div>
+        ) : null}
 
-        {/* ============ BULK RECEIVING ACTIONS -- a compact toolbar row,
-            never a large nested box -- still never touches mapping/
+        {/* ============ BULK RECEIVING ACTIONS -- tucked behind a
+            disclosure so the common single-line path isn't crowded by
+            controls most invoices never need. Never touches mapping/
             units/conversions. ============ */}
         {!readOnly ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-800 pt-3 text-xs text-zinc-400">
+          <div className="mt-3 border-t border-zinc-800 pt-3">
+          <button type="button" onClick={() => setBulkOpen((v) => !v)} className="flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200">
+            <span className={`transition-transform ${bulkOpen ? "rotate-90" : ""}`}>▸</span>
+            Bulk edit — apply a location or condition to multiple lines
+          </button>
+          {bulkOpen ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-zinc-400">
             <span className="font-medium text-zinc-500">Apply to multiple:</span>
             <select value={bulkLocationId} onChange={(e) => setBulkLocationId(e.target.value)} className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-white">
               <option value="">{bulkLocationSummary.kind === "multiple" ? "Multiple locations" : "Location…"}</option>
@@ -1010,81 +1072,70 @@ export function ItemsAndReceivingPanel({
               Apply condition
             </button>
           </div>
+          ) : null}
+          </div>
         ) : null}
         </div>
       </div>
 
-      {/* ============ Work-queue table -- one aligned row per line ============ */}
-      <div className={panelClass}>
-        {filtered.length > 0 ? (
-          <div className="hidden border-b border-zinc-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 sm:grid sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.4fr_84px_112px] sm:gap-3">
-            <span>Invoice line</span>
-            <span>Item match</span>
-            <span>Purchase package</span>
-            <span>Receiving</span>
-            <span>Status</span>
-            <span>Action</span>
+      {/* ============ NEEDS YOU -- the point of the screen: the lines that
+          can't post yet, always shown, amber, at the top. ============ */}
+      {attentionLines.length > 0 ? (
+        <section>
+          <div className="mb-2 flex items-center gap-2">
+            <span aria-hidden className="h-2 w-2 rounded-full bg-amber-400" />
+            <h3 className="text-[13px] font-semibold uppercase tracking-wide text-amber-300">Needs you</h3>
+            <span className="text-xs text-zinc-500">
+              {attentionLines.length} line{attentionLines.length === 1 ? "" : "s"} can&apos;t post yet — fix {attentionLines.length === 1 ? "it" : "them"} here
+            </span>
           </div>
-        ) : null}
-        {filtered.map(({ line, receiving, outcome, postingBlockerReason }) => (
-          <LineCard
-            key={line.lineKey}
-            id={`classification-line-${line.lineKey}`}
-            outcome={outcome}
-            line={line}
-            receiving={receiving}
-            postingBlockerReason={postingBlockerReason}
-            editingOpen={editingLineKey === line.lineKey}
-            onEditLine={() => handleEditLine(line.lineKey)}
-            onCloseEditor={() => handleCloseEditor(line.lineKey)}
-            readOnly={readOnly}
-            items={items}
-            units={units}
-            locations={locations}
-            spendCategoryPath={line.spendCategoryId ? spendCategoryPathById.get(line.spendCategoryId) : undefined}
-            priceComparison={priceComparisons[line.lineKey]}
-            overrideFormOpen={overrideFormLineKey === line.lineKey}
-            reviewingPackage={packageReviewLineKey === line.lineKey}
-            onToggleOverrideForm={() => {
-              setOverrideFormLineKey(overrideFormLineKey === line.lineKey ? null : line.lineKey);
-              setPackageReviewLineKey(null);
-            }}
-            onReviewPackage={() => {
-              setOverrideFormLineKey(line.lineKey);
-              setPackageReviewLineKey(line.lineKey);
-            }}
-            onNavigateToStep1={onNavigateToStep1}
-            onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
-            onMarkNonInventory={() => handleMarkNonInventory(line)}
-            onReviewNewItem={() => setShowNewItemModal(true)}
-            actionPending={actionPendingLineKey === line.lineKey}
-            alreadyReceived={alreadyReceived}
-            correcting={correctingLineKey === line.lineKey}
-            correctionDraft={correctingLineKey === line.lineKey ? correctionDraft : null}
-            correctionPending={correctionPending}
-            correctionError={correctingLineKey === line.lineKey ? correctionError : null}
-            onCancelCorrection={() => {
-              setCorrectingLineKey(null);
-              setCorrectionDraft(null);
-              setCorrectionError(null);
-              setEditingLineKey(null);
-              setReceivingDraftSnapshot(null);
-              focusRow(line.lineKey);
-            }}
-            onCorrectionChange={(patch) => setCorrectionDraft((prev) => (prev ? { ...prev, ...patch } : prev))}
-            onSaveCorrection={handleSaveCorrection}
-            onReceivingChange={(patch) => updateReceivingLine(line.lineKey, patch)}
-            onReceivedQtyOrUnitChange={(patch) => updateReceivedQuantityOrUnit(line.lineKey, patch)}
-            onInvoiceUnitChoice={(unit) => handleInvoiceUnitChoice(line.lineKey, unit)}
-            receivingSavePending={receivingSavePending}
-            receivingSaveError={editingLineKey === line.lineKey ? receivingSaveError : null}
-            onSaveReceivingDraft={() => handleSaveReceivingDraft(line.lineKey)}
-            onCancelReceivingDraft={() => handleCancelReceivingDraft(line.lineKey)}
-            savedFlash={savedFlashLineKey === line.lineKey}
-          />
-        ))}
-        {filtered.length === 0 ? <p className="px-4 py-6 text-center text-sm text-zinc-400">No lines match this filter.</p> : null}
-      </div>
+          <div className={`${panelClass} border-l-2 border-l-amber-500`}>{attentionLines.map(renderLine)}</div>
+        </section>
+      ) : summary.totalLines > 0 ? (
+        <section>
+          <div className="flex items-center gap-2 rounded-xl border border-emerald-800/60 bg-emerald-950/20 px-4 py-3">
+            <span aria-hidden className="h-2 w-2 rounded-full bg-emerald-400" />
+            <p className="text-sm font-medium text-emerald-200">All {summary.totalLines} lines confirmed — ready to continue.</p>
+          </div>
+        </section>
+      ) : null}
+
+      {/* ============ READY TO POST -- finished inventory work, collapsed
+          into one green bar; expand to spot-check. ============ */}
+      {readyLines.length > 0 ? (
+        <section className={panelClass}>
+          <button
+            type="button"
+            aria-expanded={readyOpen}
+            onClick={() => setReadyOpen((v) => !v)}
+            className="flex w-full items-center gap-3 px-4 py-3.5 text-left hover:bg-zinc-800/40"
+          >
+            <span aria-hidden className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400" />
+            <span className="text-sm font-semibold text-zinc-100">Ready to post</span>
+            <span className="text-[13px] text-zinc-400">· {readyLines.length} inventory line{readyLines.length === 1 ? "" : "s"}</span>
+            <span className={`ml-auto text-xs text-zinc-500 transition-transform ${readyOpen ? "rotate-90" : ""}`}>▸</span>
+          </button>
+          {readyOpen ? <div className="border-t border-zinc-800">{readyLines.map(renderLine)}</div> : null}
+        </section>
+      ) : null}
+
+      {/* ============ EXPENSES -- no inventory impact, collapsed grey. ==== */}
+      {expenseLines.length > 0 ? (
+        <section className={panelClass}>
+          <button
+            type="button"
+            aria-expanded={expensesOpen}
+            onClick={() => setExpensesOpen((v) => !v)}
+            className="flex w-full items-center gap-3 px-4 py-3.5 text-left hover:bg-zinc-800/40"
+          >
+            <span aria-hidden className="h-2.5 w-2.5 shrink-0 rounded-full bg-zinc-500" />
+            <span className="text-sm font-semibold text-zinc-100">Expenses</span>
+            <span className="text-[13px] text-zinc-400">· {expenseLines.length} line{expenseLines.length === 1 ? "" : "s"} · won&apos;t affect inventory</span>
+            <span className={`ml-auto text-xs text-zinc-500 transition-transform ${expensesOpen ? "rotate-90" : ""}`}>▸</span>
+          </button>
+          {expensesOpen ? <div className="border-t border-zinc-800">{expenseLines.map(renderLine)}</div> : null}
+        </section>
+      ) : null}
 
       {!readOnly && showNewItemModal ? (
         <NewItemReviewModal
