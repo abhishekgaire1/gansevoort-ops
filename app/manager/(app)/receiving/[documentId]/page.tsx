@@ -11,8 +11,15 @@ import { DocumentDetailView } from "./_components/DocumentDetailView";
  */
 export const dynamic = "force-dynamic";
 
-export default async function DocumentDetailPage({ params }: { params: Promise<{ documentId: string }> }) {
+export default async function DocumentDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ documentId: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   const { documentId } = await params;
+  const { extracting } = await searchParams;
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) {
     return null;
@@ -82,6 +89,7 @@ export default async function DocumentDetailPage({ params }: { params: Promise<{
       canRemoveUpload={canRemoveUpload}
       isArchived={Boolean(archiveRow)}
       isUploader={document.uploaded_by_app_user_id === auth.manager.appUserId}
+      extracting={extracting === "1"}
       attempts={(attempts ?? []).map((attempt) => ({
         id: attempt.id,
         attemptNumber: attempt.attempt_number,

@@ -93,7 +93,11 @@ export function UploadDocumentForm({
       return;
     }
 
-    router.push(`/manager/receiving/${finalized.documentId}`);
+    // ?extracting=1 puts the document page into the blocking "Extracting…"
+    // flow: it shows the progress screen and auto-advances into the
+    // editable draft the moment extraction succeeds. The flag is only ever
+    // set here, on a fresh upload -- a later revisit opens the normal page.
+    router.push(`/manager/receiving/${finalized.documentId}?extracting=1`);
     router.refresh();
   }
 

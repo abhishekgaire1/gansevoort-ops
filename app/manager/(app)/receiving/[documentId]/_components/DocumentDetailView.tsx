@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ExtractionProgressOverlay } from "./ExtractionProgressOverlay";
 import { getDocumentDownloadUrl } from "@/app/actions/documentAccess";
 import { useDocumentPageNavigator, DocumentPageNavigatorControls } from "@/app/manager/(app)/_components/DocumentPageNavigator";
 import { retryDocumentExtraction } from "@/app/actions/documentExtraction";
@@ -67,6 +68,7 @@ export function DocumentDetailView({
   isArchived,
   isUploader,
   attempts,
+  extracting,
 }: {
   documentId: string;
   originalFilename: string;
@@ -85,6 +87,12 @@ export function DocumentDetailView({
   isArchived: boolean;
   isUploader: boolean;
   attempts: AttemptView[];
+  /** Set by the post-upload redirect (?extracting=1). While true and no
+   * draft exists yet, this page shows the blocking "Extracting…" screen
+   * and auto-advances into the editable draft the moment extraction
+   * succeeds -- scoping the blocking flow to a fresh upload, never to a
+   * later revisit of the same document. */
+  extracting: boolean;
 }) {
   const router = useRouter();
   const { viewUrl, viewError, contentType: pageContentType, pageNumber, pageCount, goPrev, goNext } = useDocumentPageNavigator(documentId, contentType);
@@ -166,6 +174,54 @@ export function DocumentDetailView({
 
   const canRetry = status === "FAILED" || status === "STALLED";
   const showDraftButton = Boolean(purchaseDocumentId) || (status === "NEEDS_REVIEW" && !hasDiscardedRevisionOne);
+
+  // ----- fresh-upload blocking extraction flow -------------------------
+  // The manager bailed out of the blocking screen (e.g. to Remove Upload
+  // after a failure) -- reveal the normal document page from here on.
+  const [bailedFromExtracting, setBailedFromExtracting] = useState(false);
+  const autoAdvancedRef = useRef(false);
+
+  const inExtractingFlow =
+    extracting && !bailedFromExtracting && !isArchived && !purchaseDocumentId &&
+    (status === "PROCESSING" || status === "STALLED" || status === "FAILED" || (status === "NEEDS_REVIEW" && !hasDiscardedRevisionOne));
+
+  useEffect(() => {
+    // The instant a fresh upload's extraction succeeds, create the draft
+    // and route straight into the editable wizard -- the manager never
+    // stops on the read-only extraction preview. Guarded so the poller's
+    // repeated refreshes fire this exactly once.
+    if (!extracting || bailedFromExtracting) return;
+    if (status !== "NEEDS_REVIEW" || purchaseDocumentId || hasDiscardedRevisionOne) return;
+    if (autoAdvancedRef.current) return;
+    autoAdvancedRef.current = true;
+    handleOpenOrCreateDraft();
+    // handleOpenOrCreateDraft is stable for this mounted view; deps kept to
+    // the values that gate the one-shot advance.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extracting, bailedFromExtracting, status, purchaseDocumentId, hasDiscardedRevisionOne]);
+
+  if (inExtractingFlow) {
+    return (
+      <div className="mx-auto max-w-6xl">
+        <StatusPoller active={shouldPollForStatuses([status])} />
+        <ExtractionProgressOverlay
+          filename={originalFilename}
+          status={status}
+          attemptStatus={latest?.status ?? null}
+          requestedAt={latest?.requestedAt ?? null}
+          startedAt={latest?.startedAt ?? null}
+          pageCount={pageCount}
+          opening={draftPending}
+          errorMessage={latest?.status === "FAILED" ? safeExtractionErrorMessage(latest.errorCode) : retryError}
+          postSuccessError={draftError}
+          onRetry={handleRetry}
+          retryPending={retryPending}
+          onContinue={handleOpenOrCreateDraft}
+          onManageUpload={() => setBailedFromExtracting(true)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-6xl">
