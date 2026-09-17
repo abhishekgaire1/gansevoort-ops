@@ -49,11 +49,17 @@ export interface AdminUserSummary {
    * transition). Never true for an employee with no PIN at all. */
   kioskPinResetRequired: boolean;
   roles: string[];
-  /** True when this user individually holds the "purchase_sole_approver"
-   * role (20260811100133) -- granting purchase_documents.post_without_
-   * second_review. Never implied by primaryRole/manager/admin alone; an
-   * Admin grants or revokes it per person via setSoleApproverPermissionAction. */
+  /** Whether this user can post a validated invoice without an independent
+   * second review (purchase_documents.post_without_second_review). As of
+   * 20260811100153 every manager/admin holds this by organization policy;
+   * the dedicated "purchase_sole_approver" role (20260811100133) can still
+   * confer it on a non-manager identity. */
   canPostWithoutSecondReview: boolean;
+  /** True when the capability above comes from the base manager/admin role
+   * (organization policy) rather than the per-user dedicated grant -- the
+   * Admin UI shows this as a fixed policy statement, not a toggle, since it
+   * cannot be revoked below the org default while the user stays a manager. */
+  soleApproverByOrgPolicy: boolean;
   /** The role that is actually GRANTED (usable for authorization) --
    * never influenced by an in-progress or failed invitation. */
   primaryRole: PrimaryRole;
@@ -109,7 +115,8 @@ function mapUserRow(row: AdminUserRow): AdminUserSummary {
     hasPin: row.out_has_pin,
     kioskPinResetRequired: row.out_kiosk_pin_reset_required,
     roles,
-    canPostWithoutSecondReview: roles.includes("purchase_sole_approver"),
+    canPostWithoutSecondReview: roles.includes("purchase_sole_approver") || roles.includes("manager") || roles.includes("admin"),
+    soleApproverByOrgPolicy: roles.includes("manager") || roles.includes("admin"),
     primaryRole,
     intendedRole: row.out_intended_role,
     provisioningStatus: row.out_provisioning_status,

@@ -471,16 +471,23 @@ export function AdminUserDetailView({
               <p className="text-sm font-medium text-zinc-100">Post without second review</p>
               <p className="mt-0.5 text-xs text-zinc-400">Can post validated invoices without an independent second reviewer</p>
             </div>
-            <label className="flex shrink-0 items-center gap-2 text-xs text-zinc-300">
-              <input
-                type="checkbox"
-                checked={user.canPostWithoutSecondReview}
-                disabled={soleApproverSaving}
-                onChange={handleToggleSoleApprover}
-              />
-              {soleApproverSaving ? "Saving…" : user.canPostWithoutSecondReview ? "Granted" : "Not granted"}
-            </label>
+            {user.soleApproverByOrgPolicy ? (
+              <span className="shrink-0 rounded-full border border-zinc-700 px-2.5 py-0.5 text-xs text-zinc-400">Granted to all managers</span>
+            ) : (
+              <label className="flex shrink-0 items-center gap-2 text-xs text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={user.canPostWithoutSecondReview}
+                  disabled={soleApproverSaving}
+                  onChange={handleToggleSoleApprover}
+                />
+                {soleApproverSaving ? "Saving…" : user.canPostWithoutSecondReview ? "Granted" : "Not granted"}
+              </label>
+            )}
           </div>
+          {user.soleApproverByOrgPolicy ? (
+            <p className="mt-2 text-xs text-zinc-500">Every manager can post without a second review by organization policy. This cannot be revoked per person while the user is a manager or admin.</p>
+          ) : null}
           {soleApproverError ? <p className="mt-2 text-sm text-red-400">{soleApproverError}</p> : null}
         </div>
       ) : null}

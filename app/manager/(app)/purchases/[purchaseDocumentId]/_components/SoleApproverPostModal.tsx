@@ -120,7 +120,7 @@ export function SoleApproverPostModal({
 
         <label className="mt-4 flex items-start gap-2 rounded-lg border border-amber-800 bg-amber-950/20 p-3 text-sm text-amber-100">
           <input type="checkbox" checked={acknowledged} disabled={pending} onChange={(e) => setAcknowledged(e.target.checked)} className="mt-0.5" />
-          I have reviewed this document and accept responsibility for posting it without a second review.
+          I understand I&apos;m overriding the second-manager check and posting this invoice to inventory on my own authority.
         </label>
 
         {error ? <p className="mt-3 text-sm text-red-400">{error}</p> : null}

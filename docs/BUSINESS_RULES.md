@@ -213,6 +213,16 @@ If the same person performs both reviews, the UI must warn them and require ackn
 
 The threshold for requiring a different reviewer must be configurable.
 
+The independent second review is optional, not mandatory: any manager may
+post a fully-validated invoice to inventory without a second reviewer (the
+single-manager / "Post Now" path), after an explicit on-screen
+acknowledgment that they are overriding the second-manager check and
+posting on their own authority. This is available to every manager by
+default. Posting still runs every non-overridable safeguard — completeness
+gates, duplicate/total checks, the amendment re-post guard — and records
+the acting manager, time, reason, and acknowledgment in the audit trail.
+Only the second human reviewer is waived, never any other control.
+
 ## Invoice Posting
 
 OCR/extraction results may exist in staging data before approval.
