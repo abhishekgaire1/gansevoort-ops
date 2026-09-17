@@ -8,6 +8,7 @@ import { primaryButtonClass, secondaryButtonClass } from "@/app/components/manag
 import { initiateUpload, uploadAndFinalize as sharedUploadAndFinalize, type InitiatedUpload } from "../_lib/uploadFileToDocument";
 import { DocumentTypeSelector } from "./DocumentTypeSelector";
 import { vendorOptionLabel } from "@/app/lib/vendors/vendorPresentation";
+import { duplicateUploadNotice, type PriorUploadState } from "@/app/lib/documents/priorUploadState";
 
 /**
  * Vendor-first + document-type-first intake (Milestone 2A.2): the manager
@@ -32,7 +33,7 @@ export function UploadDocumentForm({
   const [documentType, setDocumentType] = useState<DeclaredDocumentType>("INVOICE");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [duplicate, setDuplicate] = useState<{ file: File; initiated: InitiatedUpload; uploadedAt: string } | null>(null);
+  const [duplicate, setDuplicate] = useState<{ file: File; initiated: InitiatedUpload; uploadedAt: string; priorState: PriorUploadState } | null>(null);
   const [creatingVendor, setCreatingVendor] = useState(false);
   const [newVendorName, setNewVendorName] = useState("");
   const [vendorCreatePending, setVendorCreatePending] = useState(false);
@@ -72,7 +73,7 @@ export function UploadDocumentForm({
 
     if (initiated.possibleDuplicate) {
       setPending(false);
-      setDuplicate({ file, initiated, uploadedAt: initiated.possibleDuplicate.uploadedAt });
+      setDuplicate({ file, initiated, uploadedAt: initiated.possibleDuplicate.uploadedAt, priorState: initiated.possibleDuplicate.priorState });
       return;
     }
 
@@ -214,19 +215,25 @@ export function UploadDocumentForm({
               {pending ? "Uploading…" : "Upload Invoice / Take Photo"}
             </button>
             {error ? <p className="mt-2 text-sm text-red-400">{error}</p> : null}
-            {duplicate ? (
-              <div className="mt-3 rounded-lg border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-200">
-                <p>Possible duplicate. This exact file was previously uploaded on {new Date(duplicate.uploadedAt).toLocaleString()}.</p>
-                <div className="mt-2 flex gap-4">
-                  <a href={`/manager/receiving/${duplicate.initiated.possibleDuplicate?.documentId}`} className="underline">
-                    Open Existing
-                  </a>
-                  <button type="button" className="underline" onClick={() => void uploadAndFinalize(duplicate.file, duplicate.initiated)}>
-                    Upload Anyway
-                  </button>
+            {duplicate ? (() => {
+              const notice = duplicateUploadNotice(duplicate.priorState, new Date(duplicate.uploadedAt).toLocaleString());
+              const boxClass = notice.tone === "warning" ? "border-amber-700 bg-amber-950/40 text-amber-200" : "border-zinc-700 bg-zinc-900 text-zinc-300";
+              return (
+                <div className={`mt-3 rounded-lg border p-3 text-sm ${boxClass}`}>
+                  <p>{notice.message}</p>
+                  <div className="mt-2 flex gap-4">
+                    {notice.showOpenExisting ? (
+                      <a href={`/manager/receiving/${duplicate.initiated.possibleDuplicate?.documentId}`} className="underline">
+                        Open Existing
+                      </a>
+                    ) : null}
+                    <button type="button" className="underline" onClick={() => void uploadAndFinalize(duplicate.file, duplicate.initiated)}>
+                      {notice.proceedLabel}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ) : null}
+              );
+            })() : null}
           </div>
         </div>
       ) : null}

@@ -13,6 +13,7 @@ import {
 import { resolveAIConfig } from "@/app/lib/ai/router/resolveAIConfig";
 import { ACCEPTED_MIME_TYPES, extensionForMimeType, sniffMimeType } from "@/app/lib/files/sniffMimeType";
 import { VendorNotActiveError } from "@/app/lib/purchaseDocuments/errors";
+import { classifyPriorUpload, PRIOR_STATE_SIGNIFICANCE, type PriorUploadState } from "@/app/lib/documents/priorUploadState";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type DeclaredDocumentType = "INVOICE" | "RECEIPT" | "CREDIT_MEMO";
@@ -101,6 +102,10 @@ export interface InitiateDocumentUploadInput {
 export interface PossibleDuplicateDocument {
   documentId: string;
   uploadedAt: string;
+  /** What became of that prior upload -- lets the prompt warn strongly for
+   * a live/verified duplicate but only softly (an FYI) for one the manager
+   * already discarded or removed. */
+  priorState: PriorUploadState;
 }
 
 export type InitiateDocumentUploadResult =
@@ -158,17 +163,42 @@ export async function initiateDocumentUpload(input: InitiateDocumentUploadInput)
   let possibleDuplicate: PossibleDuplicateDocument | null = null;
   const hashHint = input.clientComputedSha256?.toLowerCase();
   if (hashHint && /^[0-9a-f]{64}$/.test(hashHint)) {
-    const { data: existing } = await serviceClient
+    const { data: matches } = await serviceClient
       .from("documents")
       .select("id, created_at")
       .eq("organization_id", auth.manager.organizationId)
       .eq("file_sha256", hashHint)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .order("created_at", { ascending: false });
 
-    if (existing) {
-      possibleDuplicate = { documentId: existing.id, uploadedAt: existing.created_at };
+    if (matches && matches.length > 0) {
+      // Resolve what became of each prior upload of this same file, so the
+      // prompt reflects reality: a discarded/removed prior is a soft FYI,
+      // never the same warning as a live or already-verified one. The
+      // append-only `documents` row always survives, so state must come
+      // from the related purchase_documents / document_archives instead.
+      const ids = matches.map((m) => m.id as string);
+      const [pdResult, archiveResult] = await Promise.all([
+        serviceClient.from("purchase_documents").select("source_document_id, status").eq("organization_id", auth.manager.organizationId).in("source_document_id", ids),
+        serviceClient.from("document_archives").select("document_id").in("document_id", ids),
+      ]);
+      const archivedIds = new Set((archiveResult.data ?? []).map((a) => a.document_id as string));
+      const statusesByDoc = new Map<string, string[]>();
+      for (const row of pdResult.data ?? []) {
+        const key = row.source_document_id as string;
+        const list = statusesByDoc.get(key) ?? [];
+        list.push(row.status as string);
+        statusesByDoc.set(key, list);
+      }
+
+      // Surface the MOST SIGNIFICANT prior (a verified/live duplicate must
+      // never be hidden behind a more recent discarded one).
+      for (const match of matches) {
+        const id = match.id as string;
+        const priorState = classifyPriorUpload({ archived: archivedIds.has(id), purchaseDocumentStatuses: statusesByDoc.get(id) ?? [] });
+        if (possibleDuplicate === null || PRIOR_STATE_SIGNIFICANCE[priorState] > PRIOR_STATE_SIGNIFICANCE[possibleDuplicate.priorState]) {
+          possibleDuplicate = { documentId: id, uploadedAt: match.created_at as string, priorState };
+        }
+      }
     }
   }
 

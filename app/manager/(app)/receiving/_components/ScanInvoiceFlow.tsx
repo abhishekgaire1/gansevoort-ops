@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { isSupersededPriorUpload } from "@/app/lib/documents/priorUploadState";
 import {
   checkBridgeHealth,
   pairWithBridge,
@@ -244,11 +245,12 @@ function ScanInvoiceModal({
       setStep("details");
       return;
     }
-    if (initiated.possibleDuplicate) {
-      // A scanned duplicate is handled the same conservative way a
-      // manual upload's would be -- surfaced as an error rather than a
-      // silent second copy; the manager can open the existing document
-      // from the queue.
+    if (initiated.possibleDuplicate && !isSupersededPriorUpload(initiated.possibleDuplicate.priorState)) {
+      // Block only a LIVE duplicate (in-progress/draft/awaiting-verification/
+      // verified) -- surfaced as an error rather than a silent second copy;
+      // the manager can open the existing document from the queue. A prior
+      // upload the manager already discarded or removed is not a real
+      // duplicate, so scanning proceeds normally.
       setUploadError("This looks like a duplicate of a document already uploaded. Check the queue before scanning again.");
       setStep("details");
       return;

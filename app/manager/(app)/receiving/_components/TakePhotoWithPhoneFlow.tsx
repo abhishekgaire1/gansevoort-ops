@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { isSupersededPriorUpload } from "@/app/lib/documents/priorUploadState";
 import {
   createCaptureSessionAction,
   getCaptureSessionStatusAction,
@@ -205,7 +206,9 @@ export function TakePhotoWithPhoneFlow({
         setStep("received");
         return;
       }
-      if (initiated.possibleDuplicate) {
+      if (initiated.possibleDuplicate && !isSupersededPriorUpload(initiated.possibleDuplicate.priorState)) {
+        // Only a LIVE prior upload of this same file blocks; one the manager
+        // already discarded or removed is not a real duplicate and proceeds.
         setError("This looks like a duplicate of a document already uploaded. Check the queue before continuing.");
         setStep("received");
         return;
