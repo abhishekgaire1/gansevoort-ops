@@ -43,7 +43,7 @@ import {
 } from "@/app/lib/purchaseDocuments/itemsAndReceivingCardState";
 import { deriveLineProvenance } from "@/app/lib/purchaseDocuments/lineProvenance";
 import { describeLineIssue } from "@/app/lib/purchaseDocuments/lineIssueSummary";
-import { getAmendmentAlreadyPosted } from "@/app/actions/purchaseDocuments";
+import { getAmendmentAlreadyPosted, getPurchaseDocumentPostingBlockers } from "@/app/actions/purchaseDocuments";
 import {
   recordReceipt,
   listEffectiveReceiptsForPurchaseDocument,
@@ -234,6 +234,10 @@ export function ItemsAndReceivingPanel({
   const [editSessionKey, setEditSessionKey] = useState(() => crypto.randomUUID());
 
   const [alreadyPostedElsewhere, setAlreadyPostedElsewhere] = useState(false);
+  /** lineKey -> the authoritative posting-scan reason it would be refused
+   * (get_purchase_document_posting_blockers) -- the SAME check posting
+   * enforces, so a line can no longer read "Ready" here and fail at post. */
+  const [postingBlockersByLineKey, setPostingBlockersByLineKey] = useState<Map<string, string>>(new Map());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -250,6 +254,7 @@ export function ItemsAndReceivingPanel({
       locationsResult,
       amendmentPostedResult,
       effectiveReceivingResult,
+      postingBlockersResult,
     ] = await Promise.all([
       getPurchaseDocumentLineClassifications(purchaseDocumentId),
       listInventoryItems(),
@@ -262,6 +267,7 @@ export function ItemsAndReceivingPanel({
       listLocations(),
       getAmendmentAlreadyPosted(purchaseDocumentId),
       getEffectiveReceivingLinesForPurchaseDocument(purchaseDocumentId),
+      getPurchaseDocumentPostingBlockers(purchaseDocumentId),
     ]);
 
     if (linesResult.ok) setLines(linesResult.lines);
@@ -274,6 +280,7 @@ export function ItemsAndReceivingPanel({
     if (receiptsResult.ok) setAlreadyReceived(receiptsResult.receipts.some((r) => r.receiptKind === "DELIVERY"));
     if (locationsResult.ok) setLocations(locationsResult.locations);
     if (amendmentPostedResult.ok) setAlreadyPostedElsewhere(amendmentPostedResult.alreadyPosted);
+    if (postingBlockersResult.ok) setPostingBlockersByLineKey(new Map(postingBlockersResult.blockers.map((b) => [b.lineKey, b.reason])));
 
     if (receivingResult.ok) {
       const soleLocationId = locationsResult.ok && locationsResult.locations.length === 1 ? locationsResult.locations[0].id : "";
@@ -763,8 +770,9 @@ export function ItemsAndReceivingPanel({
   const combinedLines = (lines ?? []).map((line) => {
     const receiving = receivingByLineKey.get(line.lineKey) ?? null;
     const receivingReady = line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null;
-    const outcome = classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady });
-    return { line, receiving, outcome };
+    const postingBlockerReason = line.lineKey !== null ? (postingBlockersByLineKey.get(line.lineKey) ?? null) : null;
+    const outcome = classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady, hasPostingBlocker: postingBlockerReason !== null });
+    return { line, receiving, outcome, postingBlockerReason };
   });
   const summary = summarizeCombinedStep(combinedLines.map((c) => c.outcome));
 
@@ -1018,13 +1026,14 @@ export function ItemsAndReceivingPanel({
             <span>Action</span>
           </div>
         ) : null}
-        {filtered.map(({ line, receiving, outcome }) => (
+        {filtered.map(({ line, receiving, outcome, postingBlockerReason }) => (
           <LineCard
             key={line.lineKey}
             id={`classification-line-${line.lineKey}`}
             outcome={outcome}
             line={line}
             receiving={receiving}
+            postingBlockerReason={postingBlockerReason}
             editingOpen={editingLineKey === line.lineKey}
             onEditLine={() => handleEditLine(line.lineKey)}
             onCloseEditor={() => handleCloseEditor(line.lineKey)}
@@ -1166,6 +1175,7 @@ function LineCard({
   outcome,
   line,
   receiving,
+  postingBlockerReason,
   editingOpen,
   onEditLine,
   onCloseEditor,
@@ -1205,6 +1215,10 @@ function LineCard({
   outcome: LineOutcome;
   line: LineClassificationRow;
   receiving: ReceivingLineDraft | null;
+  /** The authoritative posting-scan reason this line would be refused at
+   * post time, or null -- surfaced in the package column so a mismatch is
+   * caught here, not only when the manager tries to post. */
+  postingBlockerReason: string | null;
   editingOpen: boolean;
   onEditLine: () => void;
   onCloseEditor: () => void;
@@ -1438,9 +1452,9 @@ function LineCard({
           <span className="sm:hidden">Match: </span>
           {issue?.section === "item_match" ? issue.text : (line.inventoryItemName ?? "—")}
         </p>
-        <p className={`truncate text-sm ${issue?.section === "package" ? "font-medium text-amber-300" : "text-zinc-500"}`}>
+        <p className={`truncate text-sm ${issue?.section === "package" || postingBlockerReason ? "font-medium text-amber-300" : "text-zinc-500"}`} title={postingBlockerReason ?? undefined}>
           <span className="sm:hidden">Package: </span>
-          {issue?.section === "package" ? issue.text : "—"}
+          {issue?.section === "package" ? issue.text : (postingBlockerReason ?? "—")}
         </p>
         <p className={`truncate text-sm ${issue?.section === "receiving" ? "font-medium text-amber-300" : "text-zinc-500"}`}>
           <span className="sm:hidden">Receiving: </span>

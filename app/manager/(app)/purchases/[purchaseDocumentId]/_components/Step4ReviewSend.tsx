@@ -130,6 +130,10 @@ export function Step4ReviewSend({
   const [soleApproverModalOpen, setSoleApproverModalOpen] = useState(false);
   const [soleApproverPending, setSoleApproverPending] = useState(false);
   const [soleApproverError, setSoleApproverError] = useState<string | null>(null);
+  /** Per-line reasons when a Post Now attempt is refused by the posting
+   * gate -- shown in the modal so the manager sees exactly which line and
+   * why, instead of only a generic "Cannot post inventory yet." */
+  const [soleApproverBlockers, setSoleApproverBlockers] = useState<{ description: string | null; reason: string }[]>([]);
   const [amendmentAlreadyPosted, setAmendmentAlreadyPosted] = useState(false);
   // Secondary facts (SKU, unit price, condition, package derivation, price
   // comparison) move into an expandable row detail -- never crammed into
@@ -176,6 +180,7 @@ export function Step4ReviewSend({
     if (soleApproverPending) return;
     setSoleApproverPending(true);
     setSoleApproverError(null);
+    setSoleApproverBlockers([]);
     const result = await postPurchaseDocumentSoleApprover({
       purchaseDocumentId,
       expectedVersion: version,
@@ -186,6 +191,9 @@ export function Step4ReviewSend({
     setSoleApproverPending(false);
     if (!result.ok) {
       setSoleApproverError(result.message);
+      if (result.reason === "blocked") {
+        setSoleApproverBlockers(result.blockers.map((b) => ({ description: b.description, reason: b.reason })));
+      }
       return;
     }
     setSoleApproverModalOpen(false);
@@ -477,6 +485,7 @@ export function Step4ReviewSend({
                     type="button"
                     onClick={() => {
                       setSoleApproverError(null);
+                      setSoleApproverBlockers([]);
                       setSoleApproverModalOpen(true);
                     }}
                     disabled={!sendAction.enabled}
@@ -523,6 +532,7 @@ export function Step4ReviewSend({
           locations={soleApproverLocations}
           pending={soleApproverPending}
           error={soleApproverError}
+          blockers={soleApproverBlockers}
           onCancel={() => setSoleApproverModalOpen(false)}
           onSendForReview={() => {
             setSoleApproverModalOpen(false);

@@ -22,6 +22,13 @@ export interface CombinedLineReadinessInput {
    * unchanged. Null when this line isn't an INVENTORY line at all (not
    * applicable -- never treated as blocking). */
   receivingReady: boolean | null;
+  /** True when the authoritative inventory-posting scan
+   * (get_purchase_document_posting_blockers) would refuse this line -- the
+   * single source of truth posting itself uses. Catches cases the
+   * invoice-unit-based hasPackageMismatch cannot (e.g. a blank invoice
+   * unit whose RECEIVED unit still differs from the item's base unit), so
+   * a line can no longer read "Ready" here and then fail at posting. */
+  hasPostingBlocker?: boolean;
 }
 
 export function classifyLineOutcome(input: CombinedLineReadinessInput): LineOutcome {
@@ -29,6 +36,7 @@ export function classifyLineOutcome(input: CombinedLineReadinessInput): LineOutc
   if (input.status !== "CONFIRMED") return "needs_attention";
   if (input.disposition !== "INVENTORY") return "needs_attention";
   if (input.hasPackageMismatch) return "needs_attention";
+  if (input.hasPostingBlocker) return "needs_attention";
   if (input.receivingReady !== true) return "needs_attention";
   return "ready";
 }
@@ -48,6 +56,7 @@ export interface ChecklistCompletionInput {
   disposition: "INVENTORY" | "NON_INVENTORY" | "UNRESOLVED";
   hasPackageMismatch: boolean;
   receivingReady: boolean | null;
+  hasPostingBlocker?: boolean;
 }
 
 export interface ChecklistCompletion {
@@ -68,7 +77,10 @@ export function checklistCompletion(input: ChecklistCompletionInput): ChecklistC
   const isInventory = itemMatchOk && input.disposition === "INVENTORY";
   return {
     itemMatchOk,
-    packageOk: isInventory && !input.hasPackageMismatch,
+    // A posting blocker is folded into the package check -- in practice it
+    // is a purchase-package/unit problem (an unconfirmed package, or a
+    // received unit that does not match the item's base unit).
+    packageOk: isInventory && !input.hasPackageMismatch && !input.hasPostingBlocker,
     receivingReadyOk: isInventory && input.receivingReady === true,
   };
 }

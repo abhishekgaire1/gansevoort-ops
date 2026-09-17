@@ -26,6 +26,13 @@ describe("classifyLineOutcome", () => {
     expect(classifyLineOutcome({ status: "CONFIRMED", disposition: "NON_INVENTORY", hasPackageMismatch: false, receivingReady: null })).toBe("expense");
   });
 
+  it("a posting blocker (e.g. received unit not matching the base unit, which the invoice-unit check can't see) makes an otherwise-ready line need attention -- so it can't read Ready here and fail at posting", () => {
+    expect(classifyLineOutcome({ ...readyLine, hasPostingBlocker: true })).toBe("needs_attention");
+    // Explicitly false / omitted leaves a ready line ready.
+    expect(classifyLineOutcome({ ...readyLine, hasPostingBlocker: false })).toBe("ready");
+    expect(classifyLineOutcome(readyLine)).toBe("ready");
+  });
+
   it("test 9: correcting a mismatch changes the line's outcome to ready", () => {
     const before = classifyLineOutcome({ ...readyLine, hasPackageMismatch: true });
     const after = classifyLineOutcome({ ...readyLine, hasPackageMismatch: false });
@@ -68,6 +75,10 @@ describe("checklistCompletion", () => {
 
   it("test 5: incomplete receiving is identified as the incomplete check while item match and package stay complete", () => {
     expect(checklistCompletion({ ...readyLine, receivingReady: false })).toEqual({ itemMatchOk: true, packageOk: true, receivingReadyOk: false });
+  });
+
+  it("a posting blocker is surfaced as the (package) incomplete check even when the invoice-unit mismatch check is clean", () => {
+    expect(checklistCompletion({ ...readyLine, hasPostingBlocker: true })).toEqual({ itemMatchOk: true, packageOk: false, receivingReadyOk: true });
   });
 
   it("an expense line's package/receiving checks are never marked complete -- they don't apply to it", () => {

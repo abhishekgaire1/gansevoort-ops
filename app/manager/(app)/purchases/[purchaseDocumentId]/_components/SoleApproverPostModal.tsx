@@ -27,6 +27,7 @@ export function SoleApproverPostModal({
   locations,
   pending,
   error,
+  blockers = [],
   onCancel,
   onSendForReview,
   onConfirm,
@@ -41,6 +42,9 @@ export function SoleApproverPostModal({
   locations: string[];
   pending: boolean;
   error: string | null;
+  /** Per-line reasons when the posting gate refused this document -- shown
+   * so "Cannot post inventory yet" names exactly which line and why. */
+  blockers?: { description: string | null; reason: string }[];
   onCancel: () => void;
   onSendForReview: () => void;
   onConfirm: (input: { reason: SoleApproverReasonCode; notes: string }) => void;
@@ -124,6 +128,17 @@ export function SoleApproverPostModal({
         </label>
 
         {error ? <p className="mt-3 text-sm text-red-400">{error}</p> : null}
+        {blockers.length > 0 ? (
+          <div className="mt-2 rounded-lg border border-red-900 bg-red-950/20 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-red-300">These lines are not postable yet</p>
+            <ul className="mt-1 flex flex-col gap-1 text-sm text-red-200">
+              {blockers.map((b, i) => (
+                <li key={i}>• {b.description ? `${b.description}: ` : ""}{b.reason}</li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs text-red-300/80">Fix these on the Confirm Items &amp; Receiving step (e.g. confirm the purchase package), then post.</p>
+          </div>
+        ) : null}
 
         <div className="mt-5 flex flex-wrap justify-end gap-3">
           <button

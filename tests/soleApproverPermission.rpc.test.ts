@@ -157,6 +157,33 @@ describe("has_permission / sole-approver role grant", () => {
   });
 });
 
+describe("get_purchase_document_posting_blockers -- parity with the enforcement scan (20260811100154)", () => {
+  it("returns no blockers for a fully-prepared draft -- the SAME draft the enforcement path posts cleanly (postable-direction parity)", async () => {
+    const draft = await buildFullyPreparedDraft(fx.supabase);
+
+    // Read model says postable.
+    const { data, error } = await fx.supabase.rpc("get_purchase_document_posting_blockers", {
+      p_purchase_document_id: draft.purchaseDocumentId,
+      p_organization_id: fx.organizationId,
+    });
+    expect(error).toBeNull();
+    expect(data).toEqual([]);
+
+    // Enforcement agrees: it actually posts.
+    await grantSoleApprover(fx.supabase, fx.organizationId, fx.changeableEmployeeAppUserId);
+    const result = await postPurchaseDocumentSoleApproverRpc(fx.supabase, {
+      purchaseDocumentId: draft.purchaseDocumentId,
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      expectedVersion: draft.version,
+      reason: "SECOND_REVIEWER_UNAVAILABLE",
+      notes: null,
+      idempotencyKey: randomUUID(),
+    });
+    expect(result.postingStatus).toBe("POSTED");
+  });
+});
+
 describe("post_purchase_document_sole_approver", () => {
   it("test 3: an unauthorized manager's forged call is rejected server-side, never bypassable by simply calling the RPC directly", async () => {
     const draft = await buildFullyPreparedDraft(fx.supabase);

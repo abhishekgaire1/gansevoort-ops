@@ -590,6 +590,41 @@ export async function getAmendmentAlreadyPosted(purchaseDocumentId: string): Pro
   return { ok: true, alreadyPosted };
 }
 
+export interface PostingBlockerLine {
+  lineKey: string;
+  description: string;
+  reason: string;
+}
+
+export type GetPurchaseDocumentPostingBlockersResult = { ok: true; blockers: PostingBlockerLine[] } | { ok: false; reason: "not_authorized"; message: string };
+
+/** Read-only preview of the authoritative inventory-posting blocker scan
+ * (get_purchase_document_posting_blockers) -- the SAME check
+ * post_purchase_document_inventory enforces at post time. Surfaced during
+ * the Confirm Items & Receiving step so a line that would be refused at
+ * posting is flagged there, not sprung only when a manager tries to post.
+ * Never the enforcement itself; the posting RPC remains the boundary. */
+export async function getPurchaseDocumentPostingBlockers(purchaseDocumentId: string): Promise<GetPurchaseDocumentPostingBlockersResult> {
+  const auth = await requireManagerOrAdmin();
+  if (!auth.ok) {
+    return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+  const { data, error } = await getServiceRoleClient().rpc("get_purchase_document_posting_blockers", {
+    p_purchase_document_id: purchaseDocumentId,
+    p_organization_id: auth.manager.organizationId,
+  });
+  if (error) {
+    logIfUnexpected("getPurchaseDocumentPostingBlockers", error, { purchaseDocumentId });
+    return { ok: true, blockers: [] };
+  }
+  const blockers = (data ?? []).map((row: { out_line_key: string; out_description: string; out_reason: string }) => ({
+    lineKey: row.out_line_key,
+    description: row.out_description,
+    reason: row.out_reason,
+  }));
+  return { ok: true, blockers };
+}
+
 export type CanUseSoleApproverPostingResult = { ok: true; eligible: boolean } | { ok: false; reason: "not_authorized"; message: string };
 
 /** Whether the CURRENT caller holds purchase_documents.post_without_
