@@ -45,7 +45,7 @@ import { deriveLineProvenance } from "@/app/lib/purchaseDocuments/lineProvenance
 import { describeLineIssue } from "@/app/lib/purchaseDocuments/lineIssueSummary";
 import { getAmendmentAlreadyPosted, getPurchaseDocumentPostingBlockers } from "@/app/actions/purchaseDocuments";
 import { getPurchaseDocumentPriceReviewAction, acknowledgePriceChangeAction, type LinePriceReviewView } from "@/app/actions/priceReview";
-import { priceCheckDisplay, type PriceCheckDisplay } from "@/app/lib/purchasing/priceReviewPolicy";
+import { priceCheckDisplay, priceReviewIsNotable, type PriceCheckDisplay } from "@/app/lib/purchasing/priceReviewPolicy";
 import { PriceReviewCard } from "./PriceReviewCard";
 import {
   recordReceipt,
@@ -202,6 +202,12 @@ export function ItemsAndReceivingPanel({
   // work collapses into a Ready group and an Expenses group so the one
   // thing that needs the manager isn't buried among identical done rows.
   const [readyOpen, setReadyOpen] = useState(false);
+  // Step 2 line filter. "all" shows the exception-first grouped view; a
+  // specific filter shows a flat matching list. Visibility only -- never
+  // changes readiness or price-review state.
+  type LineFilter = "all" | "needs_attention" | "price_changes" | "ready" | "expenses";
+  const [lineFilter, setLineFilter] = useState<LineFilter>("all");
+  const [lineFilterTouched, setLineFilterTouched] = useState(false);
   const [expensesOpen, setExpensesOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkLocationId, setBulkLocationId] = useState("");
@@ -892,6 +898,36 @@ export function ItemsAndReceivingPanel({
   const blockingIssueCount = summary.needsAttentionCount + priceAckLines.length;
   const stepAllResolved = summary.allResolved && priceAckLines.length === 0;
 
+  // "Price changes" filter membership: any comparable, notable change
+  // (informational OR significant, acknowledged or not). Excludes
+  // no-material-change, expenses, not-applicable, and no-comparable-history.
+  const isPriceChangeLine = (lineKey: string | null): boolean => {
+    if (lineKey === null) return false;
+    const review = priceReviewByLineKey.get(lineKey);
+    return review ? priceReviewIsNotable(review.state) : false;
+  };
+  const priceChangeLines = combinedLines.filter((c) => isPriceChangeLine(c.line.lineKey));
+  // Exception-first default: Needs attention when blockers exist, else All;
+  // the manager can override, which sticks.
+  const effectiveFilter = lineFilterTouched ? lineFilter : blockingIssueCount > 0 ? "needs_attention" : "all";
+  const filterCounts = {
+    all: combinedLines.length,
+    needs_attention: blockingIssueCount,
+    price_changes: priceChangeLines.length,
+    ready: readyLines.length,
+    expenses: expenseLines.length,
+  };
+  const filteredLines =
+    effectiveFilter === "needs_attention"
+      ? [...attentionLines, ...priceAckLines.map((p) => combinedLines.find((c) => c.line.lineKey === p.line.lineKey)!)]
+      : effectiveFilter === "price_changes"
+        ? priceChangeLines
+        : effectiveFilter === "ready"
+          ? readyLines
+          : effectiveFilter === "expenses"
+            ? expenseLines
+            : combinedLines;
+
   const priceCheckFor = (lineKey: string | null): PriceCheckDisplay | null => {
     if (lineKey === null) return null;
     const review = priceReviewByLineKey.get(lineKey);
@@ -1135,6 +1171,64 @@ export function ItemsAndReceivingPanel({
         </div>
       </div>
 
+      {/* ============ FILTERS -- visibility only; never change readiness,
+          acknowledgment, or price-review state. "All" keeps the
+          exception-first grouped view; any other filter shows a flat list.
+          "Price changes" = every comparable notable change (informational
+          + significant, acknowledged or not). ============ */}
+      {summary.totalLines > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {(["all", "needs_attention", "price_changes", "ready", "expenses"] as LineFilter[]).map((f) => {
+            const label = f === "all" ? "All" : f === "needs_attention" ? "Needs attention" : f === "price_changes" ? "Price changes" : f === "ready" ? "Ready inventory" : "Expenses";
+            return (
+              <button
+                key={f}
+                type="button"
+                onClick={() => {
+                  setLineFilter(f);
+                  setLineFilterTouched(true);
+                }}
+                aria-pressed={effectiveFilter === f}
+                className={`rounded-md border px-2.5 py-1 text-[11px] font-medium ${effectiveFilter === f ? "border-amber-500 bg-amber-950/30 text-amber-200" : "border-zinc-700 text-zinc-300 hover:text-zinc-100"}`}
+              >
+                {label} ({filterCounts[f]})
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {effectiveFilter !== "all" ? (
+        <section>
+          <div className="mb-2 flex items-center gap-2">
+            <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-300">
+              {effectiveFilter === "needs_attention" ? "Needs attention" : effectiveFilter === "price_changes" ? "Price changes" : effectiveFilter === "ready" ? "Ready inventory" : "Expenses"}
+            </h3>
+            <span className="text-xs text-zinc-500">{filteredLines.length} line{filteredLines.length === 1 ? "" : "s"}</span>
+          </div>
+          {effectiveFilter === "price_changes" && priceAckLines.length > 0 ? (
+            <div className="mb-3 flex flex-col gap-3">
+              {priceAckLines.map(({ line, review }) => (
+                <PriceReviewCard
+                  key={line.lineKey}
+                  id={`price-review-${line.lineKey}`}
+                  invoiceDescription={line.description}
+                  review={review}
+                  pending={acknowledgingLineKey === line.lineKey}
+                  onAcknowledge={(note) => handleAcknowledgePrice(line.lineKey, note)}
+                  priceHistoryHref={line.inventoryItemId ? `/manager/inventory/items/${line.inventoryItemId}?tab=price-history` : null}
+                />
+              ))}
+            </div>
+          ) : null}
+          {filteredLines.length > 0 ? (
+            <div className={panelClass}>{filteredLines.map(renderLine)}</div>
+          ) : (
+            <p className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-6 text-center text-sm text-zinc-500">No lines match this filter.</p>
+          )}
+        </section>
+      ) : (
+      <>
       {/* ============ NEEDS YOU -- the point of the screen: the lines that
           can't post yet, always shown, amber, at the top. ============ */}
       {blockingIssueCount > 0 ? (
@@ -1211,6 +1305,8 @@ export function ItemsAndReceivingPanel({
           {expensesOpen ? <div className="border-t border-zinc-800">{expenseLines.map(renderLine)}</div> : null}
         </section>
       ) : null}
+      </>
+      )}
 
       {!readOnly && showNewItemModal ? (
         <NewItemReviewModal

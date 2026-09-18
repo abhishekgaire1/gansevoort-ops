@@ -125,6 +125,32 @@ describe("posting-boundary price guard", () => {
     expect(posted.status).toBe("POSTED");
   });
 
+  it("scenarios 5+7: once verified (the state from which posting runs) a line's material inputs are IMMUTABLE, so no edit can slip between price validation and posting; a valid ack still posts and no partial data is left on rejection", async () => {
+    const prior = await postPriorEvent(2.0);
+    const cur = await buildCurrentDoc(prior.itemId, prior.vendorSku, 2.5); // +25%, VERIFIED
+
+    // A material input on the verified document cannot be mutated at all --
+    // the receiving row is locked/immutable (this is the primary defense
+    // that closes the edit-vs-post race for the normal posting path).
+    const { data: receipts } = await fx.supabase.rpc("effective_receipts_for_purchase_document", { p_purchase_document_id: cur.purchaseDocumentId, p_organization_id: fx.organizationId });
+    const recIds = (receipts ?? []).map((r: { id: string }) => r.id);
+    const { data: rls } = await fx.supabase.from("receipt_lines").select("id").in("receipt_id", recIds).eq("matched_line_key", cur.lineKey);
+    const { error: updErr } = await fx.supabase.from("receipt_lines").update({ actual_received_package_quantity: 5 }).eq("id", rls![0].id);
+    expect(updErr).not.toBeNull(); // rejected -- input is immutable under a verified document
+
+    // Without an acknowledgment, posting is rejected AND leaves no partial data.
+    await expect(
+      postPurchaseDocumentInventoryRpc(fx.supabase, { purchaseDocumentId: cur.purchaseDocumentId, organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId })
+    ).rejects.toThrow(/significant price change|GA079/i);
+    const { data: headers } = await fx.supabase.from("purchase_document_inventory_postings").select("id").eq("purchase_document_id", cur.purchaseDocumentId);
+    expect(headers ?? []).toHaveLength(0); // no partial posting header
+
+    // A valid acknowledgment against the (immutable, validated) state posts.
+    await ack(cur.purchaseDocumentId, cur.lineKey, prior.itemId, prior.vendorSku, prior.purchaseDocumentId, 2.0, 2.5);
+    const posted = await postPurchaseDocumentInventoryRpc(fx.supabase, { purchaseDocumentId: cur.purchaseDocumentId, organizationId: fx.organizationId, appUserId: fx.changeableEmployeeAppUserId });
+    expect(posted.status).toBe("POSTED");
+  });
+
   it("scenario 45: cross-organization acknowledgment is rejected by the acknowledge RPC", async () => {
     const prior = await postPriorEvent(2.0);
     const cur = await buildCurrentDoc(prior.itemId, prior.vendorSku, 2.5);
