@@ -8,6 +8,15 @@ vi.mock("@/app/lib/auth/managerAuth", () => ({ requireManagerOrAdmin: requireMan
 const { getServiceRoleClientMock } = vi.hoisted(() => ({ getServiceRoleClientMock: vi.fn() }));
 vi.mock("@/app/lib/supabase/serviceClient", () => ({ getServiceRoleClient: getServiceRoleClientMock }));
 
+// The submit/verify/sole-approver actions consult the price-review gate
+// before their RPC -- stub it to "no unacknowledged significant change" so
+// these RPC-mapping tests exercise the RPC path (a dedicated suite covers
+// the gate itself).
+const { priceReviewMock } = vi.hoisted(() => ({
+  priceReviewMock: vi.fn(async () => ({ byLineKey: new Map(), contextByLineKey: new Map(), requiresAcknowledgment: [], informationalCount: 0, acknowledgedCount: 0, noComparableCount: 0 })),
+}));
+vi.mock("@/app/lib/purchasing/getPurchaseDocumentPriceReview", () => ({ getPurchaseDocumentPriceReview: priceReviewMock }));
+
 const {
   initializeMock,
   saveMock,

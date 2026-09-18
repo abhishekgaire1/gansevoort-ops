@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { getPurchaseDocumentReviewSummary, canUseSoleApproverPosting, postPurchaseDocumentSoleApprover, getAmendmentAlreadyPosted } from "@/app/actions/purchaseDocuments";
 import { listActiveEmployees, correctDocumentDeliveryVerifier, type EmployeeSummary } from "@/app/actions/receiving";
+import { getPurchaseDocumentPriceReviewAction, type GetPriceReviewResult } from "@/app/actions/priceReview";
 import type { PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
 import type { PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine } from "@/app/lib/purchaseDocuments/types";
@@ -121,6 +122,7 @@ export function Step4ReviewSend({
   onPreparationStatusChange: () => void;
 }) {
   const [summary, setSummary] = useState<PurchaseDocumentReviewSummary | null>(null);
+  const [priceReview, setPriceReview] = useState<Extract<GetPriceReviewResult, { ok: true }> | null>(null);
   const [employees, setEmployees] = useState<EmployeeSummary[]>([]);
   const [verifierChoice, setVerifierChoice] = useState("");
   const [verifierPending, setVerifierPending] = useState(false);
@@ -154,6 +156,10 @@ export function Step4ReviewSend({
     getPurchaseDocumentReviewSummary(purchaseDocumentId).then((result) => {
       if (cancelled || !result.ok) return;
       setSummary(result.summary);
+    });
+    getPurchaseDocumentPriceReviewAction(purchaseDocumentId).then((result) => {
+      if (cancelled || !result.ok) return;
+      setPriceReview(result);
     });
     return () => {
       cancelled = true;
@@ -274,6 +280,56 @@ export function Step4ReviewSend({
           <SummaryRow label="Responsible manager" ok={!missingDeliveryVerifier} className={missingDeliveryVerifier ? "Missing" : (deliveryVerifiedByName ?? "Set")} />
         </div>
       </div>
+
+      {/* ============ PRICE REVIEW -- Step 3 is never the FIRST place a
+          price alert appears; it summarizes what was reviewed on Items &
+          Receiving, and blocks if a significant change is still open. ==== */}
+      {priceReview && (priceReview.requiresAckLineKeys.length > 0 || priceReview.acknowledgedCount > 0 || priceReview.informationalCount > 0 || priceReview.noComparableCount > 0) ? (
+        <Section title="Price review">
+          {priceReview.requiresAckLineKeys.length > 0 ? (
+            <div className="rounded-lg border border-red-800/70 bg-red-950/20 px-3 py-2 text-sm text-red-200">
+              <p className="font-medium">
+                {priceReview.requiresAckLineKeys.length} price change{priceReview.requiresAckLineKeys.length === 1 ? "" : "s"} still require{priceReview.requiresAckLineKeys.length === 1 ? "s" : ""} review.
+              </p>
+              <p className="mt-0.5 text-red-300/90">Return to Items &amp; Receiving before posting.</p>
+            </div>
+          ) : priceReview.acknowledgedCount > 0 ? (
+            <p className="text-sm font-medium text-emerald-300">
+              ✓ {priceReview.acknowledgedCount} significant price change{priceReview.acknowledgedCount === 1 ? "" : "s"} reviewed
+            </p>
+          ) : null}
+
+          {priceReview.acknowledgedCount > 0 ? (
+            <ul className="mt-2 flex flex-col gap-1.5 text-sm">
+              {priceReview.lines
+                .filter((l) => l.state === "ACKNOWLEDGED" && l.comparison)
+                .map((l) => (
+                  <li key={l.lineKey} className="text-zinc-300">
+                    <span className="text-zinc-100">{l.comparison!.previous.vendorName ?? "Vendor"}</span>
+                    {l.vendorSku ? ` · SKU ${l.vendorSku}` : ""} ·{" "}
+                    <span className="tabular-nums">
+                      {formatMoney(l.comparison!.previous.unitCost, null)}/{l.comparison!.baseUnitCode} → {formatMoney(l.comparison!.currentUnitCost, null)}/{l.comparison!.baseUnitCode}
+                    </span>{" "}
+                    · {l.comparison!.direction === "increase" ? "+" : "−"}
+                    {Math.abs(l.comparison!.deltaPct).toFixed(1)}%
+                    {l.acknowledgment?.actorName ? <span className="text-zinc-500"> · Reviewed by {l.acknowledgment.actorName}</span> : null}
+                  </li>
+                ))}
+            </ul>
+          ) : null}
+
+          {priceReview.informationalCount > 0 ? (
+            <p className="mt-2 text-sm text-zinc-400">
+              {priceReview.informationalCount} informational price change{priceReview.informationalCount === 1 ? "" : "s"} noted.
+            </p>
+          ) : null}
+          {priceReview.noComparableCount > 0 ? (
+            <p className="mt-1 text-sm text-zinc-500">
+              {priceReview.noComparableCount} item{priceReview.noComparableCount === 1 ? " has" : "s have"} no previous comparable purchase from this vendor.
+            </p>
+          ) : null}
+        </Section>
+      ) : null}
 
       {/* ============ RESTRAINED DOCUMENT SUMMARY ============ */}
       <Section title="Document">

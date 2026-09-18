@@ -5,6 +5,7 @@ import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { classifyPurchaseDocumentLines } from "@/app/lib/itemMaster/classifyPurchaseDocumentLines";
 import { getPreparationStatus, type PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
+import { getPurchaseDocumentPriceReview } from "@/app/lib/purchasing/getPurchaseDocumentPriceReview";
 import { hasSiblingRevisionAlreadyPosted } from "@/app/lib/purchaseDocuments/amendmentPostingStatus";
 import { getPurchaseDocumentReviewSummary as getReviewSummary, type PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
 import { getReceiptHistory, type ReceiptHistoryEntry } from "@/app/lib/purchaseDocuments/getReceiptHistory";
@@ -141,6 +142,7 @@ type FailureReason =
   | "review_conflict"
   | "review_owned_elsewhere"
   | "stale_review"
+  | "price_review_required"
   | "misconfigured";
 
 /** Best-effort, fire-and-forget scheduling -- mirrors documentUpload.ts's
@@ -247,6 +249,16 @@ export async function submitPurchaseDocumentForVerification(
     return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
   }
 
+  // Server-side price-review gate: a significant (>=20%) normalized price
+  // change that has not been validly acknowledged blocks sending for final
+  // review. Recomputed from authoritative data here -- never trusts the
+  // client -- so a tampered client cannot bypass it.
+  const priceGate = await getPurchaseDocumentPriceReview(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
+  if (priceGate.requiresAcknowledgment.length > 0) {
+    const n = priceGate.requiresAcknowledgment.length;
+    return { ok: false, reason: "price_review_required", message: `${n} significant price change${n === 1 ? "" : "s"} must be reviewed on Confirm Items & Receiving before sending for final review.` };
+  }
+
   try {
     const result = await submitPurchaseDocumentForVerificationRpc(getServiceRoleClient(), {
       purchaseDocumentId,
@@ -291,6 +303,15 @@ export async function verifyPurchaseDocument(
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) {
     return { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+  }
+
+  // Final verify posts inventory -- an unacknowledged significant price
+  // change (including one newly introduced by the reviewer's own
+  // corrections) blocks it, server-authoritatively.
+  const priceGate = await getPurchaseDocumentPriceReview(getServiceRoleClient(), purchaseDocumentId, auth.manager.organizationId);
+  if (priceGate.requiresAcknowledgment.length > 0) {
+    const n = priceGate.requiresAcknowledgment.length;
+    return { ok: false, reason: "price_review_required", message: `${n} significant price change${n === 1 ? "" : "s"} must be reviewed before this invoice can be verified and posted.` };
   }
 
   try {
@@ -730,6 +751,18 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
       ok: false,
       reason: "already_posted",
       message: "Inventory was already posted from the original revision. This amendment cannot post it again.",
+    };
+  }
+
+  // Price-review gate (server-authoritative): an unacknowledged significant
+  // price change blocks posting, even via the single-manager path.
+  const priceGate = await getPurchaseDocumentPriceReview(supabase, input.purchaseDocumentId, auth.manager.organizationId);
+  if (priceGate.requiresAcknowledgment.length > 0) {
+    const n = priceGate.requiresAcknowledgment.length;
+    return {
+      ok: false,
+      reason: "preparation_incomplete",
+      message: `${n} significant price change${n === 1 ? "" : "s"} must be reviewed before posting. Review ${n === 1 ? "it" : "them"} on Confirm Items & Receiving.`,
     };
   }
 

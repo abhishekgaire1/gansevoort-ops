@@ -44,6 +44,8 @@ import {
 import { deriveLineProvenance } from "@/app/lib/purchaseDocuments/lineProvenance";
 import { describeLineIssue } from "@/app/lib/purchaseDocuments/lineIssueSummary";
 import { getAmendmentAlreadyPosted, getPurchaseDocumentPostingBlockers } from "@/app/actions/purchaseDocuments";
+import { getPurchaseDocumentPriceReviewAction, acknowledgePriceChangeAction, type LinePriceReviewView } from "@/app/actions/priceReview";
+import { PriceReviewCard } from "./PriceReviewCard";
 import {
   recordReceipt,
   listEffectiveReceiptsForPurchaseDocument,
@@ -242,6 +244,13 @@ export function ItemsAndReceivingPanel({
    * (get_purchase_document_posting_blockers) -- the SAME check posting
    * enforces, so a line can no longer read "Ready" here and fail at post. */
   const [postingBlockersByLineKey, setPostingBlockersByLineKey] = useState<Map<string, string>>(new Map());
+  // Vendor-aware price review. A REQUIRES_ACKNOWLEDGMENT line is a blocking
+  // issue (folded into the same readiness the footer/stepper read); an
+  // informational change is surfaced but never blocks.
+  const [priceReviewByLineKey, setPriceReviewByLineKey] = useState<Map<string, LinePriceReviewView>>(new Map());
+  const [priceRequiresAck, setPriceRequiresAck] = useState<Set<string>>(new Set());
+  const [priceInformationalCount, setPriceInformationalCount] = useState(0);
+  const [acknowledgingLineKey, setAcknowledgingLineKey] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -259,6 +268,7 @@ export function ItemsAndReceivingPanel({
       amendmentPostedResult,
       effectiveReceivingResult,
       postingBlockersResult,
+      priceReviewResult,
     ] = await Promise.all([
       getPurchaseDocumentLineClassifications(purchaseDocumentId),
       listInventoryItems(),
@@ -272,6 +282,7 @@ export function ItemsAndReceivingPanel({
       getAmendmentAlreadyPosted(purchaseDocumentId),
       getEffectiveReceivingLinesForPurchaseDocument(purchaseDocumentId),
       getPurchaseDocumentPostingBlockers(purchaseDocumentId),
+      getPurchaseDocumentPriceReviewAction(purchaseDocumentId),
     ]);
 
     if (linesResult.ok) setLines(linesResult.lines);
@@ -285,6 +296,11 @@ export function ItemsAndReceivingPanel({
     if (locationsResult.ok) setLocations(locationsResult.locations);
     if (amendmentPostedResult.ok) setAlreadyPostedElsewhere(amendmentPostedResult.alreadyPosted);
     if (postingBlockersResult.ok) setPostingBlockersByLineKey(new Map(postingBlockersResult.blockers.map((b) => [b.lineKey, b.reason])));
+    if (priceReviewResult.ok) {
+      setPriceReviewByLineKey(new Map(priceReviewResult.lines.map((l) => [l.lineKey, l])));
+      setPriceRequiresAck(new Set(priceReviewResult.requiresAckLineKeys));
+      setPriceInformationalCount(priceReviewResult.informationalCount);
+    }
 
     if (receivingResult.ok) {
       const soleLocationId = locationsResult.ok && locationsResult.locations.length === 1 ? locationsResult.locations[0].id : "";
@@ -760,6 +776,20 @@ export function ItemsAndReceivingPanel({
     onContinue();
   }
 
+  async function handleAcknowledgePrice(lineKey: string, note: string) {
+    if (acknowledgingLineKey) return;
+    setAcknowledgingLineKey(lineKey);
+    setError(null);
+    const result = await acknowledgePriceChangeAction(purchaseDocumentId, lineKey, note.trim() || null);
+    setAcknowledgingLineKey(null);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    // Re-run authoritative readiness + price review immediately.
+    await load();
+  }
+
   // ============ THE authoritative per-line/step readiness model ============
   // Computed unconditionally, every render, from CURRENT lines/receiving
   // state (never a stale snapshot from the last load()) -- the single
@@ -779,18 +809,23 @@ export function ItemsAndReceivingPanel({
     return { line, receiving, outcome, postingBlockerReason };
   });
   const summary = summarizeCombinedStep(combinedLines.map((c) => c.outcome));
+  // Fold unacknowledged significant price changes into the SAME readiness
+  // the stepper/footer/Step 3 gate consume, so all four always agree.
+  const priceAckBlockingCount = priceRequiresAck.size;
+  const stepNeedsAttentionCount = summary.needsAttentionCount + priceAckBlockingCount;
+  const stepResolved = summary.allResolved && priceAckBlockingCount === 0;
 
   useEffect(() => {
     if (lines === null) return; // nothing loaded yet -- never report a premature "0 of 0"
-    onProgressChange?.({ readyCount: summary.readyCount, totalLines: summary.totalLines, expenseCount: summary.expenseCount, needsAttentionCount: summary.needsAttentionCount });
+    onProgressChange?.({ readyCount: summary.readyCount, totalLines: summary.totalLines, expenseCount: summary.expenseCount, needsAttentionCount: stepNeedsAttentionCount });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines === null, summary.readyCount, summary.totalLines, summary.expenseCount, summary.needsAttentionCount, onProgressChange]);
+  }, [lines === null, summary.readyCount, summary.totalLines, summary.expenseCount, stepNeedsAttentionCount, onProgressChange]);
 
   useEffect(() => {
     if (lines === null) return;
-    onAllResolvedChange?.(summary.allResolved);
+    onAllResolvedChange?.(stepResolved);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines === null, summary.allResolved, onAllResolvedChange]);
+  }, [lines === null, stepResolved, onAllResolvedChange]);
 
   const hasUnsavedReceivingDraft = editingLineKey !== null && isReceivingDirty(editingLineKey);
   useEffect(() => {
@@ -841,8 +876,20 @@ export function ItemsAndReceivingPanel({
   const spendCategoryPathById = new Map(flattenSpendCategoryPaths(spendCategories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId }))).map((p) => [p.id, p.path]));
 
   const attentionLines = combinedLines.filter((c) => c.outcome === "needs_attention");
-  const readyLines = combinedLines.filter((c) => c.outcome === "ready");
+  // A ready line whose significant price change is not yet acknowledged is
+  // pulled out of "Ready" and shown as a blocking price-review card.
+  const readyLines = combinedLines.filter((c) => c.outcome === "ready" && !(c.line.lineKey && priceRequiresAck.has(c.line.lineKey)));
   const expenseLines = combinedLines.filter((c) => c.outcome === "expense");
+  const priceAckLines = combinedLines
+    .filter((c) => c.line.lineKey && priceRequiresAck.has(c.line.lineKey))
+    .map((c) => ({ line: c.line, review: priceReviewByLineKey.get(c.line.lineKey!) ?? null }))
+    .filter((x): x is { line: (typeof combinedLines)[number]["line"]; review: LinePriceReviewView } => x.review !== null);
+
+  // The single blocking-issue count and completion verdict the footer,
+  // stepper and Step 3 gate all read: operational needs-attention lines
+  // PLUS unacknowledged significant price changes.
+  const blockingIssueCount = summary.needsAttentionCount + priceAckLines.length;
+  const stepAllResolved = summary.allResolved && priceAckLines.length === 0;
 
   const renderLine = ({ line, receiving, outcome, postingBlockerReason }: (typeof combinedLines)[number]) => (
     <LineCard
@@ -1080,22 +1127,40 @@ export function ItemsAndReceivingPanel({
 
       {/* ============ NEEDS YOU -- the point of the screen: the lines that
           can't post yet, always shown, amber, at the top. ============ */}
-      {attentionLines.length > 0 ? (
+      {blockingIssueCount > 0 ? (
         <section>
           <div className="mb-2 flex items-center gap-2">
             <span aria-hidden className="h-2 w-2 rounded-full bg-amber-400" />
             <h3 className="text-[13px] font-semibold uppercase tracking-wide text-amber-300">Needs you</h3>
             <span className="text-xs text-zinc-500">
-              {attentionLines.length} line{attentionLines.length === 1 ? "" : "s"} can&apos;t post yet — fix {attentionLines.length === 1 ? "it" : "them"} here
+              {blockingIssueCount} issue{blockingIssueCount === 1 ? "" : "s"} must be resolved before Review &amp; Post
             </span>
           </div>
-          <div className={`${panelClass} border-l-2 border-l-amber-500`}>{attentionLines.map(renderLine)}</div>
+          {attentionLines.length > 0 ? <div className={`${panelClass} border-l-2 border-l-amber-500`}>{attentionLines.map(renderLine)}</div> : null}
+          {priceAckLines.length > 0 ? (
+            <div className="mt-3 flex flex-col gap-3">
+              {priceAckLines.map(({ line, review }) => (
+                <PriceReviewCard
+                  key={line.lineKey}
+                  id={`price-review-${line.lineKey}`}
+                  invoiceDescription={line.description}
+                  review={review}
+                  pending={acknowledgingLineKey === line.lineKey}
+                  onAcknowledge={(note) => handleAcknowledgePrice(line.lineKey, note)}
+                  priceHistoryHref={line.inventoryItemId ? `/manager/inventory/items/${line.inventoryItemId}?tab=price-history` : null}
+                />
+              ))}
+            </div>
+          ) : null}
         </section>
       ) : summary.totalLines > 0 ? (
         <section>
           <div className="flex items-center gap-2 rounded-xl border border-emerald-800/60 bg-emerald-950/20 px-4 py-3">
             <span aria-hidden className="h-2 w-2 rounded-full bg-emerald-400" />
-            <p className="text-sm font-medium text-emerald-200">All {summary.totalLines} lines confirmed — ready to continue.</p>
+            <p className="text-sm font-medium text-emerald-200">
+              All {summary.totalLines} lines confirmed — ready to continue.
+              {priceInformationalCount > 0 ? ` · ${priceInformationalCount} price change${priceInformationalCount === 1 ? "" : "s"} noted` : ""}
+            </p>
           </div>
         </section>
       ) : null}
@@ -1151,19 +1216,23 @@ export function ItemsAndReceivingPanel({
 
       {onContinue ? (
         <WorkflowFooter
-          contextLabel={summary.allResolved ? undefined : `${summary.needsAttentionCount} line${summary.needsAttentionCount === 1 ? "" : "s"} need attention`}
+          contextLabel={stepAllResolved ? undefined : `${blockingIssueCount} issue${blockingIssueCount === 1 ? "" : "s"} remaining`}
           contextTone="warning"
           onContextClick={
-            !summary.allResolved && summary.needsAttentionCount > 0
-              ? () => scrollToFirstIssue(combinedLines.filter((c) => c.outcome === "needs_attention").map((c) => ({ id: `classification-line-${c.line.lineKey}`, reason: "" })))
+            !stepAllResolved
+              ? () =>
+                  scrollToFirstIssue([
+                    ...attentionLines.map((c) => ({ id: `classification-line-${c.line.lineKey}`, reason: "" })),
+                    ...priceAckLines.map((p) => ({ id: `price-review-${p.line.lineKey}`, reason: "" })),
+                  ])
               : undefined
           }
           primaryLabel="Continue to Review & Post"
           onPrimary={handleContinue}
-          primaryDisabled={!summary.allResolved}
+          primaryDisabled={!stepAllResolved}
           primaryPending={continuePending}
           primaryPendingLabel="Saving…"
-          primaryTitle={!summary.allResolved ? "Resolve every line before continuing." : undefined}
+          primaryTitle={!stepAllResolved ? "Resolve all blocking issues to continue." : undefined}
           sticky={false}
         />
       ) : null}
