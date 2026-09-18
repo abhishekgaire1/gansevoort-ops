@@ -30,7 +30,6 @@ const describeIfDb = DB_URL ? describe : describe.skip;
 
 if (!DB_URL) {
   // Surfaced once so the reason for the skip is unambiguous in CI logs.
-  // eslint-disable-next-line no-console
   console.warn("[priceReviewConcurrency] SKIPPED -- set SUPABASE_DB_URL (DEV Postgres session connection string, with password) to run the real two-connection concurrency proof.");
 }
 
