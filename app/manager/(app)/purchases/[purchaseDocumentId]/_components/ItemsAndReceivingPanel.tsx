@@ -36,9 +36,6 @@ import { formatPackageConfirmation } from "@/app/lib/purchaseDocuments/packageUn
 import { classifyLineOutcome, summarizeCombinedStep, checklistCompletion, type LineOutcome } from "@/app/lib/purchaseDocuments/combinedLineReadiness";
 import {
   receivingLineIsReady,
-  applyLocationToAll,
-  applyConditionToAll,
-  summarizeBulkLocations,
   missingReceivingReason,
 } from "@/app/lib/purchaseDocuments/itemsAndReceivingCardState";
 import { deriveLineProvenance } from "@/app/lib/purchaseDocuments/lineProvenance";
@@ -47,6 +44,8 @@ import { getAmendmentAlreadyPosted, getPurchaseDocumentPostingBlockers } from "@
 import { getPurchaseDocumentPriceReviewAction, acknowledgePriceChangeAction, type LinePriceReviewView } from "@/app/actions/priceReview";
 import { priceCheckDisplay, priceReviewIsNotable, type PriceCheckDisplay } from "@/app/lib/purchasing/priceReviewPolicy";
 import { PriceReviewCard } from "./PriceReviewCard";
+import { LineActionDrawer } from "./LineActionDrawer";
+import { applyPatchToSelected, deriveLineActionScopes, drawerIsDirty, lineIsBulkSelectable } from "@/app/lib/purchaseDocuments/lineBulkAndDrawer";
 import {
   recordReceipt,
   listEffectiveReceiptsForPurchaseDocument,
@@ -209,9 +208,19 @@ export function ItemsAndReceivingPanel({
   const [lineFilter, setLineFilter] = useState<LineFilter>("all");
   const [lineFilterTouched, setLineFilterTouched] = useState(false);
   const [expensesOpen, setExpensesOpen] = useState(false);
-  const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkLocationId, setBulkLocationId] = useState("");
   const [bulkConditionValue, setBulkConditionValue] = useState<ReceivingLineDraft["conditionStatus"]>("RECEIVED_AS_INVOICED");
+  // Selection-based bulk: only eligible inventory lines may be selected, and
+  // bulk only ever sets location/condition -- never matches, units, packages,
+  // factors, measured quantities, prices, acknowledgments, or expenses.
+  const [selectedLineKeys, setSelectedLineKeys] = useState<Set<string>>(new Set());
+  const toggleLineSelected = (lineKey: string) =>
+    setSelectedLineKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(lineKey)) next.delete(lineKey);
+      else next.add(lineKey);
+      return next;
+    });
   const [continuePending, setContinuePending] = useState(false);
   const [moreActionsOpen, setMoreActionsOpen] = useState(false);
   const [rerunConfirmOpen, setRerunConfirmOpen] = useState(false);
@@ -553,12 +562,14 @@ export function ItemsAndReceivingPanel({
     );
   }
 
-  function handleApplyLocationToAll() {
-    setReceivingLineState((prev) => applyLocationToAll(prev, bulkLocationId));
+  function handleSetLocationForSelected() {
+    if (!bulkLocationId || selectedLineKeys.size === 0) return;
+    setReceivingLineState((prev) => applyPatchToSelected(prev, selectedLineKeys, { locationId: bulkLocationId }));
   }
 
-  function handleApplyConditionToAll() {
-    setReceivingLineState((prev) => applyConditionToAll(prev, bulkConditionValue));
+  function handleSetConditionForSelected() {
+    if (selectedLineKeys.size === 0) return;
+    setReceivingLineState((prev) => applyPatchToSelected(prev, selectedLineKeys, { conditionStatus: bulkConditionValue }));
   }
 
   async function submitReceivingIfNeeded(): Promise<{ ok: true } | { ok: false; message: string }> {
@@ -944,6 +955,9 @@ export function ItemsAndReceivingPanel({
       line={line}
       receiving={receiving}
       priceCheck={priceCheckFor(line.lineKey)}
+      selectable={lineIsBulkSelectable(line, readOnly)}
+      selected={line.lineKey !== null && selectedLineKeys.has(line.lineKey)}
+      onToggleSelected={() => line.lineKey && toggleLineSelected(line.lineKey)}
       postingBlockerReason={postingBlockerReason}
       editingOpen={editingLineKey === line.lineKey}
       onEditLine={() => handleEditLine(line.lineKey)}
@@ -994,9 +1008,6 @@ export function ItemsAndReceivingPanel({
       savedFlash={savedFlashLineKey === line.lineKey}
     />
   );
-
-  const bulkLocationSummary = summarizeBulkLocations(receivingLineState.map((l) => l.locationId || null));
-  const bulkEligibleForCondition = receivingLineState.filter((l) => l.receivedQuantity.trim() !== "").length;
 
   return (
     <div className="mt-3 flex flex-col gap-3">
@@ -1114,62 +1125,46 @@ export function ItemsAndReceivingPanel({
           </div>
         ) : null}
 
-        {/* ============ BULK RECEIVING ACTIONS -- tucked behind a
-            disclosure so the common single-line path isn't crowded by
-            controls most invoices never need. Never touches mapping/
-            units/conversions. ============ */}
-        {!readOnly ? (
-          <div className="mt-3 border-t border-zinc-800 pt-3">
-          <button type="button" onClick={() => setBulkOpen((v) => !v)} className="flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200">
-            <span className={`transition-transform ${bulkOpen ? "rotate-90" : ""}`}>▸</span>
-            Bulk edit — apply a location or condition to multiple lines
-          </button>
-          {bulkOpen ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-zinc-400">
-            <span className="font-medium text-zinc-500">Apply to multiple:</span>
-            <select value={bulkLocationId} onChange={(e) => setBulkLocationId(e.target.value)} className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-white">
-              <option value="">{bulkLocationSummary.kind === "multiple" ? "Multiple locations" : "Location…"}</option>
-              {locations.map((loc) => (
-                <option key={loc.id} value={loc.id}>
-                  {loc.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={handleApplyLocationToAll}
-              disabled={!bulkLocationId}
-              title={!bulkLocationId ? "Choose a location above first" : undefined}
-              className={secondaryButtonClassCompact}
-            >
-              Apply location
-            </button>
-            <select
-              value={bulkConditionValue}
-              onChange={(e) => setBulkConditionValue(e.target.value as ReceivingLineDraft["conditionStatus"])}
-              className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-white"
-            >
-              {CONDITION_OPTIONS.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={handleApplyConditionToAll}
-              disabled={bulkEligibleForCondition === 0}
-              title={bulkEligibleForCondition === 0 ? "No lines have a received quantity entered yet" : undefined}
-              className={secondaryButtonClassCompact}
-            >
-              Apply condition
-            </button>
-          </div>
-          ) : null}
-          </div>
-        ) : null}
+        {/* Selection-based bulk lives in its own toolbar below (shown only
+            once eligible inventory rows are selected) -- no always-on
+            "apply to all" inputs here. */}
         </div>
       </div>
+
+      {/* ============ SELECTION BULK TOOLBAR -- appears only when eligible
+          inventory rows are selected; sets location/condition on exactly
+          those rows, never any protected field, never expenses, never a
+          price acknowledgment. ============ */}
+      {!readOnly && selectedLineKeys.size > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-700/60 bg-amber-950/20 px-3 py-2 text-xs text-amber-100">
+          <span className="font-semibold">{selectedLineKeys.size} inventory line{selectedLineKeys.size === 1 ? "" : "s"} selected</span>
+          <span className="mx-1 text-amber-700">·</span>
+          <select value={bulkLocationId} onChange={(e) => setBulkLocationId(e.target.value)} aria-label="Bulk location" className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-white">
+            <option value="">Location…</option>
+            {locations.map((loc) => (
+              <option key={loc.id} value={loc.id}>
+                {loc.name}
+              </option>
+            ))}
+          </select>
+          <button type="button" onClick={handleSetLocationForSelected} disabled={!bulkLocationId} title={!bulkLocationId ? "Choose a location first" : `Apply to ${selectedLineKeys.size} selected line${selectedLineKeys.size === 1 ? "" : "s"}`} className={secondaryButtonClassCompact}>
+            Set location
+          </button>
+          <select value={bulkConditionValue} onChange={(e) => setBulkConditionValue(e.target.value as ReceivingLineDraft["conditionStatus"])} aria-label="Bulk condition" className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-white">
+            {CONDITION_OPTIONS.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+          <button type="button" onClick={handleSetConditionForSelected} title={`Apply to ${selectedLineKeys.size} selected line${selectedLineKeys.size === 1 ? "" : "s"}`} className={secondaryButtonClassCompact}>
+            Set condition
+          </button>
+          <button type="button" onClick={() => setSelectedLineKeys(new Set())} className="ml-auto text-amber-300 underline underline-offset-2">
+            Clear selection
+          </button>
+        </div>
+      ) : null}
 
       {/* ============ FILTERS -- visibility only; never change readiness,
           acknowledgment, or price-review state. "All" keeps the
@@ -1429,6 +1424,9 @@ function LineCard({
   receiving,
   postingBlockerReason,
   priceCheck,
+  selectable,
+  selected,
+  onToggleSelected,
   editingOpen,
   onEditLine,
   onCloseEditor,
@@ -1474,6 +1472,10 @@ function LineCard({
   postingBlockerReason: string | null;
   /** Vendor-aware Price Check for this line (null when not applicable). */
   priceCheck: PriceCheckDisplay | null;
+  /** Selection-based bulk: an eligible inventory row shows a checkbox. */
+  selectable: boolean;
+  selected: boolean;
+  onToggleSelected: () => void;
   editingOpen: boolean;
   onEditLine: () => void;
   onCloseEditor: () => void;
@@ -1633,7 +1635,12 @@ function LineCard({
     return (
       <div id={id} tabIndex={-1} className="grid grid-cols-1 gap-1.5 border-b border-zinc-800 px-3 py-2.5 last:border-0 hover:bg-zinc-800/20 focus:outline-none sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.4fr_84px_112px] sm:items-start sm:gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+          <div className="flex items-start gap-2">
+            {selectable ? (
+              <input type="checkbox" checked={selected} onChange={onToggleSelected} className="mt-0.5 shrink-0" aria-label={`Select ${line.description ?? "line"} for bulk actions`} />
+            ) : null}
+            <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+          </div>
           <p className="truncate text-xs text-zinc-500">{line.vendorSku ? `SKU ${line.vendorSku}` : "—"}{orderedQuantity ? ` · ${orderedQuantity}` : ""}</p>
           {line.changedInAmendment ? (
             <div className="mt-1">
@@ -1695,7 +1702,12 @@ function LineCard({
         className="grid grid-cols-1 gap-1.5 border-b border-l-2 border-zinc-800 border-l-amber-500 bg-amber-950/5 px-3 py-2.5 last:border-b-0 hover:bg-amber-950/10 focus:outline-none sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.4fr_84px_112px] sm:items-start sm:gap-3"
       >
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+          <div className="flex items-start gap-2">
+            {selectable ? (
+              <input type="checkbox" checked={selected} onChange={onToggleSelected} className="mt-0.5 shrink-0" aria-label={`Select ${line.description ?? "line"} for bulk actions`} />
+            ) : null}
+            <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+          </div>
           <p className="truncate text-xs text-zinc-500">{line.vendorSku ? `SKU ${line.vendorSku}` : "—"}{orderedQuantity ? ` · ${orderedQuantity}` : ""}</p>
           {line.changedInAmendment ? (
             <div className="mt-1">
@@ -1731,8 +1743,43 @@ function LineCard({
   const showPackageAndReceiving = itemMatchOk && line.disposition === "INVENTORY";
   const canEditReceivingHere = !readOnly && line.disposition === "INVENTORY";
 
+  // Which of the four correction scopes this line involves -- drives the
+  // drawer's scope legend. B/A (package + receiving) once the item is matched;
+  // C (price) only when there is a notable change; D (registered item) whenever
+  // the line is editable.
+  const drawerScopes = deriveLineActionScopes({
+    readOnly,
+    showPackageAndReceiving,
+    priceCheckTone: priceCheck?.tone ?? null,
+  });
+  // Only locally-held forms lose input on close; lifted receiving drafts don't.
+  const drawerDirty = drawerIsDirty({ overrideFormOpen, correcting });
+
   return (
-    <div id={id} tabIndex={-1} className={`border-b border-zinc-800 last:border-0 focus:outline-none ${isComplete ? "" : "border-l-2 border-l-amber-500 bg-amber-950/5"}`}>
+    <>
+      {/* In-list anchor: the row stays put while the drawer overlays. */}
+      <div
+        id={id}
+        tabIndex={-1}
+        className={`flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-3.5 py-3 last:border-0 focus:outline-none ${isComplete ? "" : "border-l-2 border-l-amber-500 bg-amber-950/5"}`}
+      >
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+          <p className="truncate text-xs text-zinc-500">Editing in panel →</p>
+        </div>
+        <button type="button" onClick={onCloseEditor} className={secondaryButtonClassCompact}>
+          {toggleLabel}
+        </button>
+      </div>
+      <LineActionDrawer
+        open
+        title={line.description ?? "Edit line"}
+        subtitle={line.vendorSku ? `Vendor SKU ${line.vendorSku}` : undefined}
+        scopes={drawerScopes}
+        dirty={drawerDirty}
+        onRequestClose={onCloseEditor}
+      >
+    <div tabIndex={-1} className="focus:outline-none">
       {/* ============ Row header -- stays visible in edit mode too ============ */}
       <div className="flex flex-wrap items-start justify-between gap-3 px-3.5 pt-3.5">
         <div className="min-w-0 flex-1">
@@ -2009,6 +2056,8 @@ function LineCard({
         <div className="pb-3.5" />
       )}
     </div>
+      </LineActionDrawer>
+    </>
   );
 }
 
