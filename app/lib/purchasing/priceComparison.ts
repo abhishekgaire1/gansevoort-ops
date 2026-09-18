@@ -32,7 +32,20 @@ export type PriceComparisonUnavailableReason =
   | "MISSING_LINE_TOTAL"
   | "MISSING_CONVERSION"
   | "AWAITING_RECEIVING_CONFIRMATION"
+  | "CURRENCY_UNAVAILABLE"
   | "FIRST_PURCHASE";
+
+/** One shared currency normalization mirroring the SQL
+ * normalize_currency_code (20260811100156): "$"/"usd" -> "USD", trim/upper;
+ * empty/null -> null. Currency participates in baseline eligibility, so
+ * both sides normalize the same way and different currencies never blend. */
+export function normalizeCurrencyCode(code: string | null | undefined): string | null {
+  if (code === null || code === undefined) return null;
+  const trimmed = code.trim();
+  if (trimmed === "") return null;
+  if (trimmed === "$" || trimmed.toLowerCase() === "usd") return "USD";
+  return trimmed.toUpperCase();
+}
 
 export interface PriceHistoryPoint {
   purchaseDocumentId: string;
@@ -174,6 +187,18 @@ export function comparePrices(
   return { deltaAbs, deltaPct, direction };
 }
 
+interface BaselineRow {
+  out_purchase_document_id: string;
+  out_document_number: string | null;
+  out_document_date: string | null;
+  out_vendor_id: string;
+  out_vendor_name: string | null;
+  out_line_total: number;
+  out_base_quantity: number;
+  out_base_unit_code: string | null;
+  out_unit_cost: number;
+}
+
 interface PriceHistoryRow {
   out_inventory_item_id: string;
   out_rank: number;
@@ -200,13 +225,16 @@ export async function getPriceComparisonsForDocument(
   organizationId: string
 ): Promise<Map<string, PriceComparisonResult>> {
   const [{ data: purchaseDocument }, receivingLines, { data: lines }, effectiveReceivingLines] = await Promise.all([
-    supabase.from("purchase_documents").select("vendor_id").eq("id", purchaseDocumentId).eq("organization_id", organizationId).maybeSingle(),
+    supabase.from("purchase_documents").select("vendor_id, currency, document_date").eq("id", purchaseDocumentId).eq("organization_id", organizationId).maybeSingle(),
     getReceivingLines(supabase, purchaseDocumentId, organizationId),
     supabase.from("purchase_document_lines").select("line_key, line_total").eq("purchase_document_id", purchaseDocumentId).eq("organization_id", organizationId),
     getEffectiveReceivingLines(supabase, purchaseDocumentId, organizationId),
   ]);
 
   const vendorId = (purchaseDocument?.vendor_id as string | null | undefined) ?? null;
+  const currencyRaw = (purchaseDocument?.currency as string | null | undefined) ?? null;
+  const normalizedCurrency = normalizeCurrencyCode(currencyRaw);
+  const beforeDate = (purchaseDocument?.document_date as string | null | undefined) ?? null;
   const lineTotalByKey = new Map(((lines ?? []) as { line_key: string; line_total: number | null }[]).map((l) => [l.line_key, l.line_total]));
 
   // Multiple effective receipt lines can share the same matched_line_key
@@ -222,6 +250,7 @@ export async function getPriceComparisonsForDocument(
     lineKey: string;
     inventoryItemId: string;
     baseUnitCode: string;
+    vendorSku: string | null;
     currentUnitCost: number;
   }
   const results = new Map<string, PriceComparisonResult>();
@@ -241,48 +270,57 @@ export async function getPriceComparisonsForDocument(
       results.set(info.lineKey, { available: false, reason: classification.reason });
       continue;
     }
+    // A missing/unnormalizable currency can never be compared safely --
+    // never blend currencies, never invent an exchange rate.
+    if (normalizedCurrency === null) {
+      results.set(info.lineKey, { available: false, reason: "CURRENCY_UNAVAILABLE" });
+      continue;
+    }
     // classification.eligible guarantees lineTotal > 0 and baseQuantity > 0.
     const currentUnitCost = (lineTotal as number) / (baseQuantity as number);
-    eligible.push({ lineKey: info.lineKey, inventoryItemId: info.inventoryItemId as string, baseUnitCode: info.baseUnitCode as string, currentUnitCost });
+    eligible.push({ lineKey: info.lineKey, inventoryItemId: info.inventoryItemId as string, baseUnitCode: info.baseUnitCode as string, vendorSku: info.vendorSku, currentUnitCost });
   }
 
   if (eligible.length === 0 || !vendorId) return results;
 
-  const itemIds = Array.from(new Set(eligible.map((e) => e.inventoryItemId)));
-  const { data: historyRows } = await supabase.rpc("get_inventory_item_price_history", {
-    p_organization_id: organizationId,
-    p_vendor_id: vendorId,
-    p_inventory_item_ids: itemIds,
-    p_limit_per_item: 1,
-  });
-  const previousByItemId = new Map<string, PriceHistoryRow>();
-  for (const row of (historyRows ?? []) as PriceHistoryRow[]) {
-    if (row.out_rank === 1) previousByItemId.set(row.out_inventory_item_id, row);
-  }
-
-  for (const e of eligible) {
-    const previousRow = previousByItemId.get(e.inventoryItemId);
-    if (!previousRow) {
-      results.set(e.lineKey, { available: false, reason: "FIRST_PURCHASE" });
-      continue;
-    }
-    const { deltaAbs, deltaPct, direction } = comparePrices(e.currentUnitCost, previousRow.out_unit_cost);
-    results.set(e.lineKey, {
-      available: true,
-      currentUnitCost: e.currentUnitCost,
-      baseUnitCode: e.baseUnitCode,
-      previous: {
-        purchaseDocumentId: previousRow.out_purchase_document_id,
-        documentNumber: previousRow.out_document_number,
-        documentDate: previousRow.out_document_date,
-        vendorName: previousRow.out_vendor_name,
-        unitCost: previousRow.out_unit_cost,
-      },
-      deltaAbs,
-      deltaPct,
-      direction,
-    });
-  }
+  // Per-line comparable baseline -- SKU/currency/base-unit/date-correct
+  // (get_comparable_price_baseline, 20260811100156). The SAME selector the
+  // posting guard uses, so Step 2/3 and enforcement pick the same event.
+  await Promise.all(
+    eligible.map(async (e) => {
+      const { data: baseline } = await supabase.rpc("get_comparable_price_baseline", {
+        p_organization_id: organizationId,
+        p_vendor_id: vendorId,
+        p_inventory_item_id: e.inventoryItemId,
+        p_vendor_sku: e.vendorSku,
+        p_currency_code: normalizedCurrency,
+        p_base_unit_code: e.baseUnitCode,
+        p_before_date: beforeDate,
+        p_exclude_purchase_document_id: purchaseDocumentId,
+      });
+      const previousRow = ((baseline ?? []) as BaselineRow[])[0];
+      if (!previousRow) {
+        results.set(e.lineKey, { available: false, reason: "FIRST_PURCHASE" });
+        return;
+      }
+      const { deltaAbs, deltaPct, direction } = comparePrices(e.currentUnitCost, previousRow.out_unit_cost);
+      results.set(e.lineKey, {
+        available: true,
+        currentUnitCost: e.currentUnitCost,
+        baseUnitCode: e.baseUnitCode,
+        previous: {
+          purchaseDocumentId: previousRow.out_purchase_document_id,
+          documentNumber: previousRow.out_document_number,
+          documentDate: previousRow.out_document_date,
+          vendorName: previousRow.out_vendor_name,
+          unitCost: previousRow.out_unit_cost,
+        },
+        deltaAbs,
+        deltaPct,
+        direction,
+      });
+    })
+  );
 
   return results;
 }

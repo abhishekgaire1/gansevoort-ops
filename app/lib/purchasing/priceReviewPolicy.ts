@@ -12,6 +12,11 @@
  * wrong quantity, package conversion, or invoice amount).
  */
 
+/** Version of this threshold policy. Participates in the acknowledgment
+ * fingerprint, so changing the thresholds invalidates existing
+ * acknowledgments and forces a fresh review under the new policy. */
+export const PRICE_REVIEW_POLICY_VERSION = "v1:10-20";
+
 /** Absolute % change at/above which a line shows an informational alert. */
 export const INFORMATIONAL_THRESHOLD_PCT = 10;
 /** Absolute % change at/above which a manager must acknowledge before the
@@ -64,6 +69,39 @@ export function priceChangeLabel(direction: PriceDirection, deltaPct: number, op
   if (direction === "unchanged") return "No material change";
   const verb = direction === "increase" ? "increased" : "decreased";
   return opts.requiresReview ? `Price change requires review: ${verb} ${pct}%` : `Price ${verb} ${pct}%`;
+}
+
+export interface PriceCheckDisplay {
+  text: string;
+  tone: "neutral" | "info" | "success" | "warning";
+  /** True when meaning must never rest on color alone -- callers pair the
+   * text with an icon/label; this flags a directional change for the icon. */
+  direction: PriceDirection | null;
+}
+
+/** The Price Check column value for a line, derived from its review state.
+ * Vendor-aware, base-unit-normalized, plain language -- never "$0.00",
+ * never "cheapest"/"best". */
+export function priceCheckDisplay(
+  state: PriceReviewState,
+  detail: { direction: PriceDirection; deltaPct: number; vendorName: string | null } | null
+): PriceCheckDisplay | null {
+  switch (state) {
+    case "NOT_APPLICABLE":
+      return null;
+    case "NO_COMPARABLE_HISTORY":
+      return { text: "No previous comparable purchase", tone: "neutral", direction: null };
+    case "COMPARISON_UNAVAILABLE":
+      return { text: "Comparison unavailable", tone: "neutral", direction: null };
+    case "NO_MATERIAL_CHANGE":
+      return { text: "No material change", tone: "neutral", direction: null };
+    case "INFORMATIONAL_CHANGE":
+      return detail ? { text: priceCheckBadge(detail.direction, detail.deltaPct, detail.vendorName), tone: "info", direction: detail.direction } : null;
+    case "REQUIRES_ACKNOWLEDGMENT":
+      return detail ? { text: `Review required · ${Math.abs(detail.deltaPct).toFixed(1)}% ${detail.direction === "increase" ? "increase" : "decrease"}`, tone: "warning", direction: detail.direction } : null;
+    case "ACKNOWLEDGED":
+      return detail ? { text: `${Math.abs(detail.deltaPct).toFixed(1)}% ${detail.direction === "increase" ? "increase" : "decrease"} reviewed`, tone: "success", direction: detail.direction } : null;
+  }
 }
 
 /** Compact badge text for the Price Check column, e.g. "↑ 18.4% · Bartlett".

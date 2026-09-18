@@ -245,7 +245,7 @@ function fakeSupabase(opts: { vendorId: string | null; lineTotals: Record<string
   const rpc = vi.fn().mockResolvedValue({ data: opts.rpcRows, error: null });
   const from = vi.fn((table: string) => {
     if (table === "purchase_documents") {
-      return { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { vendor_id: opts.vendorId }, error: null }) }) }) }) };
+      return { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { vendor_id: opts.vendorId, currency: "USD", document_date: "2026-09-01" }, error: null }) }) }) }) };
     }
     if (table === "purchase_document_lines") {
       const rows = Object.entries(opts.lineTotals).map(([line_key, line_total]) => ({ line_key, line_total }));
@@ -315,12 +315,13 @@ describe("getPriceComparisonsForDocument", () => {
     expect((cream as { currentUnitCost: number }).currentUnitCost).not.toBeCloseTo(0.36484, 2);
   });
 
-  it("batches into exactly one RPC call regardless of how many resolved lines are on the document", async () => {
+  it("selects the comparable baseline per resolved line, scoped by SKU/currency/base-unit/date (vendor-aware, no false baseline)", async () => {
     getReceivingLinesMock.mockResolvedValue(
-      Array.from({ length: 10 }, (_, i) =>
+      Array.from({ length: 3 }, (_, i) =>
         line({
           lineKey: `line-${i}`,
           inventoryItemId: `item-${i}`,
+          vendorSku: `SKU-${i}`,
           baseUnitCode: "EA",
           receivingBehavior: "SAME_UNIT",
           invoicePackageQuantity: 1,
@@ -328,12 +329,18 @@ describe("getPriceComparisonsForDocument", () => {
         })
       )
     );
-    const lineTotals = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`line-${i}`, 10]));
+    const lineTotals = Object.fromEntries(Array.from({ length: 3 }, (_, i) => [`line-${i}`, 10]));
     const supabase = fakeSupabase({ vendorId: "vendor-1", lineTotals, rpcRows: [] });
 
     await getPriceComparisonsForDocument(supabase as never, "pd-current", "org-1");
 
-    expect(supabase.rpc).toHaveBeenCalledTimes(1);
+    // One baseline lookup per resolved line, each with its own SKU + the
+    // document's currency/base-unit/date, excluding the current document.
+    expect(supabase.rpc).toHaveBeenCalledTimes(3);
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      "get_comparable_price_baseline",
+      expect.objectContaining({ p_vendor_id: "vendor-1", p_vendor_sku: "SKU-0", p_currency_code: "USD", p_base_unit_code: "EA", p_before_date: "2026-09-01", p_exclude_purchase_document_id: "pd-current" })
+    );
   });
 
   it("first recorded purchase produces no fake comparison", async () => {

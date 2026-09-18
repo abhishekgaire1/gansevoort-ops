@@ -45,6 +45,7 @@ import { deriveLineProvenance } from "@/app/lib/purchaseDocuments/lineProvenance
 import { describeLineIssue } from "@/app/lib/purchaseDocuments/lineIssueSummary";
 import { getAmendmentAlreadyPosted, getPurchaseDocumentPostingBlockers } from "@/app/actions/purchaseDocuments";
 import { getPurchaseDocumentPriceReviewAction, acknowledgePriceChangeAction, type LinePriceReviewView } from "@/app/actions/priceReview";
+import { priceCheckDisplay, type PriceCheckDisplay } from "@/app/lib/purchasing/priceReviewPolicy";
 import { PriceReviewCard } from "./PriceReviewCard";
 import {
   recordReceipt,
@@ -891,6 +892,14 @@ export function ItemsAndReceivingPanel({
   const blockingIssueCount = summary.needsAttentionCount + priceAckLines.length;
   const stepAllResolved = summary.allResolved && priceAckLines.length === 0;
 
+  const priceCheckFor = (lineKey: string | null): PriceCheckDisplay | null => {
+    if (lineKey === null) return null;
+    const review = priceReviewByLineKey.get(lineKey);
+    if (!review) return null;
+    const c = review.comparison;
+    return priceCheckDisplay(review.state, c ? { direction: c.direction, deltaPct: c.deltaPct, vendorName: c.previous.vendorName } : null);
+  };
+
   const renderLine = ({ line, receiving, outcome, postingBlockerReason }: (typeof combinedLines)[number]) => (
     <LineCard
       key={line.lineKey}
@@ -898,6 +907,7 @@ export function ItemsAndReceivingPanel({
       outcome={outcome}
       line={line}
       receiving={receiving}
+      priceCheck={priceCheckFor(line.lineKey)}
       postingBlockerReason={postingBlockerReason}
       editingOpen={editingLineKey === line.lineKey}
       onEditLine={() => handleEditLine(line.lineKey)}
@@ -1262,6 +1272,32 @@ function AmendmentChangedBadge({ previous }: { previous: string | null }) {
   );
 }
 
+/** The Price Check badge -- vendor-aware, base-unit-normalized. Meaning
+ * never rests on color alone: a directional arrow + an explicit
+ * increase/decrease word accompany every change, plus an accessible label. */
+function PriceCheckBadge({ priceCheck }: { priceCheck: PriceCheckDisplay }) {
+  const toneClass =
+    priceCheck.tone === "warning"
+      ? "border-amber-700 bg-amber-950/30 text-amber-200"
+      : priceCheck.tone === "success"
+        ? "border-emerald-800 bg-emerald-950/30 text-emerald-200"
+        : priceCheck.tone === "info"
+          ? "border-sky-800 bg-sky-950/30 text-sky-200"
+          : "border-zinc-700 bg-zinc-900 text-zinc-400";
+  const arrow = priceCheck.direction === "increase" ? "↑" : priceCheck.direction === "decrease" ? "↓" : null;
+  const arrowLabel = priceCheck.direction === "increase" ? "price increased" : priceCheck.direction === "decrease" ? "price decreased" : null;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium ${toneClass}`} title="Price Check">
+      <span className="text-[10px] uppercase tracking-wide opacity-70">Price</span>
+      {arrow ? (
+        <span aria-hidden>{arrow}</span>
+      ) : null}
+      <span>{priceCheck.text}</span>
+      {arrowLabel ? <span className="sr-only">{arrowLabel}</span> : null}
+    </span>
+  );
+}
+
 function ProvenanceLine({ provenance }: { provenance: ReturnType<typeof deriveLineProvenance> }) {
   return (
     <p className="mt-1 text-xs font-medium text-zinc-300">
@@ -1296,6 +1332,7 @@ function LineCard({
   line,
   receiving,
   postingBlockerReason,
+  priceCheck,
   editingOpen,
   onEditLine,
   onCloseEditor,
@@ -1339,6 +1376,8 @@ function LineCard({
    * post time, or null -- surfaced in the package column so a mismatch is
    * caught here, not only when the manager tries to post. */
   postingBlockerReason: string | null;
+  /** Vendor-aware Price Check for this line (null when not applicable). */
+  priceCheck: PriceCheckDisplay | null;
   editingOpen: boolean;
   onEditLine: () => void;
   onCloseEditor: () => void;
@@ -1609,6 +1648,11 @@ function LineCard({
           {line.changedInAmendment ? (
             <div className="mt-1.5">
               <AmendmentChangedBadge previous={line.previousOrderedSummary} />
+            </div>
+          ) : null}
+          {priceCheck ? (
+            <div className="mt-1.5">
+              <PriceCheckBadge priceCheck={priceCheck} />
             </div>
           ) : null}
         </div>

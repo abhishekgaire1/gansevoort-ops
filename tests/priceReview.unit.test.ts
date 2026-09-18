@@ -57,7 +57,7 @@ describe("derivePriceReviewState", () => {
   });
 
   it("missing quantity/amount/conversion is COMPARISON_UNAVAILABLE, never a fabricated price (scenario 33)", () => {
-    for (const reason of ["NO_VENDOR", "MISSING_LINE_TOTAL", "MISSING_CONVERSION", "AWAITING_RECEIVING_CONFIRMATION"] as const) {
+    for (const reason of ["NO_VENDOR", "MISSING_LINE_TOTAL", "MISSING_CONVERSION", "AWAITING_RECEIVING_CONFIRMATION", "CURRENCY_UNAVAILABLE"] as const) {
       expect(derivePriceReviewState({ comparison: { available: false, reason }, context, acknowledgment: null }).state).toBe("COMPARISON_UNAVAILABLE");
     }
   });
@@ -86,9 +86,11 @@ describe("derivePriceReviewState", () => {
       vendorId: context.vendorId,
       vendorSku: context.vendorSku,
       currency: context.currency,
+      baseUnitCode: comparison.baseUnitCode,
       currentUnitCost: comparison.currentUnitCost,
       previousPurchaseDocumentId: comparison.previous.purchaseDocumentId,
       previousUnitCost: comparison.previous.unitCost,
+      policyVersion: "v1:10-20",
     });
     const ack: StoredPriceAcknowledgment = { fingerprint, actorName: "Bhavika Punjabi", acknowledgedAt: "2026-09-18T00:00:00Z", note: null };
     const r = derivePriceReviewState({ comparison, context, acknowledgment: ack });
@@ -104,9 +106,11 @@ describe("derivePriceReviewState", () => {
       vendorId: context.vendorId,
       vendorSku: context.vendorSku,
       currency: context.currency,
+      baseUnitCode: original.baseUnitCode,
       currentUnitCost: original.currentUnitCost,
       previousPurchaseDocumentId: original.previous.purchaseDocumentId,
       previousUnitCost: original.previous.unitCost,
+      policyVersion: "v1:10-20",
     });
     const ack: StoredPriceAcknowledgment = { fingerprint, actorName: "M", acknowledgedAt: "2026-09-18T00:00:00Z", note: null };
     // A different current unit cost (e.g. the received quantity was corrected).
@@ -117,11 +121,18 @@ describe("derivePriceReviewState", () => {
   });
 
   it("changing vendor SKU or currency changes the fingerprint (invalidates an ack)", () => {
-    const base = { inventoryItemId: "i", vendorId: "v", vendorSku: "A", currency: "USD", currentUnitCost: 2, previousPurchaseDocumentId: "p", previousUnitCost: 1.5 };
+    const base = { inventoryItemId: "i", vendorId: "v", vendorSku: "A", currency: "USD", baseUnitCode: "LB", currentUnitCost: 2, previousPurchaseDocumentId: "p", previousUnitCost: 1.5, policyVersion: "v1:10-20" };
     const fp = priceComparisonFingerprint(base);
     expect(priceComparisonFingerprint({ ...base, vendorSku: "B" })).not.toBe(fp);
     expect(priceComparisonFingerprint({ ...base, currency: "EUR" })).not.toBe(fp);
     expect(priceComparisonFingerprint({ ...base, currentUnitCost: 2.01 })).not.toBe(fp);
+    expect(priceComparisonFingerprint({ ...base, baseUnitCode: "OZ" })).not.toBe(fp);
+    expect(priceComparisonFingerprint({ ...base, previousPurchaseDocumentId: "p2" })).not.toBe(fp);
+  });
+
+  it("scenario 27: a threshold policy-version change invalidates the fingerprint", () => {
+    const base = { inventoryItemId: "i", vendorId: "v", vendorSku: "A", currency: "USD", baseUnitCode: "LB", currentUnitCost: 2, previousPurchaseDocumentId: "p", previousUnitCost: 1.5, policyVersion: "v1:10-20" };
+    expect(priceComparisonFingerprint({ ...base, policyVersion: "v2:15-30" })).not.toBe(priceComparisonFingerprint(base));
   });
 });
 

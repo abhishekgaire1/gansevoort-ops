@@ -1,0 +1,1 @@
+drop trigger if exists assert_price_review_after_posting_lines on public.purchase_document_inventory_posting_lines;

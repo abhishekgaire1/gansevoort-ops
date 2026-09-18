@@ -1,5 +1,5 @@
 import type { PriceComparisonResult } from "@/app/lib/purchasing/priceComparison";
-import { classifyPriceChangeSeverity, type PriceReviewState } from "@/app/lib/purchasing/priceReviewPolicy";
+import { classifyPriceChangeSeverity, PRICE_REVIEW_POLICY_VERSION, type PriceReviewState } from "@/app/lib/purchasing/priceReviewPolicy";
 
 /**
  * Folds the authoritative normalized-price comparison
@@ -19,9 +19,11 @@ export interface PriceComparisonFingerprintInputs {
   vendorId: string;
   vendorSku: string | null;
   currency: string | null;
+  baseUnitCode: string | null;
   currentUnitCost: number;
   previousPurchaseDocumentId: string;
   previousUnitCost: number;
+  policyVersion: string;
 }
 
 /** Round to 6 dp so ordinary float noise never spuriously invalidates a
@@ -36,9 +38,11 @@ export function priceComparisonFingerprint(i: PriceComparisonFingerprintInputs):
     i.vendorId,
     i.vendorSku ?? "",
     (i.currency ?? "").toUpperCase(),
+    i.baseUnitCode ?? "",
     round6(i.currentUnitCost),
     i.previousPurchaseDocumentId,
     round6(i.previousUnitCost),
+    i.policyVersion,
   ].join("|");
 }
 
@@ -82,6 +86,7 @@ function unavailableState(reason: Extract<PriceComparisonResult, { available: fa
     case "MISSING_LINE_TOTAL":
     case "MISSING_CONVERSION":
     case "AWAITING_RECEIVING_CONFIRMATION":
+    case "CURRENCY_UNAVAILABLE":
       return "COMPARISON_UNAVAILABLE";
   }
 }
@@ -109,9 +114,11 @@ export function derivePriceReviewState(input: {
     vendorId: context.vendorId,
     vendorSku: context.vendorSku,
     currency: context.currency,
+    baseUnitCode: comparison.baseUnitCode,
     currentUnitCost: comparison.currentUnitCost,
     previousPurchaseDocumentId: comparison.previous.purchaseDocumentId,
     previousUnitCost: comparison.previous.unitCost,
+    policyVersion: PRICE_REVIEW_POLICY_VERSION,
   });
 
   const severity = classifyPriceChangeSeverity(comparison.deltaPct);
