@@ -32,3 +32,9 @@ export async function userHasPermission(
 }
 
 export const SOLE_APPROVER_PERMISSION_KEY = "purchase_documents.post_without_second_review";
+
+/** Lets an authorized manager correct any purchase-document draft in Step 2
+ * (Items & Receiving), not only drafts they prepared. Granted to the base
+ * manager/admin roles (20260811100168); enforced server-side inside the
+ * item-classification approval RPCs. */
+export const CORRECT_ANY_DRAFT_PERMISSION_KEY = "purchase_documents.correct_any_draft";

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   getPurchaseDocumentLineClassifications,
   runItemMatchingNow,
@@ -28,7 +28,6 @@ import { NewItemReviewModal, type NewItemReviewCandidate } from "@/app/manager/(
 import { flattenSpendCategoryPaths } from "@/app/lib/itemMaster/spendCategoryPaths";
 import { formatSourceQuantity } from "@/app/lib/purchaseDocuments/matchSourcePresentation";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
-import { scrollToFirstIssue } from "@/app/components/receiving/blockingIssues";
 import { getPriceComparisons } from "@/app/actions/priceComparison";
 import type { PriceComparisonResult } from "@/app/lib/purchasing/priceComparison";
 import { priceChangeTone } from "@/app/lib/purchasing/priceChangePresentation";
@@ -46,6 +45,7 @@ import { priceCheckDisplay, priceReviewIsNotable, type PriceCheckDisplay } from 
 import { PriceReviewCard } from "./PriceReviewCard";
 import { LineActionDrawer } from "./LineActionDrawer";
 import { applyPatchToSelected, deriveLineActionScopes, drawerIsDirty, lineIsBulkSelectable } from "@/app/lib/purchaseDocuments/lineBulkAndDrawer";
+import { deriveCompactRowView, type CompactRowView, type RowReceivingBehavior } from "@/app/lib/purchaseDocuments/lineRowPresentation";
 import {
   recordReceipt,
   listEffectiveReceiptsForPurchaseDocument,
@@ -189,6 +189,11 @@ export function ItemsAndReceivingPanel({
   // the full inline editor (Item Match / Purchase Package / Receiving),
   // never more than one simultaneously.
   const [editingLineKey, setEditingLineKey] = useState<string | null>(null);
+  // Once the manager intentionally closes the auto-opened correction drawer,
+  // it is not auto-reopened for the rest of the session (they can still open
+  // any line by hand). Cleared the moment they open a line themselves, so
+  // auto-advance to the next unresolved line resumes from there.
+  const [drawerDismissed, setDrawerDismissed] = useState(false);
   // The editing line's receiving draft AT THE MOMENT the editor opened --
   // the only way "Cancel restores the persisted values" can be honest,
   // since receivingLineState itself is live/shared with every other
@@ -197,17 +202,18 @@ export function ItemsAndReceivingPanel({
   const [receivingDraftSnapshot, setReceivingDraftSnapshot] = useState<ReceivingLineDraft | null>(null);
   const [receivingSavePending, setReceivingSavePending] = useState(false);
   const [receivingSaveError, setReceivingSaveError] = useState<string | null>(null);
-  // Triage-first layout: needs-attention lines are always shown; finished
-  // work collapses into a Ready group and an Expenses group so the one
-  // thing that needs the manager isn't buried among identical done rows.
-  const [readyOpen, setReadyOpen] = useState(false);
-  // Step 2 line filter. "all" shows the exception-first grouped view; a
-  // specific filter shows a flat matching list. Visibility only -- never
-  // changes readiness or price-review state.
+  // Triage-first layout, but every group stays VISIBLE and EXPANDED by
+  // default so a manager can inspect the AI's decisions across the whole
+  // invoice at a glance -- Ready and Non-inventory are no longer hidden just
+  // because a blocker exists. The collapse controls remain for tidying up.
+  const [readyOpen, setReadyOpen] = useState(true);
+  // Step 2 line filter. "all" shows the exception-first grouped view (Needs
+  // attention -> Ready -> Non-inventory); a specific filter shows a flat
+  // matching list. Visibility only -- never changes readiness/section state.
   type LineFilter = "all" | "needs_attention" | "price_changes" | "ready" | "expenses";
   const [lineFilter, setLineFilter] = useState<LineFilter>("all");
   const [lineFilterTouched, setLineFilterTouched] = useState(false);
-  const [expensesOpen, setExpensesOpen] = useState(false);
+  const [expensesOpen, setExpensesOpen] = useState(true);
   const [bulkLocationId, setBulkLocationId] = useState("");
   const [bulkConditionValue, setBulkConditionValue] = useState<ReceivingLineDraft["conditionStatus"]>("RECEIVED_AS_INVOICED");
   // Selection-based bulk: only eligible inventory lines may be selected, and
@@ -708,6 +714,9 @@ export function ItemsAndReceivingPanel({
   }
 
   async function handleEditLine(lineKey: string) {
+    // A manager opening a line by hand clears any earlier dismissal, so
+    // auto-advance to the next unresolved line resumes from this point.
+    setDrawerDismissed(false);
     if (editingLineKey === lineKey) {
       handleCloseEditor(lineKey);
       return;
@@ -729,6 +738,8 @@ export function ItemsAndReceivingPanel({
 
   function handleCloseEditor(lineKey: string) {
     if (isReceivingDirty(lineKey) && !window.confirm("Discard unsaved receiving changes?")) return;
+    // Intentional close: don't auto-reopen for the rest of the session.
+    setDrawerDismissed(true);
     restoreReceivingSnapshot(lineKey);
     setEditingLineKey(null);
     setReceivingDraftSnapshot(null);
@@ -856,6 +867,29 @@ export function ItemsAndReceivingPanel({
     return () => window.removeEventListener("beforeunload", handler);
   }, [hasUnsavedReceivingDraft]);
 
+  // PROBLEM 1: take the manager straight to the first thing that needs fixing.
+  // When Step 2 loads (or after a line is resolved) with an unresolved
+  // operational line and nothing already open, auto-open that line's
+  // correction drawer and scroll it into view -- no "Go to first issue" /
+  // "View details" / "Resolve issue" click required. New-item proposals keep
+  // their dedicated review modal, so we defer to it when present. An intentional
+  // close (drawerDismissed) suppresses re-opening; because the effect no-ops
+  // whenever a line is already open, ordinary rerenders never cause a focus loop
+  // or unexpected scroll. (Placed before the loading early-return so it is never
+  // conditionally called.)
+  const firstUnresolvedKey = combinedLines.find((c) => c.outcome === "needs_attention")?.line.lineKey ?? null;
+  useEffect(() => {
+    if (readOnly || drawerDismissed) return;
+    if (editingLineKey !== null || showNewItemModal || newItemCandidates.length > 0) return;
+    if (firstUnresolvedKey === null) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void handleEditLine(firstUnresolvedKey);
+    requestAnimationFrame(() => document.getElementById(`classification-line-${firstUnresolvedKey}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+    // handleEditLine is a stable-enough closure; re-running only when the gate
+    // conditions change is exactly what we want (open once, then no-op).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readOnly, drawerDismissed, editingLineKey, showNewItemModal, newItemCandidates.length, firstUnresolvedKey]);
+
   if (loading || lines === null) {
     return (
       <div aria-busy="true" className="mt-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
@@ -909,6 +943,23 @@ export function ItemsAndReceivingPanel({
   const blockingIssueCount = summary.needsAttentionCount + priceAckLines.length;
   const stepAllResolved = summary.allResolved && priceAckLines.length === 0;
 
+  // The ordered list of unresolved operational lines the correction drawer
+  // navigates with Previous/Next. (Unacknowledged price changes are handled by
+  // their own PriceReviewCard, not this drawer.)
+  const unresolvedLineKeys = attentionLines.map((c) => c.line.lineKey).filter((k): k is string => k !== null);
+  const currentIssueIndex = editingLineKey ? unresolvedLineKeys.indexOf(editingLineKey) : -1;
+  const navigateIssue = (dir: "prev" | "next") => {
+    if (unresolvedLineKeys.length === 0) return;
+    const from = currentIssueIndex === -1 ? 0 : currentIssueIndex;
+    const next = dir === "next" ? Math.min(from + 1, unresolvedLineKeys.length - 1) : Math.max(from - 1, 0);
+    const key = unresolvedLineKeys[next];
+    if (key && key !== editingLineKey) {
+      void handleEditLine(key);
+      requestAnimationFrame(() => document.getElementById(`classification-line-${key}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+    }
+  };
+
+
   // "Price changes" filter membership: any comparable, notable change
   // (informational OR significant, acknowledged or not). Excludes
   // no-material-change, expenses, not-applicable, and no-comparable-history.
@@ -918,9 +969,12 @@ export function ItemsAndReceivingPanel({
     return review ? priceReviewIsNotable(review.state) : false;
   };
   const priceChangeLines = combinedLines.filter((c) => isPriceChangeLine(c.line.lineKey));
-  // Exception-first default: Needs attention when blockers exist, else All;
-  // the manager can override, which sticks.
-  const effectiveFilter = lineFilterTouched ? lineFilter : blockingIssueCount > 0 ? "needs_attention" : "all";
+  // Default is ALWAYS the grouped "All" view so every group (Needs attention,
+  // Ready, Non-inventory) stays visible even when a blocker exists -- the
+  // manager can still inspect the AI's decisions across the whole invoice.
+  // Auto-open (below) brings the first blocker's drawer up without hiding the
+  // rest. A filter the manager picks sticks and only changes visibility.
+  const effectiveFilter = lineFilterTouched ? lineFilter : "all";
   const filterCounts = {
     all: combinedLines.length,
     needs_attention: blockingIssueCount,
@@ -962,6 +1016,12 @@ export function ItemsAndReceivingPanel({
       editingOpen={editingLineKey === line.lineKey}
       onEditLine={() => handleEditLine(line.lineKey)}
       onCloseEditor={() => handleCloseEditor(line.lineKey)}
+      onNavigateIssue={navigateIssue}
+      issuePosition={
+        line.lineKey && unresolvedLineKeys.includes(line.lineKey)
+          ? { index: unresolvedLineKeys.indexOf(line.lineKey), total: unresolvedLineKeys.length }
+          : null
+      }
       readOnly={readOnly}
       items={items}
       units={units}
@@ -1031,15 +1091,9 @@ export function ItemsAndReceivingPanel({
             <span className="text-xs text-zinc-500">{summary.totalLines} line{summary.totalLines === 1 ? "" : "s"}</span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {!summary.allResolved && summary.needsAttentionCount > 0 ? (
-              <button
-                type="button"
-                onClick={() => scrollToFirstIssue(combinedLines.filter((c) => c.outcome === "needs_attention").map((c) => ({ id: `classification-line-${c.line.lineKey}`, reason: "" })))}
-                className={secondaryButtonClassCompact}
-              >
-                Go to first issue
-              </button>
-            ) : null}
+            {/* "Go to first issue" removed: Step 2 now auto-opens the first
+                unresolved line's correction drawer and scrolls to it, so no
+                jump control is needed. */}
             {!readOnly ? (
               <div className="relative">
                 <button type="button" onClick={() => setMoreActionsOpen((v) => !v)} className={secondaryButtonClass}>
@@ -1086,16 +1140,19 @@ export function ItemsAndReceivingPanel({
         {summary.totalLines > 0 ? (
           <div className="mt-3">
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-              <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs tabular-nums">
-                <span className={summary.needsAttentionCount > 0 ? "text-amber-300" : "text-zinc-500"}>
-                  <b className="font-semibold">{summary.needsAttentionCount}</b> needs you
-                </span>
-                <span className="text-emerald-400">
-                  <b className="font-semibold">{summary.readyCount}</b> ready
-                </span>
-                <span className="text-zinc-500">
-                  <b className="font-semibold">{summary.expenseCount}</b> expense{summary.expenseCount === 1 ? "" : "s"}
-                </span>
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-zinc-200 tabular-nums">
+                  {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {summary.needsAttentionCount} needs attention · {summary.readyCount} ready inventory · {summary.expenseCount} non-inventory
+                </p>
+                {blockingIssueCount > 0 ? (
+                  <p className="mt-0.5 text-xs font-medium text-amber-300 tabular-nums">
+                    {blockingIssueCount} issue{blockingIssueCount === 1 ? "" : "s"} must be resolved before Review &amp; Post
+                  </p>
+                ) : stepAllResolved ? (
+                  <p className="mt-0.5 text-xs font-medium text-emerald-300 tabular-nums">
+                    ✓ {summary.totalLines} lines complete · {summary.readyCount} inventory · {summary.expenseCount} non-inventory · Ready for Review &amp; Post
+                  </p>
+                ) : null}
               </div>
               {!readOnly && (newItemCandidates.length > 0 || bulkEligible.length > 0) ? (
                 <div className="flex flex-wrap gap-2">
@@ -1174,7 +1231,7 @@ export function ItemsAndReceivingPanel({
       {summary.totalLines > 0 ? (
         <div className="flex flex-wrap gap-1.5">
           {(["all", "needs_attention", "price_changes", "ready", "expenses"] as LineFilter[]).map((f) => {
-            const label = f === "all" ? "All" : f === "needs_attention" ? "Needs attention" : f === "price_changes" ? "Price changes" : f === "ready" ? "Ready inventory" : "Expenses";
+            const label = f === "all" ? "All" : f === "needs_attention" ? "Needs attention" : f === "price_changes" ? "Price changes" : f === "ready" ? "Ready inventory" : "Non-inventory";
             return (
               <button
                 key={f}
@@ -1197,7 +1254,7 @@ export function ItemsAndReceivingPanel({
         <section>
           <div className="mb-2 flex items-center gap-2">
             <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-300">
-              {effectiveFilter === "needs_attention" ? "Needs attention" : effectiveFilter === "price_changes" ? "Price changes" : effectiveFilter === "ready" ? "Ready inventory" : "Expenses"}
+              {effectiveFilter === "needs_attention" ? "Needs attention" : effectiveFilter === "price_changes" ? "Price changes" : effectiveFilter === "ready" ? "Ready inventory" : "Non-inventory"}
             </h3>
             <span className="text-xs text-zinc-500">{filteredLines.length} line{filteredLines.length === 1 ? "" : "s"}</span>
           </div>
@@ -1283,7 +1340,8 @@ export function ItemsAndReceivingPanel({
         </section>
       ) : null}
 
-      {/* ============ EXPENSES -- no inventory impact, collapsed grey. ==== */}
+      {/* ============ NON-INVENTORY -- no inventory impact. Expanded by
+          default so the manager can inspect and correct these too. ======= */}
       {expenseLines.length > 0 ? (
         <section className={panelClass}>
           <button
@@ -1293,11 +1351,16 @@ export function ItemsAndReceivingPanel({
             className="flex w-full items-center gap-3 px-4 py-3.5 text-left hover:bg-zinc-800/40"
           >
             <span aria-hidden className="h-2.5 w-2.5 shrink-0 rounded-full bg-zinc-500" />
-            <span className="text-sm font-semibold text-zinc-100">Expenses</span>
-            <span className="text-[13px] text-zinc-400">· {expenseLines.length} line{expenseLines.length === 1 ? "" : "s"} · won&apos;t affect inventory</span>
+            <span className="text-sm font-semibold text-zinc-100">Non-inventory</span>
+            <span className="text-[13px] text-zinc-400">· {expenseLines.length} line{expenseLines.length === 1 ? "" : "s"}</span>
             <span className={`ml-auto text-xs text-zinc-500 transition-transform ${expensesOpen ? "rotate-90" : ""}`}>▸</span>
           </button>
-          {expensesOpen ? <div className="border-t border-zinc-800">{expenseLines.map(renderLine)}</div> : null}
+          {expensesOpen ? (
+            <div className="border-t border-zinc-800">
+              <p className="px-4 pt-3 text-xs text-zinc-400">These lines will not add inventory when the document is posted.</p>
+              {expenseLines.map(renderLine)}
+            </div>
+          ) : null}
         </section>
       ) : null}
       </>
@@ -1317,23 +1380,18 @@ export function ItemsAndReceivingPanel({
 
       {onContinue ? (
         <WorkflowFooter
-          contextLabel={stepAllResolved ? undefined : `${blockingIssueCount} issue${blockingIssueCount === 1 ? "" : "s"} remaining`}
-          contextTone="warning"
-          onContextClick={
-            !stepAllResolved
-              ? () =>
-                  scrollToFirstIssue([
-                    ...attentionLines.map((c) => ({ id: `classification-line-${c.line.lineKey}`, reason: "" })),
-                    ...priceAckLines.map((p) => ({ id: `price-review-${p.line.lineKey}`, reason: "" })),
-                  ])
-              : undefined
+          contextLabel={
+            stepAllResolved
+              ? `${summary.totalLines} line${summary.totalLines === 1 ? "" : "s"} complete · ${summary.readyCount} inventory · ${summary.expenseCount} non-inventory`
+              : `${blockingIssueCount} issue${blockingIssueCount === 1 ? "" : "s"} remaining`
           }
+          contextTone={stepAllResolved ? "neutral" : "warning"}
           primaryLabel="Continue to Review & Post"
           onPrimary={handleContinue}
           primaryDisabled={!stepAllResolved}
           primaryPending={continuePending}
           primaryPendingLabel="Saving…"
-          primaryTitle={!stepAllResolved ? "Resolve all blocking issues to continue." : undefined}
+          primaryTitle={!stepAllResolved ? `Resolve the blocking issue${blockingIssueCount === 1 ? "" : "s"} to continue` : undefined}
           sticky={false}
         />
       ) : null}
@@ -1407,6 +1465,211 @@ function SectionStatusDot({ ok, warn }: { ok: boolean; warn?: boolean }) {
   return <span aria-hidden className={`text-[11px] font-medium ${ok ? "text-emerald-400" : warn ? "text-red-400" : "text-zinc-600"}`}>{ok ? "✓" : warn ? "!" : ""}</span>;
 }
 
+// 8-column compact inventory row (Invoice line | Matched item | Purchase
+// package | Inventory increase | Destination | Price | Status | Action).
+// Distinct, self-describing columns -- never "84 PIECE -> 84 PIECE".
+const INVENTORY_ROW_GRID =
+  "sm:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_84px_84px]";
+
+function PriceCell({ price, toneClass }: { price: CompactRowView["price"]; toneClass: string }) {
+  if (!price) return <span className="text-zinc-500">—</span>;
+  return (
+    <div className="min-w-0 leading-tight">
+      {price.invoiceUnit ? <p className="truncate text-xs text-zinc-300">{price.invoiceUnit}</p> : null}
+      {price.normalized ? <p className="truncate text-xs text-zinc-300">{price.normalized}</p> : null}
+      {price.unit ? <p className="truncate text-sm text-zinc-200">{price.unit}</p> : null}
+      {price.lineTotal ? <p className="truncate text-xs text-zinc-500">{price.lineTotal}</p> : null}
+      {price.change ? <p className={`truncate text-xs ${toneClass}`}>{price.change}</p> : null}
+    </div>
+  );
+}
+
+function CompactInventoryRow({
+  id,
+  rowView,
+  attention,
+  statusLabel,
+  issueText,
+  priceToneClass,
+  selectable,
+  selected,
+  onToggleSelected,
+  onEditLine,
+  toggleLabel,
+  savedFlash,
+  amendmentBadge,
+}: {
+  id: string;
+  rowView: CompactRowView;
+  attention: boolean;
+  statusLabel: string;
+  issueText?: string | null;
+  priceToneClass: string;
+  selectable: boolean;
+  selected: boolean;
+  onToggleSelected: () => void;
+  onEditLine: () => void;
+  toggleLabel: string;
+  savedFlash?: boolean;
+  amendmentBadge?: ReactNode;
+}) {
+  return (
+    <div
+      id={id}
+      tabIndex={-1}
+      className={`grid grid-cols-1 gap-1.5 border-b border-zinc-800 px-3 py-2.5 last:border-0 focus:outline-none sm:items-start sm:gap-3 ${INVENTORY_ROW_GRID} ${
+        attention ? "border-l-2 border-l-amber-500 bg-amber-950/5 hover:bg-amber-950/10" : "hover:bg-zinc-800/20"
+      }`}
+    >
+      <div className="min-w-0">
+        <div className="flex items-start gap-2">
+          {selectable ? (
+            <input type="checkbox" checked={selected} onChange={onToggleSelected} className="mt-0.5 shrink-0" aria-label={`Select ${rowView.invoice.description} for bulk actions`} />
+          ) : null}
+          <p className="truncate text-sm font-medium text-zinc-100">{rowView.invoice.description}</p>
+        </div>
+        {rowView.invoice.meta ? <p className="truncate text-xs text-zinc-500">{rowView.invoice.meta}</p> : null}
+        {issueText ? <p className="mt-1 text-xs font-medium text-amber-300">{issueText}</p> : null}
+        {amendmentBadge ? <div className="mt-1">{amendmentBadge}</div> : null}
+      </div>
+      <p className="truncate text-sm text-zinc-200">
+        <span className="text-zinc-500 sm:hidden">Item: </span>
+        {rowView.matchedItem}
+      </p>
+      <p className="truncate text-sm text-zinc-300">
+        <span className="text-zinc-500 sm:hidden">Package: </span>
+        {rowView.purchasePackage}
+      </p>
+      <p className="truncate text-sm font-medium text-emerald-300">
+        <span className="font-normal text-zinc-500 sm:hidden">Adds to inventory: </span>
+        {rowView.inventoryIncrease ?? "—"}
+      </p>
+      <div className="min-w-0 text-sm text-zinc-300">
+        <span className="text-zinc-500 sm:hidden">Destination: </span>
+        {rowView.destination ? (
+          <>
+            <p className="truncate">{rowView.destination.location}</p>
+            {rowView.destination.condition ? <p className="truncate text-xs text-zinc-500">{rowView.destination.condition}</p> : null}
+          </>
+        ) : (
+          "—"
+        )}
+      </div>
+      <div className="min-w-0 text-sm">
+        <span className="text-zinc-500 sm:hidden">Price: </span>
+        <PriceCell price={rowView.price} toneClass={priceToneClass} />
+      </div>
+      <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${attention ? "text-amber-400" : "text-emerald-400"}`}>
+        <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${attention ? "bg-amber-500" : "bg-emerald-400"}`} />
+        {statusLabel}
+      </span>
+      <div className="flex items-center gap-2">
+        {savedFlash ? <span className="text-[11px] font-medium text-emerald-400">Saved</span> : null}
+        <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
+          {toggleLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Non-inventory compact row (Invoice line | Classification | Amount |
+// Inventory effect | Status | Action).
+const NON_INVENTORY_ROW_GRID = "sm:grid-cols-[minmax(0,1.7fr)_minmax(0,1.3fr)_minmax(0,0.9fr)_minmax(0,1.1fr)_110px_84px]";
+
+function CompactNonInventoryRow({
+  id,
+  description,
+  classification,
+  amount,
+  onEditLine,
+  toggleLabel,
+}: {
+  id: string;
+  description: string;
+  classification: string;
+  amount: string;
+  onEditLine: () => void;
+  toggleLabel: string;
+}) {
+  return (
+    <div
+      id={id}
+      className={`grid grid-cols-1 gap-1.5 border-b border-zinc-800 bg-zinc-950/30 px-3 py-2.5 last:border-0 hover:bg-zinc-800/10 sm:items-center sm:gap-3 ${NON_INVENTORY_ROW_GRID}`}
+    >
+      <p className="truncate text-sm text-zinc-300">{description}</p>
+      <p className="truncate text-xs text-zinc-500">
+        <span className="sm:hidden">Classification: </span>
+        {classification}
+      </p>
+      <p className="truncate text-sm text-zinc-300 tabular-nums">
+        <span className="text-zinc-500 sm:hidden">Amount: </span>
+        {amount}
+      </p>
+      <p className="truncate text-xs text-zinc-500">Will not add inventory</p>
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-400">
+        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
+        Non-inventory
+      </span>
+      <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
+        {toggleLabel}
+      </button>
+    </div>
+  );
+}
+
+function buildCompactRowView(
+  line: LineClassificationRow,
+  receiving: ReceivingLineDraft | null,
+  priceComparison: PriceComparisonResult | undefined,
+  priceCheck: PriceCheckDisplay | null,
+  locations: LocationSummary[],
+): CompactRowView {
+  return deriveCompactRowView({
+    description: line.description,
+    vendorSku: line.vendorSku,
+    orderedQuantityText: formatSourceQuantity(line),
+    disposition: line.disposition,
+    matchedItemName: line.inventoryItemName,
+    receivingBehavior: (line.effectiveReceivingBehavior ?? receiving?.info.receivingBehavior ?? null) as RowReceivingBehavior | null,
+    purchaseUnitCode: line.effectivePurchaseUnitCode,
+    baseUnitCode: line.inventoryBaseUnitCode ?? receiving?.info.baseUnitCode ?? null,
+    conversionFactor: line.effectiveConversionFactor,
+    resolvedInvoiceUnitCode: line.resolvedInvoiceUnitCode,
+    verifiedBaseQuantity: receiving?.verifiedQuantity ?? null,
+    receivedQuantity: receiving?.receivedQuantity ?? null,
+    receivedUnit: receiving?.receivedUnit ?? null,
+    locationName: receiving ? (locations.find((l) => l.id === receiving.locationId)?.name ?? null) : null,
+    conditionLabel: receiving ? (CONDITION_OPTIONS.find((c) => c.value === receiving.conditionStatus)?.label ?? receiving.conditionStatus) : null,
+    conditionIsAsInvoiced: receiving?.conditionStatus === "RECEIVED_AS_INVOICED",
+    lineTotal: line.lineTotal,
+    priceComparison: priceComparison
+      ? priceComparison.available
+        ? {
+            available: true,
+            currentUnitCost: priceComparison.currentUnitCost,
+            baseUnitCode: priceComparison.baseUnitCode,
+            previousVendorName: priceComparison.previous.vendorName,
+          }
+        : { available: false }
+      : null,
+    priceChangeText: priceCheck?.text ?? null,
+  });
+}
+
+function priceCheckToneClass(priceCheck: PriceCheckDisplay | null): string {
+  switch (priceCheck?.tone) {
+    case "warning":
+      return "text-amber-300";
+    case "info":
+      return "text-sky-300";
+    case "success":
+      return "text-emerald-400";
+    default:
+      return "text-zinc-400";
+  }
+}
+
 function formatPurchasePackageDescription(line: LineClassificationRow): string {
   const unit = line.effectivePurchaseUnitCode ?? "—";
   if (line.effectiveReceivingBehavior === "FIXED_CONVERSION" && line.effectiveConversionFactor && line.inventoryBaseUnitCode) {
@@ -1430,6 +1693,8 @@ function LineCard({
   editingOpen,
   onEditLine,
   onCloseEditor,
+  onNavigateIssue,
+  issuePosition,
   readOnly,
   items,
   units,
@@ -1479,6 +1744,10 @@ function LineCard({
   editingOpen: boolean;
   onEditLine: () => void;
   onCloseEditor: () => void;
+  /** Move the correction drawer to the previous/next unresolved line. */
+  onNavigateIssue?: (dir: "prev" | "next") => void;
+  /** This line's position among unresolved lines (for the drawer's nav). */
+  issuePosition?: { index: number; total: number } | null;
   readOnly?: boolean;
   items: InventoryItemSummary[];
   units: UnitSummary[];
@@ -1513,24 +1782,23 @@ function LineCard({
 }) {
   const orderedQuantity = formatSourceQuantity(line);
   const provenance = deriveLineProvenance({ status: line.status, resolutionSource: line.resolutionSource, resolvedByName: line.resolvedByName, resolvedAt: line.resolvedAt });
-  const toggleLabel = readOnly ? (editingOpen ? "Hide details" : "View details") : editingOpen ? "Hide line" : "Edit line";
+  // Authorized (editable) managers always get "Edit" -- Ready status means the
+  // line is currently valid, not locked. Only a genuinely read-only viewer
+  // (not authorized, or a non-DRAFT document) sees "View details".
+  const toggleLabel = readOnly ? (editingOpen ? "Hide details" : "View details") : editingOpen ? "Close" : "Edit";
 
   // ============ EXPENSE -- a quiet, clearly-labeled row, never styled
   // like an incomplete inventory line ============
   if (outcome === "expense" && !editingOpen) {
     return (
-      <div id={id} className="grid grid-cols-1 gap-1.5 border-b border-zinc-800 bg-zinc-950/30 px-3 py-2.5 last:border-0 hover:bg-zinc-800/10 sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.3fr_84px_112px] sm:items-center sm:gap-3">
-        <p className="truncate text-sm text-zinc-300">{line.description ?? "—"}</p>
-        <p className="truncate text-xs text-zinc-500 sm:col-span-2">{spendCategoryPath ?? "Uncategorized expense"}</p>
-        <p className="text-xs text-zinc-500">{formatSourceQuantity(line) ?? "—"} · will not add inventory</p>
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-400">
-          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
-          Expense
-        </span>
-        <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
-          {toggleLabel}
-        </button>
-      </div>
+      <CompactNonInventoryRow
+        id={id}
+        description={line.description ?? "—"}
+        classification={spendCategoryPath ?? "Uncategorized expense"}
+        amount={line.lineTotal !== null ? `$${line.lineTotal.toFixed(2)}` : (formatSourceQuantity(line) ?? "—")}
+        onEditLine={onEditLine}
+        toggleLabel={toggleLabel}
+      />
     );
   }
   if (outcome === "expense") {
@@ -1595,91 +1863,21 @@ function LineCard({
   // one-liners reuse the SAME formatters the expanded detail below uses
   // -- never a second, independently-worded summary.
   if (isComplete && !editingOpen) {
-    const packageSummary = formatPackageConfirmation({
-      packageQuantity: line.packageQuantity,
-      resolvedInvoiceUnitCode: line.resolvedInvoiceUnitCode,
-      effectivePurchaseUnitCode: line.effectivePurchaseUnitCode,
-      effectiveReceivingBehavior: line.effectiveReceivingBehavior,
-      effectiveConversionFactor: line.effectiveConversionFactor,
-      inventoryBaseUnitCode: line.inventoryBaseUnitCode,
-    });
-    // FIXED_CONVERSION's block form is 3 lines (Invoice/Conversion/Inventory
-    // received) meant for the expanded checklist -- the compact row instead
-    // collapses it to the same "X UNIT → Y UNIT" shape as the inline
-    // (SAME_UNIT) case, e.g. "2 PACK → 20 LB", so this column always reads
-    // as a package conversion rather than duplicating the Receiving column.
-    const packageLine = packageSummary
-      ? packageSummary.mode === "inline"
-        ? packageSummary.lines[0]
-        : line.effectiveReceivingBehavior === "FIXED_CONVERSION" &&
-            line.packageQuantity !== null &&
-            line.effectiveConversionFactor &&
-            line.inventoryBaseUnitCode
-          ? `${line.packageQuantity} ${line.effectivePurchaseUnitCode} → ${line.packageQuantity * line.effectiveConversionFactor} ${line.inventoryBaseUnitCode}`
-          : (packageSummary.lines[packageSummary.lines.length - 1] ?? packageSummary.lines[0])
-      : "—";
-    const locationName = receiving ? (locations.find((l) => l.id === receiving.locationId)?.name ?? "—") : "—";
-    const conditionLabel = receiving ? (CONDITION_OPTIONS.find((c) => c.value === receiving.conditionStatus)?.label ?? receiving.conditionStatus) : "—";
-    // FIXED_CONVERSION lines are entered in the purchase-package unit (e.g.
-    // "2 PACK") but this column reports what actually lands in inventory --
-    // the same converted `verifiedQuantity`/`baseUnitCode` already shown as
-    // "Adds to inventory: X" in the expanded checklist below, never a
-    // second, independently recomputed conversion.
-    const receivedQuantityDisplay =
-      receiving && receiving.info.receivingBehavior === "FIXED_CONVERSION" && receiving.verifiedQuantity.trim() !== ""
-        ? `${receiving.verifiedQuantity} ${receiving.info.baseUnitCode ?? ""}`
-        : receiving
-          ? `${receiving.receivedQuantity} ${receiving.receivedUnit}`
-          : null;
-
     return (
-      <div id={id} tabIndex={-1} className="grid grid-cols-1 gap-1.5 border-b border-zinc-800 px-3 py-2.5 last:border-0 hover:bg-zinc-800/20 focus:outline-none sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.4fr_84px_112px] sm:items-start sm:gap-3">
-        <div className="min-w-0">
-          <div className="flex items-start gap-2">
-            {selectable ? (
-              <input type="checkbox" checked={selected} onChange={onToggleSelected} className="mt-0.5 shrink-0" aria-label={`Select ${line.description ?? "line"} for bulk actions`} />
-            ) : null}
-            <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
-          </div>
-          <p className="truncate text-xs text-zinc-500">{line.vendorSku ? `SKU ${line.vendorSku}` : "—"}{orderedQuantity ? ` · ${orderedQuantity}` : ""}</p>
-          {line.changedInAmendment ? (
-            <div className="mt-1">
-              <AmendmentChangedBadge previous={line.previousOrderedSummary} />
-            </div>
-          ) : null}
-        </div>
-        <p className="truncate text-sm text-zinc-300 sm:text-xs sm:uppercase sm:tracking-wide sm:text-zinc-500">
-          <span className="sm:hidden">Match: </span>
-          <span className="sm:normal-case sm:tracking-normal sm:text-sm sm:text-zinc-200">{line.inventoryItemName ?? "—"}</span>
-        </p>
-        <p className="truncate text-sm text-zinc-300">
-          <span className="sm:hidden">Package: </span>
-          {packageLine}
-        </p>
-        <div className="min-w-0 text-sm text-zinc-300">
-          <span className="sm:hidden">Receiving: </span>
-          {receivedQuantityDisplay ? (
-            <>
-              <p className="truncate">
-                {receivedQuantityDisplay} · {conditionLabel}
-              </p>
-              <p className="truncate text-xs text-zinc-500">{locationName}</p>
-            </>
-          ) : (
-            "—"
-          )}
-        </div>
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
-          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-          Ready
-        </span>
-        <div className="flex items-center gap-2">
-          {savedFlash ? <span className="text-[11px] font-medium text-emerald-400">Saved</span> : null}
-          <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
-            {toggleLabel}
-          </button>
-        </div>
-      </div>
+      <CompactInventoryRow
+        id={id}
+        rowView={buildCompactRowView(line, receiving, priceComparison, priceCheck, locations)}
+        attention={false}
+        statusLabel="Ready"
+        priceToneClass={priceCheckToneClass(priceCheck)}
+        selectable={selectable}
+        selected={selected}
+        onToggleSelected={onToggleSelected}
+        onEditLine={onEditLine}
+        toggleLabel={toggleLabel}
+        savedFlash={savedFlash}
+        amendmentBadge={line.changedInAmendment ? <AmendmentChangedBadge previous={line.previousOrderedSummary} /> : null}
+      />
     );
   }
 
@@ -1695,48 +1893,24 @@ function LineCard({
       hasPackageMismatch: line.hasPackageMismatch,
       receiving,
     });
+    // A short problem cue lives on the row; the FULL, untruncated error text
+    // is shown beside the field in the auto-opened drawer.
+    const issueText = issue?.text ?? postingBlockerReason ?? "Needs attention";
     return (
-      <div
+      <CompactInventoryRow
         id={id}
-        tabIndex={-1}
-        className="grid grid-cols-1 gap-1.5 border-b border-l-2 border-zinc-800 border-l-amber-500 bg-amber-950/5 px-3 py-2.5 last:border-b-0 hover:bg-amber-950/10 focus:outline-none sm:grid-cols-[1.5fr_1.1fr_1.1fr_1.4fr_84px_112px] sm:items-start sm:gap-3"
-      >
-        <div className="min-w-0">
-          <div className="flex items-start gap-2">
-            {selectable ? (
-              <input type="checkbox" checked={selected} onChange={onToggleSelected} className="mt-0.5 shrink-0" aria-label={`Select ${line.description ?? "line"} for bulk actions`} />
-            ) : null}
-            <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
-          </div>
-          <p className="truncate text-xs text-zinc-500">{line.vendorSku ? `SKU ${line.vendorSku}` : "—"}{orderedQuantity ? ` · ${orderedQuantity}` : ""}</p>
-          {line.changedInAmendment ? (
-            <div className="mt-1">
-              <AmendmentChangedBadge previous={line.previousOrderedSummary} />
-            </div>
-          ) : null}
-        </div>
-        <p className={`truncate text-sm ${issue?.section === "item_match" ? "font-medium text-amber-300" : "text-zinc-500"}`}>
-          <span className="sm:hidden">Match: </span>
-          {issue?.section === "item_match" ? issue.text : (line.inventoryItemName ?? "—")}
-        </p>
-        <p className={`truncate text-sm ${issue?.section === "package" || postingBlockerReason ? "font-medium text-amber-300" : "text-zinc-500"}`} title={postingBlockerReason ?? undefined}>
-          <span className="sm:hidden">Package: </span>
-          {issue?.section === "package" ? issue.text : (postingBlockerReason ?? "—")}
-        </p>
-        <p className={`truncate text-sm ${issue?.section === "receiving" ? "font-medium text-amber-300" : "text-zinc-500"}`}>
-          <span className="sm:hidden">Receiving: </span>
-          {issue?.section === "receiving" ? issue.text : "—"}
-        </p>
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-400">
-          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-          Needs attention
-        </span>
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
-            {toggleLabel}
-          </button>
-        </div>
-      </div>
+        rowView={buildCompactRowView(line, receiving, priceComparison, priceCheck, locations)}
+        attention
+        statusLabel="Needs attention"
+        issueText={issueText}
+        priceToneClass={priceCheckToneClass(priceCheck)}
+        selectable={selectable}
+        selected={selected}
+        onToggleSelected={onToggleSelected}
+        onEditLine={onEditLine}
+        toggleLabel={toggleLabel}
+        amendmentBadge={line.changedInAmendment ? <AmendmentChangedBadge previous={line.previousOrderedSummary} /> : null}
+      />
     );
   }
 
@@ -1754,6 +1928,29 @@ function LineCard({
   });
   // Only locally-held forms lose input on close; lifted receiving drafts don't.
   const drawerDirty = drawerIsDirty({ overrideFormOpen, correcting });
+
+  // The FULL, untruncated issue text(s) for this line, shown at the top of the
+  // drawer. Package mismatches get the complete "invoice says X, configured as
+  // Y" sentence rather than the row's short cue.
+  const drawerIssue = describeLineIssue({
+    status: line.status,
+    disposition: line.disposition,
+    isNewItemProposal: line.aiSuggestedIsNewProposal,
+    hasPackageMismatch: line.hasPackageMismatch,
+    receiving,
+  });
+  const drawerIssues: string[] = [];
+  if (drawerIssue) {
+    if (drawerIssue.section === "package" && line.hasPackageMismatch) {
+      drawerIssues.push(
+        `The invoice says ${line.resolvedInvoiceUnitCode ?? "this unit"}, but this vendor/SKU is configured as ${formatPurchasePackageDescription(line)}.`,
+      );
+    } else {
+      drawerIssues.push(drawerIssue.text);
+    }
+  }
+  if (postingBlockerReason && !drawerIssues.includes(postingBlockerReason)) drawerIssues.push(postingBlockerReason);
+  const hasIssueNav = issuePosition !== null && issuePosition !== undefined && issuePosition.total > 1;
 
   return (
     <>
@@ -1776,6 +1973,10 @@ function LineCard({
         title={line.description ?? "Edit line"}
         subtitle={line.vendorSku ? `Vendor SKU ${line.vendorSku}` : undefined}
         scopes={drawerScopes}
+        issues={drawerIssues}
+        onPrev={hasIssueNav ? () => onNavigateIssue?.("prev") : undefined}
+        onNext={hasIssueNav ? () => onNavigateIssue?.("next") : undefined}
+        navLabel={hasIssueNav && issuePosition ? `Issue ${issuePosition.index + 1} of ${issuePosition.total}` : undefined}
         dirty={drawerDirty}
         onRequestClose={onCloseEditor}
       >

@@ -88,6 +88,10 @@ export function LineActionDrawer({
   subtitle,
   sections,
   scopes,
+  issues,
+  onPrev,
+  onNext,
+  navLabel,
   dirty,
   onRequestClose,
   children,
@@ -99,12 +103,19 @@ export function LineActionDrawer({
   sections?: LineActionSection[];
   /** The scopes this line involves -- shown as a legend above a custom body. */
   scopes?: LineActionScope[];
+  /** Full, untruncated blocking-issue text(s) shown at the top of the drawer. */
+  issues?: string[];
+  /** Previous/next unresolved-line navigation (shown only when both given). */
+  onPrev?: () => void;
+  onNext?: () => void;
+  navLabel?: string;
   /** True while an in-drawer edit form has unsaved local input. */
   dirty: boolean;
   onRequestClose: () => void;
   children?: ReactNode;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
   const labelId = useId();
 
   const attemptClose = useCallback(() => {
@@ -118,7 +129,12 @@ export function LineActionDrawer({
     if (!open) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const panel = panelRef.current;
-    panel?.focus();
+    // Focus the first actionable field in the correction surface (so a manager
+    // lands on what to fix), falling back to the panel itself.
+    const firstField = bodyRef.current?.querySelector<HTMLElement>(
+      'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])',
+    );
+    (firstField ?? panel)?.focus();
 
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
@@ -172,16 +188,44 @@ export function LineActionDrawer({
             </h2>
             {subtitle ? <p className="mt-0.5 truncate text-xs text-zinc-400">{subtitle}</p> : null}
           </div>
-          <button
-            type="button"
-            onClick={attemptClose}
-            aria-label="Close"
-            className="shrink-0 rounded-md border border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-900"
-          >
-            Close
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {onPrev || onNext ? (
+              <div className="flex items-center gap-1">
+                <button type="button" onClick={onPrev} disabled={!onPrev} aria-label="Previous issue" className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900 disabled:opacity-40">
+                  ‹ Prev
+                </button>
+                {navLabel ? <span className="whitespace-nowrap text-[11px] text-zinc-400">{navLabel}</span> : null}
+                <button type="button" onClick={onNext} disabled={!onNext} aria-label="Next issue" className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-900 disabled:opacity-40">
+                  Next ›
+                </button>
+              </div>
+            ) : null}
+            <button
+              type="button"
+              onClick={attemptClose}
+              aria-label="Close"
+              className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-900"
+            >
+              Close
+            </button>
+          </div>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto">
+          {issues && issues.length > 0 ? (
+            <div className="border-b border-amber-800/60 bg-amber-950/20 px-4 py-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-300">
+                {issues.length > 1 ? "Issues to resolve" : "Issue to resolve"}
+              </p>
+              <ul className="mt-1 space-y-1">
+                {issues.map((issue, i) => (
+                  // Full error text -- never truncated (no line-clamp / truncate).
+                  <li key={i} className="text-sm leading-snug text-amber-100">
+                    {issue}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {scopes && scopes.length > 0 ? (
             <div className="flex flex-wrap gap-1.5 border-b border-zinc-800 px-4 py-2.5">
               {scopes.map((s) => (

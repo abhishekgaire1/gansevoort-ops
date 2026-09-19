@@ -52,6 +52,8 @@ interface Props {
   documentId: string;
   currentAppUserId: string;
   isPreparer: boolean;
+  /** Authorized to correct any DRAFT in Step 2, even if not the preparer. */
+  canCorrectAnyDraft: boolean;
   originalFilename: string;
   contentType: string;
   status: ReviewableStatus;
@@ -138,7 +140,10 @@ export function PurchaseDocumentReviewView(props: Props) {
   const [withdrawPending, setWithdrawPending] = useState(false);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
 
-  const editableAsPreparer = props.isPreparer && props.status === "DRAFT";
+  // A DRAFT is editable by its preparer OR by an authorized manager who holds
+  // the "correct any draft" capability. The server re-enforces this inside
+  // every correction RPC (20260811100168), so this only governs affordances.
+  const editableAsPreparer = (props.isPreparer || props.canCorrectAnyDraft) && props.status === "DRAFT";
   const editableAsReviewer = !props.isPreparer && props.status === "READY_FOR_VERIFICATION";
   const showFinalReview = editableAsReviewer;
 
@@ -224,7 +229,7 @@ export function PurchaseDocumentReviewView(props: Props) {
         }
       />
 
-      {!props.isPreparer && props.status === "DRAFT" ? (
+      {!props.isPreparer && !props.canCorrectAnyDraft && props.status === "DRAFT" ? (
         <p className={inlineNeutralClass}>Only the preparer who created this draft can edit it. You can review it once submitted.</p>
       ) : null}
       {props.isPreparer && props.status === "READY_FOR_VERIFICATION" ? (

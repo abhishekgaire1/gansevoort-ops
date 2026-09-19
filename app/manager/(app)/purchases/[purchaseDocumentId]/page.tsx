@@ -3,6 +3,7 @@ import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { listVendors } from "@/app/actions/vendors";
 import { findPossibleDuplicatePurchaseDocuments } from "@/app/lib/purchaseDocuments/duplicateDetection";
+import { userHasPermission, CORRECT_ANY_DRAFT_PERMISSION_KEY } from "@/app/lib/auth/permissions";
 import { PurchaseDocumentReviewView } from "./_components/PurchaseDocumentReviewView";
 import { VerifiedPurchaseDocumentSummary } from "./_components/VerifiedPurchaseDocumentSummary";
 import { DiscardedPurchaseDocumentSummary } from "./_components/DiscardedPurchaseDocumentSummary";
@@ -131,6 +132,14 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
   // it's whoever initiated it, which may be a different person entirely.
   const isPreparer = purchaseDocument.created_by_app_user_id === auth.manager.appUserId;
   const isOriginalUploader = document?.uploaded_by_app_user_id === auth.manager.appUserId;
+  // An authorized manager may correct any DRAFT in Step 2, not only their own.
+  // The button-visibility hint mirrors the server guard (20260811100168), which
+  // is still re-enforced inside every correction RPC.
+  const canCorrectAnyDraft = await userHasPermission(serviceClient, {
+    appUserId: auth.manager.appUserId,
+    organizationId: auth.manager.organizationId,
+    permissionKey: CORRECT_ANY_DRAFT_PERMISSION_KEY,
+  });
 
   const duplicates = await findPossibleDuplicatePurchaseDocuments(serviceClient, {
     organizationId: auth.manager.organizationId,
@@ -375,6 +384,7 @@ export default async function PurchaseDocumentPage({ params }: { params: Promise
       documentId={purchaseDocument.source_document_id}
       currentAppUserId={auth.manager.appUserId}
       isPreparer={isPreparer}
+      canCorrectAnyDraft={canCorrectAnyDraft}
       originalFilename={document?.original_filename ?? "Document"}
       contentType={document?.content_type ?? "application/pdf"}
       status={purchaseDocument.status as "DRAFT" | "READY_FOR_VERIFICATION"}

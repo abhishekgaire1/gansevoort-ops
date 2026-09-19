@@ -341,6 +341,79 @@ describe("exact normalized duplicate Item Master name protection (priority 9)", 
   });
 });
 
+describe("authorized-manager correction of another preparer's DRAFT (20260811100168)", () => {
+  it("a non-preparer who holds correct_any_draft may approve, and the acting manager is audited", async () => {
+    // Confer ONLY the correct_any_draft capability on an otherwise-unused
+    // fixture app_user via a DEDICATED role -- deliberately NOT the base
+    // 'manager' role, which also carries post_without_second_review and would
+    // contaminate the sole-approver suite that shares this fixture user.
+    const dedicatedRoleName = "test_correct_any_draft_only";
+    const existingRole = await fx.supabase.from("roles").select("id").eq("name", dedicatedRoleName).maybeSingle();
+    let roleId: string;
+    if (existingRole.data) {
+      roleId = existingRole.data.id as string;
+    } else {
+      const inserted = await fx.supabase.from("roles").insert({ name: dedicatedRoleName, description: "Test-only: correct any purchase-document draft." }).select("id").single();
+      expect(inserted.error).toBeNull();
+      roleId = inserted.data!.id as string;
+    }
+    const { data: perm } = await fx.supabase.from("permissions").select("id").eq("key", "purchase_documents.correct_any_draft").maybeSingle();
+    expect(perm?.id).toBeTruthy();
+    await fx.supabase.from("role_permissions").upsert({ role_id: roleId, permission_id: perm!.id }, { onConflict: "role_id,permission_id" });
+    const { error: grantErr } = await fx.supabase
+      .from("user_roles")
+      .upsert({ app_user_id: fx.mustPickEmployeeAppUserId, role_id: roleId, organization_id: fx.organizationId }, { onConflict: "app_user_id,role_id" });
+    expect(grantErr).toBeNull();
+
+    const { data: hasPerm, error: permErr } = await fx.supabase.rpc("has_permission", {
+      p_app_user_id: fx.mustPickEmployeeAppUserId,
+      p_organization_id: fx.organizationId,
+      p_permission_key: "purchase_documents.correct_any_draft",
+    });
+    expect(permErr).toBeNull();
+    expect(hasPerm).toBe(true);
+
+    const { purchaseDocumentId, lineKey } = await draftWithOneLine("Authorized Corrector Line"); // preparer = changeableEmployee
+    const existingItemId = await confirmedItemForExistingApproval();
+
+    // NOT the preparer, but authorized -> the guard now allows it (no GA079/GA006).
+    await expect(
+      approveLineClassificationExistingItemRpc(fx.supabase, {
+        purchaseDocumentId,
+        lineKey,
+        organizationId: fx.organizationId,
+        appUserId: fx.mustPickEmployeeAppUserId,
+        inventoryItemId: existingItemId,
+        rememberVendorMapping: false,
+      })
+    ).resolves.toMatchObject({ classificationId: expect.any(String) });
+
+    // The acting manager (not the preparer) is recorded in the audit history.
+    const { data: audits } = await fx.supabase
+      .from("audit_events")
+      .select("actor_app_user_id, entity_id")
+      .eq("organization_id", fx.organizationId)
+      .eq("entity_id", purchaseDocumentId)
+      .eq("actor_app_user_id", fx.mustPickEmployeeAppUserId);
+    expect((audits ?? []).length).toBeGreaterThan(0);
+  });
+
+  it("a non-preparer WITHOUT the capability is still rejected server-side", async () => {
+    const { purchaseDocumentId, lineKey } = await draftWithOneLine("Unauthorized Corrector Line");
+    const existingItemId = await confirmedItemForExistingApproval();
+    await expect(
+      approveLineClassificationExistingItemRpc(fx.supabase, {
+        purchaseDocumentId,
+        lineKey,
+        organizationId: fx.organizationId,
+        appUserId: fx.lockedEmployeeAppUserId, // no manager role -> no permission
+        inventoryItemId: existingItemId,
+        rememberVendorMapping: false,
+      })
+    ).rejects.toThrow(NotPreparerError);
+  });
+});
+
 async function confirmedItemForExistingApproval(): Promise<string> {
   const { purchaseDocumentId, lineKey } = await draftWithOneLine("Existing Item Candidate Line");
   const result = await approveLineClassificationNewItemRpc(fx.supabase, {
