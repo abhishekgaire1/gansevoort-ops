@@ -196,10 +196,19 @@ export function Step4ReviewSend({
     });
     setSoleApproverPending(false);
     if (!result.ok) {
-      setSoleApproverError(result.message);
+      // Surface the server's ACTUAL rejection reason (never a bare "try
+      // again"), including a quotable reference / correlation id when present.
+      const reference = "reference" in result && result.reference ? result.reference : null;
+      const correlationId = "correlationId" in result && result.correlationId ? result.correlationId : null;
+      const suffix = reference ? ` (Reference: ${reference})` : correlationId ? ` (Reference: ${correlationId})` : "";
+      setSoleApproverError(`${result.message}${suffix}`);
       if (result.reason === "blocked") {
         setSoleApproverBlockers(result.blockers.map((b) => ({ description: b.description, reason: b.reason })));
       }
+      // Retry safety: posting is idempotent at the database level (the unique
+      // receipt_line_id backbone converges a duplicate/retry on the existing
+      // posting -> ALREADY_POSTED), and the button stays disabled while
+      // pending, so a double-click or retry can never double-post.
       return;
     }
     setSoleApproverModalOpen(false);

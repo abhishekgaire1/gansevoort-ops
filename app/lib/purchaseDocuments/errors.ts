@@ -23,6 +23,13 @@ export const PURCHASE_DOCUMENT_SQLSTATE = {
   /** post_purchase_document_sole_approver refused: no reason was supplied
    * for single-manager approval. */
   SOLE_APPROVER_REASON_REQUIRED: "GA078",
+  /** The posting-boundary price-review guard (assert_price_review_acknowledged,
+   * 20260811100156+) refused: this invoice has a significant, comparable price
+   * change that has not been (re-)acknowledged. Shares SQLSTATE GA079 with the
+   * inventory-correction "invalid input" code, but during the POSTING path a
+   * GA079 can ONLY be this guard (the correction RPCs are a different path), so
+   * the posting wrappers map it here unambiguously. */
+  PRICE_REVIEW_REQUIRED: "GA079",
 } as const;
 
 /** The purchase document's version didn't match, or it wasn't in the
@@ -126,6 +133,15 @@ export class SoleApproverReasonRequiredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SoleApproverReasonRequiredError";
+  }
+}
+
+/** The posting-boundary price-review guard refused (GA079 during posting): a
+ * significant price change must be reviewed again before inventory can post. */
+export class PriceReviewRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PriceReviewRequiredError";
   }
 }
 

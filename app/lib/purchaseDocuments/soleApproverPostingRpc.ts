@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { mapPurchaseDocumentRpcError } from "@/app/lib/purchaseDocuments/errors";
+import { mapPurchaseDocumentRpcError, PriceReviewRequiredError, PURCHASE_DOCUMENT_SQLSTATE } from "@/app/lib/purchaseDocuments/errors";
 import { mapInventoryRpcError, INVENTORY_SQLSTATE } from "@/app/lib/inventory/errors";
 import type { SoleApproverReasonCode } from "@/app/lib/purchaseDocuments/soleApproverReason";
 
@@ -62,6 +62,13 @@ interface PostPurchaseDocumentSoleApproverRow {
 }
 
 function mapSoleApproverRpcError(error: { code?: string; message: string; details?: string | null }): Error {
+  // GA079 shares a SQLSTATE with the inventory-correction "invalid input" code,
+  // but a GA079 raised on the POSTING path can only be the price-review guard
+  // (the correction RPCs are a separate path). Map it unambiguously here BEFORE
+  // the generic inventory check that would otherwise mislabel it.
+  if (error.code === PURCHASE_DOCUMENT_SQLSTATE.PRICE_REVIEW_REQUIRED) {
+    return new PriceReviewRequiredError(error.message);
+  }
   if (error.code && (Object.values(INVENTORY_SQLSTATE) as string[]).includes(error.code)) {
     return mapInventoryRpcError(error);
   }

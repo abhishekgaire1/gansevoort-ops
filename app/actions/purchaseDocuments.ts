@@ -40,8 +40,10 @@ import {
   StaleReviewProposalsError,
   SoleApproverPermissionDeniedError,
   SoleApproverReasonRequiredError,
+  PriceReviewRequiredError,
 } from "@/app/lib/purchaseDocuments/errors";
 import { InventoryPostingBlockedError, AmendmentLineageAlreadyPostedError, type InventoryPostingBlocker } from "@/app/lib/inventory/errors";
+import { hasDuplicateEffectiveDeliveryLines, DUPLICATE_DELIVERY_REASON } from "@/app/lib/purchaseDocuments/duplicateDelivery";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 
 /** Manager-facing only -- never the raw RPC error text. */
@@ -690,7 +692,8 @@ export type PostPurchaseDocumentSoleApproverResult =
   | { ok: false; reason: "duplicate"; message: string; duplicates: PossibleDuplicatePurchaseDocument[] }
   | { ok: false; reason: "total_discrepancy"; message: string }
   | { ok: false; reason: "blocked"; message: string; blockers: InventoryPostingBlocker[] }
-  | { ok: false; reason: "preparation_incomplete" | "stale" | "already_posted" | "misconfigured"; message: string };
+  | { ok: false; reason: "price_review_required"; message: string; reference: string }
+  | { ok: false; reason: "preparation_incomplete" | "stale" | "already_posted" | "misconfigured"; message: string; reference?: string; correlationId?: string };
 
 /**
  * The single-manager approval action: takes a fully-valid DRAFT straight
@@ -764,6 +767,22 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
       reason: "preparation_incomplete",
       message: `${n} significant price change${n === 1 ? "" : "s"} must be reviewed before posting. Review ${n === 1 ? "it" : "them"} on Confirm Items & Receiving.`,
     };
+  }
+
+  // Duplicate-delivery integrity gate (server-authoritative): if the same
+  // invoice line has more than one effective (non-superseded) receipt line,
+  // the same delivery was recorded multiple times -- posting would multiply
+  // inventory. Refuse with the real reason instead of a generic failure.
+  const { data: effReceipts } = await supabase.rpc("effective_receipts_for_purchase_document", {
+    p_purchase_document_id: input.purchaseDocumentId,
+    p_organization_id: auth.manager.organizationId,
+  });
+  const effReceiptIds = ((effReceipts ?? []) as { id: string }[]).map((r) => r.id);
+  if (effReceiptIds.length > 0) {
+    const { data: effLines } = await supabase.from("receipt_lines").select("matched_line_key").in("receipt_id", effReceiptIds);
+    if (hasDuplicateEffectiveDeliveryLines(((effLines ?? []) as { matched_line_key: string | null }[]).map((rl) => rl.matched_line_key))) {
+      return { ok: false, reason: "misconfigured", message: DUPLICATE_DELIVERY_REASON, reference: "GA-DUPLICATE-DELIVERY" };
+    }
   }
 
   const { data: document } = await supabase
@@ -854,17 +873,33 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
     };
   } catch (err) {
     const isKnownInventoryError = err instanceof InventoryPostingBlockedError || err instanceof AmendmentLineageAlreadyPostedError;
-    if (!isKnownInventoryError) {
-      logIfUnexpected("postPurchaseDocumentSoleApprover", err, { purchaseDocumentId: input.purchaseDocumentId, expectedVersion: input.expectedVersion });
-    }
+    const isKnownRejection =
+      isKnownInventoryError ||
+      err instanceof PriceReviewRequiredError ||
+      err instanceof SoleApproverPermissionDeniedError ||
+      err instanceof SoleApproverReasonRequiredError ||
+      err instanceof PreparationIncompleteError ||
+      err instanceof StaleVersionError;
     if (err instanceof InventoryPostingBlockedError) {
-      return { ok: false, reason: "blocked", message: "Cannot post inventory yet.", blockers: err.blockers };
+      logIfUnexpected("postPurchaseDocumentSoleApprover", err, { purchaseDocumentId: input.purchaseDocumentId, expectedVersion: input.expectedVersion });
+      return { ok: false, reason: "blocked", message: "Cannot post inventory yet. Resolve the blocking issues shown in Items & Receiving, then try again.", blockers: err.blockers };
     }
     if (err instanceof AmendmentLineageAlreadyPostedError) {
       return {
         ok: false,
         reason: "already_posted",
-        message: "Inventory was already posted from the original revision. This amendment cannot post it again.",
+        message: "This invoice lineage has already added inventory and cannot post it again.",
+        reference: "GA075",
+      };
+    }
+    if (err instanceof PriceReviewRequiredError) {
+      // A significant, comparable price change (or a stale acknowledgment after
+      // a receiving/price edit) must be reviewed again before posting.
+      return {
+        ok: false,
+        reason: "price_review_required",
+        message: "The price or received quantity changed after acknowledgment, or a significant price change has not been reviewed. Review the price change again in Items & Receiving before posting.",
+        reference: "GA079",
       };
     }
     if (err instanceof SoleApproverPermissionDeniedError) {
@@ -879,7 +914,21 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
     if (err instanceof StaleVersionError) {
       return { ok: false, reason: "stale", message: "This document was updated elsewhere. Reload to see the latest version." };
     }
-    return { ok: false, reason: "misconfigured", message: isKnownPurchaseDocumentError(err) ? safeMessage(err) : "We couldn't post this invoice. Please try again." };
+    if (isKnownPurchaseDocumentError(err)) {
+      return { ok: false, reason: "misconfigured", message: safeMessage(err) };
+    }
+    // Genuinely unexpected: log the exact technical error with a correlation id
+    // the manager can quote, and surface a safe, non-internal message.
+    const correlationId = crypto.randomUUID();
+    if (!isKnownRejection) {
+      logIfUnexpected("postPurchaseDocumentSoleApprover", err, { purchaseDocumentId: input.purchaseDocumentId, expectedVersion: input.expectedVersion, correlationId });
+    }
+    return {
+      ok: false,
+      reason: "misconfigured",
+      message: "Inventory was not posted. No inventory changes were saved.",
+      correlationId,
+    };
   }
 }
 

@@ -4,6 +4,7 @@ import { getReceivingLines } from "@/app/lib/receiving/getReceivingLines";
 
 import { lineLevelBlockers, type PreparationBlocker } from "@/app/lib/purchaseDocuments/preparationBlockers";
 import { getPackageMismatchByLineKey } from "@/app/lib/purchaseDocuments/lineMismatchLookup";
+import { hasDuplicateEffectiveDeliveryLines, DUPLICATE_DELIVERY_REASON } from "@/app/lib/purchaseDocuments/duplicateDelivery";
 
 export type { PreparationBlocker };
 
@@ -172,6 +173,17 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
         reason: "Delivery verified by is required before sending for final review -- this document has inventory lines.",
       });
     }
+  }
+
+  // Duplicate-delivery integrity: more than one NON-superseded (effective)
+  // receipt line for the same invoice line means the same delivery was
+  // recorded multiple times as independent DELIVERY receipts (corrections
+  // supersede within their chain, so a normally-corrected line yields exactly
+  // one effective line). Posting sums every effective receipt line, so this
+  // would MULTIPLY inventory -- block it here (and surface the real reason)
+  // rather than let it post 2x/3x, or be mis-reported as a price change.
+  if (hasDuplicateEffectiveDeliveryLines((receiptLines ?? []).map((rl) => rl.matched_line_key as string | null))) {
+    blockers.push({ lineKey: null, description: null, reason: DUPLICATE_DELIVERY_REASON });
   }
 
   const documentDate = purchaseDocument?.document_date as string | null | undefined;

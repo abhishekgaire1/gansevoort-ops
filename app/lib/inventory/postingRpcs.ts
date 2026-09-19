@@ -1,7 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { mapInventoryRpcError } from "@/app/lib/inventory/errors";
-import { mapPurchaseDocumentRpcError } from "@/app/lib/purchaseDocuments/errors";
+import { mapPurchaseDocumentRpcError, PriceReviewRequiredError, PURCHASE_DOCUMENT_SQLSTATE } from "@/app/lib/purchaseDocuments/errors";
 
 export interface PostPurchaseDocumentInventoryInput {
   purchaseDocumentId: string;
@@ -32,8 +32,10 @@ export async function postPurchaseDocumentInventoryRpc(
 
   if (error) {
     // GA003 (not VERIFIED) belongs to the purchase-document registry;
-    // GA017 (posting blocked) to the inventory one.
+    // GA017 (posting blocked) to the inventory one. GA079 on the posting path
+    // is always the price-review guard (never inventory-correction input).
     if (error.code === "GA003") throw mapPurchaseDocumentRpcError(error);
+    if (error.code === PURCHASE_DOCUMENT_SQLSTATE.PRICE_REVIEW_REQUIRED) throw new PriceReviewRequiredError(error.message);
     throw mapInventoryRpcError(error);
   }
 
