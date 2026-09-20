@@ -52,13 +52,39 @@ SUPABASE_SECRET_KEY="$ISOLATED_SUPABASE_SECRET_KEY" \
 SUPABASE_PUBLISHABLE_KEY="$ISOLATED_SUPABASE_PUBLISHABLE_KEY" \
   npx tsx scripts/test-integration-setup.ts
 
+# A skipped suite is a FAILURE here: this runner exists precisely to prove these
+# invariants ran to completion on a clean DB, so a silent skip must exit nonzero.
+# vitest exits 0 on skipped tests, so we capture JSON and assert zero skips.
+RESULT_JSON="$(mktemp)"
+trap 'rm -f "$RESULT_JSON"' EXIT
+
+set +e
 SUPABASE_URL="$ISOLATED_SUPABASE_URL" \
 SUPABASE_SECRET_KEY="$ISOLATED_SUPABASE_SECRET_KEY" \
 SUPABASE_PUBLISHABLE_KEY="$ISOLATED_SUPABASE_PUBLISHABLE_KEY" \
   npx vitest run --testTimeout=60000 \
+    --reporter=default --reporter=json --outputFile="$RESULT_JSON" \
     tests/inventoryPosting.rpc.test.ts \
     tests/inventoryBalances.rpc.test.ts \
     tests/purchaseUsageUnits.rpc.test.ts \
+    tests/deliveryResolution.rpc.test.ts \
     tests/deliveryLineagePostingGuard.rpc.test.ts
+VITEST_EXIT=$?
+set -e
 
-echo "Isolated balance-suite run complete."
+if [[ "$VITEST_EXIT" -ne 0 ]]; then
+  echo "REFUSED/FAILED: one or more isolated suites failed (vitest exit $VITEST_EXIT)." >&2
+  exit "$VITEST_EXIT"
+fi
+
+# Assert no test was skipped/pending/todo -- a skip means the invariant was NOT proven.
+SKIPPED="$(node -e 'const r=require(process.argv[1]);const s=(r.numPendingTests||0)+(r.numTodoTests||0);const total=r.numTotalTests||0;process.stdout.write(String(s));if(total===0){process.stderr.write("no tests ran\n");process.exit(3);}' "$RESULT_JSON")" || {
+  echo "REFUSED/FAILED: no tests ran on the isolated project (empty result)." >&2
+  exit 3
+}
+if [[ "$SKIPPED" -ne 0 ]]; then
+  echo "REFUSED/FAILED: $SKIPPED test(s) were skipped -- invariants not proven on the isolated project." >&2
+  exit 4
+fi
+
+echo "Isolated balance-suite run complete (no skips)."

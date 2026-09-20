@@ -241,8 +241,15 @@ vi.mock("@/app/lib/receiving/effectiveReceivingEdit", () => ({ getEffectiveRecei
 
 import { getPriceComparisonsForDocument, getPriceHistoryForItem } from "@/app/lib/purchasing/priceComparison";
 
-function fakeSupabase(opts: { vendorId: string | null; lineTotals: Record<string, number | null>; rpcRows: Record<string, unknown>[] }) {
-  const rpc = vi.fn().mockResolvedValue({ data: opts.rpcRows, error: null });
+function fakeSupabase(opts: { vendorId: string | null; lineTotals: Record<string, number | null>; rpcRows: Record<string, unknown>[]; baseQtyRows?: Record<string, unknown>[] }) {
+  // Route by RPC name: base-qty comes from the shared DB effective-base-quantity
+  // function (§1 parity); baselines come from get_comparable_price_baseline.
+  const rpc = vi.fn((name: string) => {
+    if (name === "purchase_document_effective_base_quantity") {
+      return Promise.resolve({ data: opts.baseQtyRows ?? [], error: null });
+    }
+    return Promise.resolve({ data: opts.rpcRows, error: null });
+  });
   const from = vi.fn((table: string) => {
     if (table === "purchase_documents") {
       return { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { vendor_id: opts.vendorId, currency: "USD", document_date: "2026-09-01" }, error: null }) }) }) }) };
@@ -281,6 +288,7 @@ describe("getPriceComparisonsForDocument", () => {
     const supabase = fakeSupabase({
       vendorId: "vendor-bartlett",
       lineTotals: { "line-cream": 210.15 },
+      baseQtyRows: [{ out_line_key: "line-cream", out_inventory_item_id: "item-cream", out_vendor_sku: "101102", out_base_unit_code: "PIECE", out_line_total: 210.15, out_base_qty: 48 }],
       rpcRows: [
         {
           out_inventory_item_id: "item-cream",
@@ -330,13 +338,15 @@ describe("getPriceComparisonsForDocument", () => {
       )
     );
     const lineTotals = Object.fromEntries(Array.from({ length: 3 }, (_, i) => [`line-${i}`, 10]));
-    const supabase = fakeSupabase({ vendorId: "vendor-1", lineTotals, rpcRows: [] });
+    const baseQtyRows = Array.from({ length: 3 }, (_, i) => ({ out_line_key: `line-${i}`, out_inventory_item_id: `item-${i}`, out_vendor_sku: `SKU-${i}`, out_base_unit_code: "EA", out_line_total: 10, out_base_qty: 1 }));
+    const supabase = fakeSupabase({ vendorId: "vendor-1", lineTotals, rpcRows: [], baseQtyRows });
 
     await getPriceComparisonsForDocument(supabase as never, "pd-current", "org-1");
 
     // One baseline lookup per resolved line, each with its own SKU + the
     // document's currency/base-unit/date, excluding the current document.
-    expect(supabase.rpc).toHaveBeenCalledTimes(3);
+    const baselineCalls = (supabase.rpc as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === "get_comparable_price_baseline");
+    expect(baselineCalls).toHaveLength(3);
     expect(supabase.rpc).toHaveBeenCalledWith(
       "get_comparable_price_baseline",
       expect.objectContaining({ p_vendor_id: "vendor-1", p_vendor_sku: "SKU-0", p_currency_code: "USD", p_base_unit_code: "EA", p_before_date: "2026-09-01", p_exclude_purchase_document_id: "pd-current" })
@@ -347,7 +357,7 @@ describe("getPriceComparisonsForDocument", () => {
     getReceivingLinesMock.mockResolvedValue([
       line({ lineKey: "line-new-item", inventoryItemId: "item-new", baseUnitCode: "EA", receivingBehavior: "SAME_UNIT", invoicePackageQuantity: 2, fixedConversionFactor: null }),
     ]);
-    const supabase = fakeSupabase({ vendorId: "vendor-bartlett", lineTotals: { "line-new-item": 10 }, rpcRows: [] });
+    const supabase = fakeSupabase({ vendorId: "vendor-bartlett", lineTotals: { "line-new-item": 10 }, rpcRows: [], baseQtyRows: [{ out_line_key: "line-new-item", out_inventory_item_id: "item-new", out_vendor_sku: null, out_base_unit_code: "EA", out_line_total: 10, out_base_qty: 2 }] });
 
     const result = await getPriceComparisonsForDocument(supabase as never, "pd-current", "org-1");
 

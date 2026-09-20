@@ -45,6 +45,7 @@ import { priceCheckDisplay, priceReviewIsNotable, type PriceCheckDisplay } from 
 import { PriceReviewCard } from "./PriceReviewCard";
 import { LineActionDrawer } from "./LineActionDrawer";
 import { DeliveryResolver } from "./DeliveryResolver";
+import { PostedDeliveryConflictHandoff } from "./PostedDeliveryConflictHandoff";
 import { getDeliveryResolution } from "@/app/actions/deliveryResolution";
 import type { DeliveryResolutionData } from "@/app/lib/purchaseDocuments/deliveryResolution";
 import { applyPatchToSelected, deriveLineActionScopes, drawerIsDirty, lineIsBulkSelectable } from "@/app/lib/purchaseDocuments/lineBulkAndDrawer";
@@ -1114,6 +1115,13 @@ export function ItemsAndReceivingPanel({
           }}
         />
       ) : null}
+
+      {/* §4: an ambiguous document already posted its duplicate inventory --
+          cannot be resolved by exclusion; hand off to the audited correction. */}
+      <PostedDeliveryConflictHandoff
+        purchaseDocumentId={purchaseDocumentId}
+        onCorrected={() => { setDeliveryResolutionReloadKey((k) => k + 1); void load(); }}
+      />
 
       {alreadyPostedElsewhere ? (
         <div className="rounded-lg border border-sky-700 bg-sky-950/30 p-4">

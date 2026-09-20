@@ -1,7 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getReceivingLines, type ReceivingBehavior, type ReceivingLineInfo } from "@/app/lib/receiving/getReceivingLines";
-import { getEffectiveReceivingLines } from "@/app/lib/receiving/effectiveReceivingEdit";
 import { resolveInvoiceUnit, unitsConflict, unitsEqual } from "@/app/lib/receiving/computeReceivingPrefill";
 
 /**
@@ -224,11 +223,14 @@ export async function getPriceComparisonsForDocument(
   purchaseDocumentId: string,
   organizationId: string
 ): Promise<Map<string, PriceComparisonResult>> {
-  const [{ data: purchaseDocument }, receivingLines, { data: lines }, effectiveReceivingLines] = await Promise.all([
+  const [{ data: purchaseDocument }, receivingLines, { data: lines }, { data: baseQtyRows }] = await Promise.all([
     supabase.from("purchase_documents").select("vendor_id, currency, document_date").eq("id", purchaseDocumentId).eq("organization_id", organizationId).maybeSingle(),
     getReceivingLines(supabase, purchaseDocumentId, organizationId),
     supabase.from("purchase_document_lines").select("line_key, line_total").eq("purchase_document_id", purchaseDocumentId).eq("organization_id", organizationId),
-    getEffectiveReceivingLines(supabase, purchaseDocumentId, organizationId),
+    // THE shared effective base quantity -- the SAME contributing-receipt set
+    // posting and the GA079 guard use (20260811100178). Never a separate price
+    // quantity; duplicates/superseded/stale/non-contributing receipts excluded.
+    supabase.rpc("purchase_document_effective_base_quantity", { p_purchase_document_id: purchaseDocumentId, p_organization_id: organizationId }),
   ]);
 
   const vendorId = (purchaseDocument?.vendor_id as string | null | undefined) ?? null;
@@ -237,14 +239,9 @@ export async function getPriceComparisonsForDocument(
   const beforeDate = (purchaseDocument?.document_date as string | null | undefined) ?? null;
   const lineTotalByKey = new Map(((lines ?? []) as { line_key: string; line_total: number | null }[]).map((l) => [l.line_key, l.line_total]));
 
-  // Multiple effective receipt lines can share the same matched_line_key
-  // (a genuine additional/split delivery) -- summed, mirroring exactly how
-  // the price-history RPC itself sums posted_base_quantity per line.
-  const verifiedBaseQuantityByKey = new Map<string, number>();
-  for (const rl of effectiveReceivingLines) {
-    if (rl.matchedLineKey === null || rl.verifiedBaseQuantity === null) continue;
-    verifiedBaseQuantityByKey.set(rl.matchedLineKey, (verifiedBaseQuantityByKey.get(rl.matchedLineKey) ?? 0) + rl.verifiedBaseQuantity);
-  }
+  const baseQtyByKey = new Map<string, number | null>(
+    ((baseQtyRows ?? []) as { out_line_key: string; out_base_qty: number | null }[]).map((r) => [r.out_line_key, r.out_base_qty]),
+  );
 
   interface Eligible {
     lineKey: string;
@@ -258,7 +255,8 @@ export async function getPriceComparisonsForDocument(
 
   for (const info of receivingLines) {
     const lineTotal = lineTotalByKey.get(info.lineKey) ?? null;
-    const baseQuantity = computeCurrentBaseQuantity(info, verifiedBaseQuantityByKey.get(info.lineKey) ?? null);
+    // Authoritative contributing base quantity (same source as posting/GA079).
+    const baseQuantity = baseQtyByKey.get(info.lineKey) ?? null;
     const classification = classifyLineForPriceComparison({
       disposition: info.disposition,
       vendorId,

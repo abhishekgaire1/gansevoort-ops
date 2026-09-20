@@ -759,22 +759,10 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
     };
   }
 
-  // Price-review gate (server-authoritative): an unacknowledged significant
-  // price change blocks posting, even via the single-manager path.
-  const priceGate = await getPurchaseDocumentPriceReview(supabase, input.purchaseDocumentId, auth.manager.organizationId);
-  if (priceGate.requiresAcknowledgment.length > 0) {
-    const n = priceGate.requiresAcknowledgment.length;
-    return {
-      ok: false,
-      reason: "preparation_incomplete",
-      message: `${n} significant price change${n === 1 ? "" : "s"} must be reviewed before posting. Review ${n === 1 ? "it" : "them"} on Confirm Items & Receiving.`,
-    };
-  }
-
-  // Delivery-lineage integrity gate (server-authoritative, independent of the
-  // price guard): AMBIGUOUS lineage (the same physical delivery recorded more
-  // than once, historical/unidentified) would multiply inventory at posting.
-  // Genuine additional deliveries (distinct delivery_event_id) are allowed.
+  // Delivery-lineage integrity gate FIRST (GA080 before GA079): a manager must
+  // never be asked to acknowledge a price computed from ambiguous/duplicated
+  // quantities. AMBIGUOUS lineage (the same physical delivery recorded more than
+  // once) would multiply inventory; genuine distinct deliveries are allowed.
   const { data: effReceipts } = await supabase.rpc("effective_receipts_for_purchase_document", {
     p_purchase_document_id: input.purchaseDocumentId,
     p_organization_id: auth.manager.organizationId,
@@ -787,6 +775,19 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
     if (isAmbiguousDeliveryLineage(effectiveDeliveries)) {
       return { ok: false, reason: "delivery_conflict", message: AMBIGUOUS_DELIVERY_REASON, reference: "GA080" };
     }
+  }
+
+  // Price-review gate SECOND (server-authoritative): an unacknowledged significant
+  // price change blocks posting, even via the single-manager path. Computed from
+  // the same contributing-receipt quantity as posting (20260811100178).
+  const priceGate = await getPurchaseDocumentPriceReview(supabase, input.purchaseDocumentId, auth.manager.organizationId);
+  if (priceGate.requiresAcknowledgment.length > 0) {
+    const n = priceGate.requiresAcknowledgment.length;
+    return {
+      ok: false,
+      reason: "preparation_incomplete",
+      message: `${n} significant price change${n === 1 ? "" : "s"} must be reviewed before posting. Review ${n === 1 ? "it" : "them"} on Confirm Items & Receiving.`,
+    };
   }
 
   const { data: document } = await supabase
