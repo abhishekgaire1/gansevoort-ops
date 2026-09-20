@@ -4,7 +4,7 @@ import { getReceivingLines } from "@/app/lib/receiving/getReceivingLines";
 
 import { lineLevelBlockers, type PreparationBlocker } from "@/app/lib/purchaseDocuments/preparationBlockers";
 import { getPackageMismatchByLineKey } from "@/app/lib/purchaseDocuments/lineMismatchLookup";
-import { hasDuplicateEffectiveDeliveryLines, DUPLICATE_DELIVERY_REASON } from "@/app/lib/purchaseDocuments/duplicateDelivery";
+import { isAmbiguousDeliveryLineage, AMBIGUOUS_DELIVERY_REASON } from "@/app/lib/purchaseDocuments/duplicateDelivery";
 
 export type { PreparationBlocker };
 
@@ -62,13 +62,15 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
     p_purchase_document_id: purchaseDocumentId,
     p_organization_id: organizationId,
   });
-  const effectiveReceiptIds = ((effectiveReceipts ?? []) as { id: string }[]).map((r) => r.id);
+  const effectiveReceiptRows = (effectiveReceipts ?? []) as { id: string; delivery_event_id: string | null }[];
+  const effectiveReceiptIds = effectiveReceiptRows.map((r) => r.id);
+  const deliveryEventByReceiptId = new Map(effectiveReceiptRows.map((r) => [r.id, r.delivery_event_id]));
 
   const { data: receiptLines } =
     effectiveReceiptIds.length > 0
       ? await supabase
           .from("receipt_lines")
-          .select("matched_line_key, actual_received_package_quantity, actual_received_package_unit, actual_verified_base_quantity, location_id")
+          .select("receipt_id, matched_line_key, actual_received_package_quantity, actual_received_package_unit, actual_verified_base_quantity, location_id")
           .in("receipt_id", effectiveReceiptIds)
           // Same deterministic "most recent wins" ordering as
           // getReviewSummary.ts's identical map-building query -- never
@@ -182,8 +184,18 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
   // one effective line). Posting sums every effective receipt line, so this
   // would MULTIPLY inventory -- block it here (and surface the real reason)
   // rather than let it post 2x/3x, or be mis-reported as a price change.
-  if (hasDuplicateEffectiveDeliveryLines((receiptLines ?? []).map((rl) => rl.matched_line_key as string | null))) {
-    blockers.push({ lineKey: null, description: null, reason: DUPLICATE_DELIVERY_REASON });
+  // Delivery lineage: block only genuinely AMBIGUOUS lineage (historical/
+  // unidentified duplicates), never legitimate additional deliveries (distinct
+  // delivery_event_id). One entry per effective receipt that contributes an
+  // inventory line -- each is one physical delivery contribution.
+  const deliveryReceiptIdsWithInventoryLines = new Set(
+    (receiptLines ?? [])
+      .filter((rl) => rl.matched_line_key !== null && receivingLines.some((l) => l.lineKey === rl.matched_line_key))
+      .map((rl) => (rl as { receipt_id: string }).receipt_id),
+  );
+  const effectiveDeliveries = [...deliveryReceiptIdsWithInventoryLines].map((id) => ({ deliveryEventId: deliveryEventByReceiptId.get(id) ?? null }));
+  if (isAmbiguousDeliveryLineage(effectiveDeliveries)) {
+    blockers.push({ lineKey: null, description: null, reason: AMBIGUOUS_DELIVERY_REASON });
   }
 
   const documentDate = purchaseDocument?.document_date as string | null | undefined;

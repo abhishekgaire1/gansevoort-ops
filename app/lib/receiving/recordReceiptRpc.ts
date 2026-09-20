@@ -23,6 +23,11 @@ export interface RecordReceiptInput {
    * it (e.g. an internal/system caller) gets today's unprotected
    * behavior. */
   idempotencyKey?: string | null;
+  /** Stable identity for ONE physical delivery (20260811100171). A DELIVERY
+   * carries it; a genuine additional delivery gets a NEW id; re-submitting a
+   * DELIVERY with the same (org, document, event id) returns the existing
+   * receipt. Ignored for CORRECTION (inherits the corrected receipt's id). */
+  deliveryEventId?: string | null;
 }
 
 export interface RecordReceiptResult {
@@ -40,6 +45,7 @@ export async function recordReceiptRpc(supabase: SupabaseClient, input: RecordRe
     p_notes: input.notes ?? null,
     p_lines: input.lines,
     p_idempotency_key: input.idempotencyKey ?? null,
+    p_delivery_event_id: input.deliveryEventId ?? null,
   });
 
   if (error) {

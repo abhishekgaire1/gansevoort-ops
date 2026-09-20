@@ -97,6 +97,10 @@ export function ReceivingPanel({
   const [error, setError] = useState<string | null>(null);
   const [alreadyReceived, setAlreadyReceived] = useState(false);
   const [showAdditionalForm, setShowAdditionalForm] = useState(false);
+  // Stable-per-attempt key for an ADDITIONAL delivery: dedupes a double-click
+  // within one form session, and is rotated on success so the NEXT additional
+  // delivery is a distinct physical delivery event (summed, never blocked).
+  const [additionalSubmissionKey, setAdditionalSubmissionKey] = useState(() => crypto.randomUUID());
 
   // Edit Receiving (DRAFT only): a SEPARATE mode from recording an
   // additional delivery -- it corrects the existing effective receiving
@@ -217,7 +221,6 @@ export function ReceivingPanel({
   // NEXT distinct submission (including "Record Additional Receipt")
   // gets its own fresh key -- never derived from document/line identity,
   // since legitimate additional deliveries must remain possible.
-  const [submissionKey, setSubmissionKey] = useState(() => crypto.randomUUID());
 
   const load = useCallback(async () => {
     const [receiptsResult, linesResult, locationsResult] = await Promise.all([
@@ -332,7 +335,13 @@ export function ReceivingPanel({
       purchaseDocumentId,
       defaultLocationId: defaultLocationId || null,
       notes: notes.trim() || null,
-      idempotencyKey: submissionKey,
+      // Primary delivery: one stable identity per document, so re-recording it
+      // never creates a duplicate (record_receipt returns the existing receipt).
+      // Additional delivery: a distinct physical delivery event (its own stable
+      // per-attempt key), summed with the primary -- legitimate partials. (See
+      // 20260811100171.)
+      idempotencyKey: alreadyReceived ? additionalSubmissionKey : `primary-delivery:${purchaseDocumentId}`,
+      deliveryEventId: alreadyReceived ? additionalSubmissionKey : `primary:${purchaseDocumentId}`,
       lines: includedLines.map((l) => ({
         lineNumberSnapshot: null,
         matchedLineKey: l.lineKey,
@@ -369,7 +378,7 @@ export function ReceivingPanel({
       return;
     }
     setNotes("");
-    setSubmissionKey(crypto.randomUUID());
+    setAdditionalSubmissionKey(crypto.randomUUID()); // next additional delivery is a new physical event
     setShowAdditionalForm(false); // a successful submit collapses back to the recorded summary
     await load();
   }

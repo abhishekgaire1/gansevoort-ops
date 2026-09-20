@@ -43,7 +43,7 @@ import {
   PriceReviewRequiredError,
 } from "@/app/lib/purchaseDocuments/errors";
 import { InventoryPostingBlockedError, AmendmentLineageAlreadyPostedError, type InventoryPostingBlocker } from "@/app/lib/inventory/errors";
-import { hasDuplicateEffectiveDeliveryLines, DUPLICATE_DELIVERY_REASON } from "@/app/lib/purchaseDocuments/duplicateDelivery";
+import { isAmbiguousDeliveryLineage, AMBIGUOUS_DELIVERY_REASON } from "@/app/lib/purchaseDocuments/duplicateDelivery";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 
 /** Manager-facing only -- never the raw RPC error text. */
@@ -693,6 +693,7 @@ export type PostPurchaseDocumentSoleApproverResult =
   | { ok: false; reason: "total_discrepancy"; message: string }
   | { ok: false; reason: "blocked"; message: string; blockers: InventoryPostingBlocker[] }
   | { ok: false; reason: "price_review_required"; message: string; reference: string }
+  | { ok: false; reason: "delivery_conflict"; message: string; reference: string }
   | { ok: false; reason: "preparation_incomplete" | "stale" | "already_posted" | "misconfigured"; message: string; reference?: string; correlationId?: string };
 
 /**
@@ -769,19 +770,21 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
     };
   }
 
-  // Duplicate-delivery integrity gate (server-authoritative): if the same
-  // invoice line has more than one effective (non-superseded) receipt line,
-  // the same delivery was recorded multiple times -- posting would multiply
-  // inventory. Refuse with the real reason instead of a generic failure.
+  // Delivery-lineage integrity gate (server-authoritative, independent of the
+  // price guard): AMBIGUOUS lineage (the same physical delivery recorded more
+  // than once, historical/unidentified) would multiply inventory at posting.
+  // Genuine additional deliveries (distinct delivery_event_id) are allowed.
   const { data: effReceipts } = await supabase.rpc("effective_receipts_for_purchase_document", {
     p_purchase_document_id: input.purchaseDocumentId,
     p_organization_id: auth.manager.organizationId,
   });
-  const effReceiptIds = ((effReceipts ?? []) as { id: string }[]).map((r) => r.id);
-  if (effReceiptIds.length > 0) {
-    const { data: effLines } = await supabase.from("receipt_lines").select("matched_line_key").in("receipt_id", effReceiptIds);
-    if (hasDuplicateEffectiveDeliveryLines(((effLines ?? []) as { matched_line_key: string | null }[]).map((rl) => rl.matched_line_key))) {
-      return { ok: false, reason: "misconfigured", message: DUPLICATE_DELIVERY_REASON, reference: "GA-DUPLICATE-DELIVERY" };
+  const effReceiptRows = (effReceipts ?? []) as { id: string; delivery_event_id: string | null }[];
+  if (effReceiptRows.length > 0) {
+    const { data: effLines } = await supabase.from("receipt_lines").select("receipt_id").in("receipt_id", effReceiptRows.map((r) => r.id)).not("matched_line_key", "is", null);
+    const receiptIdsWithLines = new Set(((effLines ?? []) as { receipt_id: string }[]).map((rl) => rl.receipt_id));
+    const effectiveDeliveries = effReceiptRows.filter((r) => receiptIdsWithLines.has(r.id)).map((r) => ({ deliveryEventId: r.delivery_event_id }));
+    if (isAmbiguousDeliveryLineage(effectiveDeliveries)) {
+      return { ok: false, reason: "delivery_conflict", message: AMBIGUOUS_DELIVERY_REASON, reference: "GA080" };
     }
   }
 

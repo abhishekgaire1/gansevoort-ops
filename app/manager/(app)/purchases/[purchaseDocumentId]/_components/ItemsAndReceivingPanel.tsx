@@ -594,7 +594,13 @@ export function ItemsAndReceivingPanel({
       purchaseDocumentId,
       defaultLocationId: bulkLocationId || null,
       notes: null,
-      idempotencyKey: editSessionKey,
+      // Deterministic per document: the PRIMARY delivery has one stable identity,
+      // so re-recording it across sessions/refreshes/double-clicks converges on
+      // the same receipt (record_receipt returns the existing one) instead of
+      // creating a duplicate DELIVERY. A genuine additional delivery is a
+      // separate, explicit action with its own fresh identity.
+      idempotencyKey: `primary-delivery:${purchaseDocumentId}`,
+      deliveryEventId: `primary:${purchaseDocumentId}`,
       lines: includedLines.map((l) => ({
         lineNumberSnapshot: null,
         matchedLineKey: l.lineKey,

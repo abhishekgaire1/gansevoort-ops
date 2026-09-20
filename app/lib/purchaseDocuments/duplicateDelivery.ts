@@ -1,32 +1,50 @@
 /**
- * Duplicate-delivery detection.
+ * Delivery-lineage classification for a purchase document's EFFECTIVE
+ * (non-superseded) delivery receipts.
  *
- * A purchase document normally has exactly one effective (non-superseded)
- * receipt line per invoice line: a correction supersedes the receipt it
- * corrects, so a normally-corrected line still resolves to one effective line.
- * When the SAME delivery is recorded more than once as independent DELIVERY
- * receipts, each carries a full copy of every line, so an invoice line ends up
- * with more than one effective receipt line. Posting sums every effective
- * receipt line (one movement per receipt line), so this would post inventory
- * two or three times over -- and the price guard, which recomputes unit cost
- * from the (inflated) summed quantity, then reports a spurious large price drop.
+ * A document normally has one physical delivery (its correction chain resolves
+ * to a single effective receipt). Legitimate PARTIAL/ADDITIONAL deliveries are
+ * distinct physical delivery events -- each an effective receipt with its own
+ * stable delivery_event_id (20260811100171) -- and their quantities are summed.
+ * The Bartlett incident was the SAME physical delivery recorded three times as
+ * independent receipts; summing them multiplied inventory.
  *
- * This pure predicate flags that condition from the set of matched line keys
- * across a document's effective receipt lines, so both the readiness model and
- * the server posting preflight refuse it with one clear, shared reason.
+ * Because the delivery_event_id is the authoritative identity, this classifier
+ * never guesses from matching quantities:
+ *   - one effective delivery                         -> single (post normally)
+ *   - many, all with DISTINCT non-null event ids     -> additional (sum; allowed)
+ *   - many, with any null or repeated event id        -> ambiguous (block)
+ * Historical receipts have a null event id, so a document with multiple
+ * effective deliveries recorded before this identity existed is AMBIGUOUS and
+ * must be resolved by a manager before posting -- never auto-summed, never
+ * auto-deduplicated.
  */
-export function hasDuplicateEffectiveDeliveryLines(matchedLineKeys: (string | null | undefined)[]): boolean {
-  const counts = new Map<string, number>();
-  for (const key of matchedLineKeys) {
-    if (!key) continue;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  for (const count of counts.values()) {
-    if (count > 1) return true;
-  }
-  return false;
+
+export type DeliveryLineageStatus = "single" | "additional" | "ambiguous";
+
+export interface EffectiveDeliveryReceipt {
+  /** Stable identity for one physical delivery; null for historical receipts. */
+  deliveryEventId: string | null;
 }
 
-/** The single manager-facing reason used everywhere this condition is refused. */
-export const DUPLICATE_DELIVERY_REASON =
-  "This invoice has more than one recorded delivery for the same line(s), which would post inventory more than once. Remove the duplicate delivery in Items & Receiving before posting.";
+export function classifyDeliveryLineage(effectiveDeliveries: EffectiveDeliveryReceipt[]): DeliveryLineageStatus {
+  if (effectiveDeliveries.length <= 1) return "single";
+  const eventIds = effectiveDeliveries.map((d) => d.deliveryEventId);
+  // Any historical/unidentified delivery among several -> cannot prove they are
+  // distinct physical deliveries -> ambiguous.
+  if (eventIds.some((id) => id === null || id === undefined || id === "")) return "ambiguous";
+  // Two current versions claiming the same physical delivery -> ambiguous.
+  if (new Set(eventIds).size !== eventIds.length) return "ambiguous";
+  // Every effective delivery is a distinct, identified physical delivery.
+  return "additional";
+}
+
+/** True only for lineage that must block posting (never for legitimate
+ * additional deliveries). */
+export function isAmbiguousDeliveryLineage(effectiveDeliveries: EffectiveDeliveryReceipt[]): boolean {
+  return classifyDeliveryLineage(effectiveDeliveries) === "ambiguous";
+}
+
+/** The single manager-facing reason used everywhere ambiguous lineage blocks. */
+export const AMBIGUOUS_DELIVERY_REASON =
+  "This invoice has multiple recorded deliveries for the same lines whose delivery records cannot be automatically distinguished. Review the recorded deliveries to confirm whether they are separate physical deliveries or duplicate entries before posting.";

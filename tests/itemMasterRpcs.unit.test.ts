@@ -407,6 +407,7 @@ describe("recordReceiptRpc", () => {
       p_notes: null,
       p_lines: [],
       p_idempotency_key: null,
+      p_delivery_event_id: null,
     });
     expect(result).toEqual({ receiptId: "receipt-1" });
   });

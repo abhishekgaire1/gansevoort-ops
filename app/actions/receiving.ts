@@ -39,6 +39,8 @@ export interface RecordReceiptInput {
   confirmedInvoiceUnits?: { lineKey: string; unitCode: string; rememberForVendor: boolean }[];
   /** See RecordReceiptRpcInput.idempotencyKey -- passed straight through. */
   idempotencyKey?: string | null;
+  /** See RecordReceiptRpcInput.deliveryEventId -- stable per physical delivery. */
+  deliveryEventId?: string | null;
 }
 
 export type RecordReceiptResult =
@@ -61,6 +63,7 @@ export async function recordReceipt(input: RecordReceiptInput): Promise<RecordRe
       notes: input.notes,
       lines: input.lines,
       idempotencyKey: input.idempotencyKey,
+      deliveryEventId: input.deliveryEventId,
     });
 
     if (input.rememberLocations && input.rememberLocations.length > 0) {
