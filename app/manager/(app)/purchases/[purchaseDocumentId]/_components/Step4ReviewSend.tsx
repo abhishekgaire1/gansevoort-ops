@@ -217,6 +217,9 @@ export function Step4ReviewSend({
 
   const ready = preparationStatus?.ready ?? false;
   const blockers = preparationStatus?.blockers ?? [];
+  // Ambiguous delivery lineage (GA080): a document-level blocker. While it
+  // stands, no inventory line may show Ready -- its posting quantity is unknown.
+  const hasDeliveryConflict = blockers.some((b) => /recorded deliveries|delivery records|separate physical deliveries/i.test(b.reason));
   const missingDeliveryVerifier = blockers.some((b) => /delivery verified/i.test(b.reason));
   const typeLabel = header.documentType ? (DOCUMENT_TYPE_LABEL[header.documentType] ?? header.documentType) : "—";
 
@@ -416,10 +419,10 @@ export function Step4ReviewSend({
                         <td className={tableCellRightClass}>{formatMoney(row.lineTotal, header.currency)}</td>
                         <td className={tableCellClass}>
                           <span
-                            className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASS[row.status.kind]}`}
-                            title={row.problems.length > 0 ? row.problems.join("\n") : undefined}
+                            className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium ${hasDeliveryConflict && row.status.kind === "ready" ? "bg-amber-500/15 text-amber-300" : STATUS_BADGE_CLASS[row.status.kind]}`}
+                            title={hasDeliveryConflict && row.status.kind === "ready" ? "Posting quantity cannot be confirmed until recorded deliveries are reviewed." : row.problems.length > 0 ? row.problems.join("\n") : undefined}
                           >
-                            {row.status.kind === "ready" ? "✓ Ready" : row.status.label}
+                            {hasDeliveryConflict && row.status.kind === "ready" ? "Delivery conflict" : row.status.kind === "ready" ? "✓ Ready" : row.status.label}
                           </span>
                         </td>
                         <td className={tableCellClass}>
@@ -471,6 +474,19 @@ export function Step4ReviewSend({
               <li key={i}>• {b.lineKey ? (b.description ?? "A line") : "This document"} — {b.reason}</li>
             ))}
           </ul>
+
+          {hasDeliveryConflict ? (
+            <div className="mt-3 rounded-lg border border-amber-700 bg-zinc-950/40 p-3">
+              <p className="text-sm text-amber-100">Recorded deliveries must be reviewed before this invoice can continue.</p>
+              <button
+                type="button"
+                onClick={() => onNavigateToStep(2)}
+                className="mt-2 rounded-md border border-amber-500 bg-amber-500/10 px-4 py-1.5 text-sm font-semibold text-amber-300"
+              >
+                Review recorded deliveries
+              </button>
+            </div>
+          ) : null}
 
           {missingDeliveryVerifier && editable ? (
             <div className="mt-3 flex flex-col gap-2 rounded-lg border border-amber-700 bg-zinc-950/40 p-3">

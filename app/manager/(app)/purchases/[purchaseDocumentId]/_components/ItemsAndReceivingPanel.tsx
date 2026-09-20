@@ -44,6 +44,9 @@ import { getPurchaseDocumentPriceReviewAction, acknowledgePriceChangeAction, typ
 import { priceCheckDisplay, priceReviewIsNotable, type PriceCheckDisplay } from "@/app/lib/purchasing/priceReviewPolicy";
 import { PriceReviewCard } from "./PriceReviewCard";
 import { LineActionDrawer } from "./LineActionDrawer";
+import { DeliveryResolver } from "./DeliveryResolver";
+import { getDeliveryResolution } from "@/app/actions/deliveryResolution";
+import type { DeliveryResolutionData } from "@/app/lib/purchaseDocuments/deliveryResolution";
 import { applyPatchToSelected, deriveLineActionScopes, drawerIsDirty, lineIsBulkSelectable } from "@/app/lib/purchaseDocuments/lineBulkAndDrawer";
 import { deriveCompactRowView, type CompactRowView, type RowReceivingBehavior } from "@/app/lib/purchaseDocuments/lineRowPresentation";
 import {
@@ -179,6 +182,10 @@ export function ItemsAndReceivingPanel({
   const [packageReviewLineKey, setPackageReviewLineKey] = useState<string | null>(null);
   const [showNewItemModal, setShowNewItemModal] = useState(false);
   const [autoOpened, setAutoOpened] = useState(false);
+  // Delivery-lineage resolution (ambiguous recorded deliveries) -- fetched
+  // alongside the lines; when AMBIGUOUS, the resolver is shown first in Step 2.
+  const [deliveryResolution, setDeliveryResolution] = useState<DeliveryResolutionData | null>(null);
+  const [deliveryResolutionReloadKey, setDeliveryResolutionReloadKey] = useState(0);
   const [priceComparisons, setPriceComparisons] = useState<Record<string, PriceComparisonResult>>({});
   const [matchingPhase, setMatchingPhase] = useState<"blocking" | "stillActive" | "failed" | "stuck" | null>(null);
   const matchingRunToken = useRef(0);
@@ -896,6 +903,20 @@ export function ItemsAndReceivingPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly, drawerDismissed, editingLineKey, showNewItemModal, newItemCandidates.length, firstUnresolvedKey]);
 
+  // Fetch the delivery-lineage resolution state whenever the lines (re)load or a
+  // resolution is saved. Only the AMBIGUOUS state surfaces the resolver.
+  useEffect(() => {
+    if (lines === null) return;
+    let cancelled = false;
+    getDeliveryResolution(purchaseDocumentId).then((r) => {
+      if (cancelled) return;
+      setDeliveryResolution(r.ok && r.data.status === "AMBIGUOUS" ? r.data : null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [purchaseDocumentId, lines, deliveryResolutionReloadKey]);
+
   if (loading || lines === null) {
     return (
       <div aria-busy="true" className="mt-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
@@ -1079,6 +1100,20 @@ export function ItemsAndReceivingPanel({
     <div className="mt-3 flex flex-col gap-3">
       {matchingBanner}
       {error && !matchingBanner ? <p className="rounded-lg border border-red-800 bg-red-950/20 p-3 text-sm text-red-300">{error}</p> : null}
+
+      {/* Ambiguous delivery lineage: resolve first (shown above the groups; the
+          Ready/Non-inventory sections stay visible below). */}
+      {!readOnly && deliveryResolution ? (
+        <DeliveryResolver
+          purchaseDocumentId={purchaseDocumentId}
+          data={deliveryResolution}
+          onResolved={() => {
+            setDeliveryResolution(null);
+            setDeliveryResolutionReloadKey((k) => k + 1);
+            void load();
+          }}
+        />
+      ) : null}
 
       {alreadyPostedElsewhere ? (
         <div className="rounded-lg border border-sky-700 bg-sky-950/30 p-4">

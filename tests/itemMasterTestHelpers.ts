@@ -99,6 +99,36 @@ export async function getLineKeys(supabase: SupabaseClient, purchaseDocumentId: 
  * which caused exactly this session's earlier flaky-fixture lesson.
  * Delivery-verifier tests need an employee nobody else touches.
  */
+/**
+ * A dedicated app_user with the base 'manager' role -- for tests that need a
+ * real Manager/Admin actor (e.g. delivery-lineage resolution) WITHOUT granting
+ * the manager role to a shared fixture app_user (which would leak the
+ * post_without_second_review permission into the sole-approver suite). Isolated
+ * by a unique employee name, so it never contaminates other suites.
+ */
+export async function ensureManagerAppUser(supabase: SupabaseClient, organizationId: string, name: string): Promise<string> {
+  const { hashPinForStorage, hashPinLookup } = await import("@/app/lib/auth/pin");
+  const pepper = process.env.PIN_PEPPER ?? "test-pepper";
+  const employeeId = await findOrCreateNamedEmployee(supabase, organizationId, name);
+  let appUserId: string;
+  const { data: existing } = await supabase.from("app_users").select("id").eq("employee_id", employeeId).maybeSingle();
+  if (existing) {
+    appUserId = existing.id as string;
+  } else {
+    const pin = String(1000 + Math.floor(Math.random() * 8999));
+    const { data: created, error } = await supabase
+      .from("app_users")
+      .insert({ organization_id: organizationId, employee_id: employeeId, pin_lookup_hash: hashPinLookup(pin, pepper), pin_hash: await hashPinForStorage(pin), is_active: true })
+      .select("id")
+      .single();
+    if (error) throw error;
+    appUserId = created!.id as string;
+  }
+  const { data: role } = await supabase.from("roles").select("id").eq("name", "manager").single();
+  await supabase.from("user_roles").upsert({ app_user_id: appUserId, role_id: role!.id, organization_id: organizationId }, { onConflict: "app_user_id,role_id" });
+  return appUserId;
+}
+
 export async function findOrCreateNamedEmployee(supabase: SupabaseClient, organizationId: string, name: string): Promise<string> {
   const { data: existing } = await supabase.from("employees").select("id").eq("organization_id", organizationId).eq("first_name", name).eq("last_name", "TestFixture").maybeSingle();
   if (existing) return existing.id as string;
