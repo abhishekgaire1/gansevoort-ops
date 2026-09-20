@@ -44,6 +44,7 @@ export type PriceReviewState =
   | "NOT_APPLICABLE" // expense / non-inventory / unresolved -- no price signal
   | "NO_COMPARABLE_HISTORY" // first purchase of this item from this vendor
   | "COMPARISON_UNAVAILABLE" // missing quantity/amount/conversion/currency -- never invent a price
+  | "PENDING_DELIVERY_RESOLUTION" // delivery lineage is AMBIGUOUS -- the effective quantity (and therefore the normalized price) cannot be trusted until the recorded deliveries are resolved; never shown as an actionable price change, never acknowledged
   | "NO_MATERIAL_CHANGE" // comparable, but below the informational threshold
   | "INFORMATIONAL_CHANGE" // 10%..<20% -- surfaced, never blocking
   | "REQUIRES_ACKNOWLEDGMENT" // >=20% and not (validly) acknowledged -- blocks posting
@@ -93,6 +94,8 @@ export function priceCheckDisplay(
       return { text: "No previous comparable purchase", tone: "neutral", direction: null };
     case "COMPARISON_UNAVAILABLE":
       return { text: "Comparison unavailable", tone: "neutral", direction: null };
+    case "PENDING_DELIVERY_RESOLUTION":
+      return { text: "Price check pending — resolve deliveries first", tone: "neutral", direction: null };
     case "NO_MATERIAL_CHANGE":
       return { text: "No material change", tone: "neutral", direction: null };
     case "INFORMATIONAL_CHANGE":

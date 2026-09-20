@@ -1,5 +1,6 @@
 "use server";
 
+import { createHash } from "node:crypto";
 import { requireManagerOrAdmin } from "@/app/lib/auth/managerAuth";
 import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { getDeliveryResolutionData, type DeliveryResolutionData } from "@/app/lib/purchaseDocuments/deliveryResolution";
@@ -9,6 +10,18 @@ import { InsufficientInventoryError, InvalidCorrectionInputError } from "@/app/l
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
+
+/** record_inventory_correction requires a UUID client_request_id. Derive a
+ * STABLE v5-style UUID from the submission's request id + item + location so
+ * the whole batch is idempotent across retries (the same seed always maps to
+ * the same UUID, and each item/location gets its own). */
+function seededRequestUuid(seed: string): string {
+  const b = Buffer.from(createHash("sha1").update(seed).digest().subarray(0, 16));
+  b[6] = (b[6] & 0x0f) | 0x50; // version 5
+  b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = b.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
 
 export type GetDeliveryResolutionResult = { ok: true; data: DeliveryResolutionData } | AuthFailure;
 
@@ -139,8 +152,9 @@ export async function createDeliveryConflictCorrection(input: {
   const correctionIds: string[] = [];
   try {
     for (const item of conflict.items) {
-      // Deterministic per-line request id keeps the whole batch idempotent.
-      const requestId = `${input.clientRequestId}:${item.inventoryItemId}:${item.locationId}`;
+      // Deterministic per-line request UUID keeps the whole batch idempotent
+      // (record_inventory_correction requires a UUID client_request_id).
+      const requestId = seededRequestUuid(`${input.clientRequestId}:${item.inventoryItemId}:${item.locationId}`);
       const result = await recordInventoryCorrection(
         supabase,
         auth.manager.appUserId,

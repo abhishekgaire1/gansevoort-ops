@@ -241,12 +241,16 @@ vi.mock("@/app/lib/receiving/effectiveReceivingEdit", () => ({ getEffectiveRecei
 
 import { getPriceComparisonsForDocument, getPriceHistoryForItem } from "@/app/lib/purchasing/priceComparison";
 
-function fakeSupabase(opts: { vendorId: string | null; lineTotals: Record<string, number | null>; rpcRows: Record<string, unknown>[]; baseQtyRows?: Record<string, unknown>[] }) {
+function fakeSupabase(opts: { vendorId: string | null; lineTotals: Record<string, number | null>; rpcRows: Record<string, unknown>[]; baseQtyRows?: Record<string, unknown>[]; deliveryStatus?: string }) {
   // Route by RPC name: base-qty comes from the shared DB effective-base-quantity
-  // function (§1 parity); baselines come from get_comparable_price_baseline.
+  // function (§1 parity); baselines come from get_comparable_price_baseline;
+  // delivery status gates price suppression while lineage is ambiguous.
   const rpc = vi.fn((name: string) => {
     if (name === "purchase_document_effective_base_quantity") {
       return Promise.resolve({ data: opts.baseQtyRows ?? [], error: null });
+    }
+    if (name === "purchase_document_delivery_status") {
+      return Promise.resolve({ data: opts.deliveryStatus ?? "SINGLE", error: null });
     }
     return Promise.resolve({ data: opts.rpcRows, error: null });
   });
@@ -362,6 +366,33 @@ describe("getPriceComparisonsForDocument", () => {
     const result = await getPriceComparisonsForDocument(supabase as never, "pd-current", "org-1");
 
     expect(result.get("line-new-item")).toEqual({ available: false, reason: "FIRST_PURCHASE" });
+  });
+
+  it("§2: while delivery lineage is AMBIGUOUS, every inventory line is PENDING_DELIVERY_RESOLUTION and no baseline is even looked up (never a fabricated price change)", async () => {
+    getReceivingLinesMock.mockResolvedValue([
+      line({ lineKey: "line-a", inventoryItemId: "item-a", vendorSku: "SKU-A", baseUnitCode: "PIECE", receivingBehavior: "SAME_UNIT", invoicePackageQuantity: 84, fixedConversionFactor: null }),
+      line({ lineKey: "line-b", inventoryItemId: "item-b", vendorSku: "SKU-B", baseUnitCode: "LB", receivingBehavior: "SAME_UNIT", invoicePackageQuantity: 20, fixedConversionFactor: null }),
+    ]);
+    const supabase = fakeSupabase({
+      vendorId: "vendor-bartlett",
+      lineTotals: { "line-a": 367.56, "line-b": 88.0 },
+      // The base-qty function would return the tripled (ambiguous) quantity, but
+      // it must never be turned into an actionable price while ambiguous.
+      baseQtyRows: [
+        { out_line_key: "line-a", out_inventory_item_id: "item-a", out_vendor_sku: "SKU-A", out_base_unit_code: "PIECE", out_line_total: 367.56, out_base_qty: 252 },
+        { out_line_key: "line-b", out_inventory_item_id: "item-b", out_vendor_sku: "SKU-B", out_base_unit_code: "LB", out_line_total: 88.0, out_base_qty: 60 },
+      ],
+      rpcRows: [],
+      deliveryStatus: "AMBIGUOUS",
+    });
+
+    const result = await getPriceComparisonsForDocument(supabase as never, "pd-current", "org-1");
+
+    expect(result.get("line-a")).toEqual({ available: false, reason: "PENDING_DELIVERY_RESOLUTION" });
+    expect(result.get("line-b")).toEqual({ available: false, reason: "PENDING_DELIVERY_RESOLUTION" });
+    // No comparable-baseline lookup happens for a suppressed line.
+    const baselineCalls = (supabase.rpc as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === "get_comparable_price_baseline");
+    expect(baselineCalls).toHaveLength(0);
   });
 });
 

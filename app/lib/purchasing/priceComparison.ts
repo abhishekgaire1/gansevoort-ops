@@ -32,6 +32,7 @@ export type PriceComparisonUnavailableReason =
   | "MISSING_CONVERSION"
   | "AWAITING_RECEIVING_CONFIRMATION"
   | "CURRENCY_UNAVAILABLE"
+  | "PENDING_DELIVERY_RESOLUTION"
   | "FIRST_PURCHASE";
 
 /** One shared currency normalization mirroring the SQL
@@ -223,7 +224,7 @@ export async function getPriceComparisonsForDocument(
   purchaseDocumentId: string,
   organizationId: string
 ): Promise<Map<string, PriceComparisonResult>> {
-  const [{ data: purchaseDocument }, receivingLines, { data: lines }, { data: baseQtyRows }] = await Promise.all([
+  const [{ data: purchaseDocument }, receivingLines, { data: lines }, { data: baseQtyRows }, { data: deliveryStatus }] = await Promise.all([
     supabase.from("purchase_documents").select("vendor_id, currency, document_date").eq("id", purchaseDocumentId).eq("organization_id", organizationId).maybeSingle(),
     getReceivingLines(supabase, purchaseDocumentId, organizationId),
     supabase.from("purchase_document_lines").select("line_key, line_total").eq("purchase_document_id", purchaseDocumentId).eq("organization_id", organizationId),
@@ -231,7 +232,15 @@ export async function getPriceComparisonsForDocument(
     // posting and the GA079 guard use (20260811100178). Never a separate price
     // quantity; duplicates/superseded/stale/non-contributing receipts excluded.
     supabase.rpc("purchase_document_effective_base_quantity", { p_purchase_document_id: purchaseDocumentId, p_organization_id: organizationId }),
+    // Delivery-lineage status: while AMBIGUOUS the effective base quantity is
+    // computed across duplicate lineages (inflated), so the normalized price is
+    // meaningless. Consumers MUST NOT treat that quantity as actionable -- we
+    // return PENDING_DELIVERY_RESOLUTION for every inventory line instead of a
+    // fabricated price change (GA080-before-price ordering, read path).
+    supabase.rpc("purchase_document_delivery_status", { p_purchase_document_id: purchaseDocumentId, p_organization_id: organizationId }),
   ]);
+
+  const deliveryAmbiguous = (deliveryStatus as string | null) === "AMBIGUOUS";
 
   const vendorId = (purchaseDocument?.vendor_id as string | null | undefined) ?? null;
   const currencyRaw = (purchaseDocument?.currency as string | null | undefined) ?? null;
@@ -254,6 +263,14 @@ export async function getPriceComparisonsForDocument(
   const eligible: Eligible[] = [];
 
   for (const info of receivingLines) {
+    // Delivery lineage AMBIGUOUS: never compute or show an actionable price for
+    // an inventory line -- the quantity is inflated across duplicate lineages.
+    // (Non-inventory lines carry no price signal anyway and fall through to
+    // their normal NON_INVENTORY reason.)
+    if (deliveryAmbiguous && info.disposition === "INVENTORY") {
+      results.set(info.lineKey, { available: false, reason: "PENDING_DELIVERY_RESOLUTION" });
+      continue;
+    }
     const lineTotal = lineTotalByKey.get(info.lineKey) ?? null;
     // Authoritative contributing base quantity (same source as posting/GA079).
     const baseQuantity = baseQtyByKey.get(info.lineKey) ?? null;

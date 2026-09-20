@@ -26,6 +26,14 @@ describe("classifyLineOutcome", () => {
     expect(classifyLineOutcome({ status: "CONFIRMED", disposition: "NON_INVENTORY", hasPackageMismatch: false, receivingReady: null })).toBe("expense");
   });
 
+  it("§3: a delivery conflict makes an otherwise-ready inventory line need attention -- it can never read Ready while the lineage is ambiguous (GA080), so counts never contradict the delivery-conflict banner", () => {
+    expect(classifyLineOutcome({ ...readyLine, hasDeliveryConflict: true })).toBe("needs_attention");
+    // A correctly-classified expense is unaffected by delivery ambiguity.
+    expect(classifyLineOutcome({ status: "CONFIRMED", disposition: "NON_INVENTORY", hasPackageMismatch: false, receivingReady: null, hasDeliveryConflict: true })).toBe("expense");
+    // Without the conflict flag the same line is ready.
+    expect(classifyLineOutcome({ ...readyLine, hasDeliveryConflict: false })).toBe("ready");
+  });
+
   it("a posting blocker (e.g. received unit not matching the base unit, which the invoice-unit check can't see) makes an otherwise-ready line need attention -- so it can't read Ready here and fail at posting", () => {
     expect(classifyLineOutcome({ ...readyLine, hasPostingBlocker: true })).toBe("needs_attention");
     // Explicitly false / omitted leaves a ready line ready.

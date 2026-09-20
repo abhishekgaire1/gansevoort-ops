@@ -68,7 +68,9 @@ SUPABASE_PUBLISHABLE_KEY="$ISOLATED_SUPABASE_PUBLISHABLE_KEY" \
     tests/inventoryBalances.rpc.test.ts \
     tests/purchaseUsageUnits.rpc.test.ts \
     tests/deliveryResolution.rpc.test.ts \
-    tests/deliveryLineagePostingGuard.rpc.test.ts
+    tests/deliveryLineagePostingGuard.rpc.test.ts \
+    tests/deliveryBeforePriceOrdering.rpc.test.ts \
+    tests/postedDeliveryConflict.rpc.test.ts
 VITEST_EXIT=$?
 set -e
 

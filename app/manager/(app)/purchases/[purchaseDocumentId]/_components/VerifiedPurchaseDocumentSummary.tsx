@@ -22,6 +22,9 @@ import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, RevisionSummary
 import type { PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
 import type { ReceiptHistoryEntry } from "@/app/lib/purchaseDocuments/getReceiptHistory";
 import { lineLevelBlockers } from "@/app/lib/purchaseDocuments/preparationBlockers";
+import { getDeliveryResolution } from "@/app/actions/deliveryResolution";
+import type { DeliveryResolutionData } from "@/app/lib/purchaseDocuments/deliveryResolution";
+import { DeliveryResolver } from "./DeliveryResolver";
 
 /**
  * The VERIFIED page -- a READ-ONLY operational record of what Manager 1
@@ -130,6 +133,12 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
   // was recorded" blocker getPreparationStatus already computes for Step
   // 3/4, reused here rather than re-implemented).
   const [packageMismatchBlockerDescriptions, setPackageMismatchBlockerDescriptions] = useState<string[]>([]);
+  // AMBIGUOUS delivery lineage on a verified-but-unposted document: posting is
+  // blocked by GA080, so this must never read "Ready to Post". The manager
+  // resolves the recorded deliveries here first (append-only; changes no
+  // inventory), then posts.
+  const [deliveryResolution, setDeliveryResolution] = useState<DeliveryResolutionData | null>(null);
+  const [deliveryReloadKey, setDeliveryReloadKey] = useState(0);
 
   useEffect(() => {
     if (!props.isCurrentVerified) return;
@@ -139,7 +148,8 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
       getReceiptHistoryForPurchaseDocument(props.purchaseDocumentId),
       getPurchaseDocumentInventoryPosting(props.purchaseDocumentId),
       getPurchaseDocumentPreparationStatus(props.purchaseDocumentId),
-    ]).then(([summaryResult, historyResult, postingResult, preparationResult]) => {
+      getDeliveryResolution(props.purchaseDocumentId),
+    ]).then(([summaryResult, historyResult, postingResult, preparationResult, deliveryResult]) => {
       if (cancelled) return;
       if (summaryResult.ok) setSummary(summaryResult.summary);
       if (historyResult.ok) setHistory(historyResult.history);
@@ -148,11 +158,12 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
         const mismatchBlockers = lineLevelBlockers(preparationResult.status.blockers).filter((b) => /unit configuration changed/i.test(b.reason));
         setPackageMismatchBlockerDescriptions(mismatchBlockers.map((b) => b.description ?? "Line"));
       }
+      setDeliveryResolution(deliveryResult.ok && deliveryResult.data.status === "AMBIGUOUS" ? deliveryResult.data : null);
     });
     return () => {
       cancelled = true;
     };
-  }, [props.purchaseDocumentId, props.isCurrentVerified]);
+  }, [props.purchaseDocumentId, props.isCurrentVerified, deliveryReloadKey]);
 
   const typeLabel = props.header.documentType ? (DOCUMENT_TYPE_LABEL[props.header.documentType] ?? props.header.documentType) : "Document";
   const receivingAllComplete = summary ? summary.receivingCompleteCount === summary.receivingTotalCount && summary.receivingTotalCount > 0 : false;
@@ -166,7 +177,8 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
   // one sticky top-level workflow action, never buried in the Inventory
   // Posting card further down the page. Non-inventory-only documents never
   // reach this (requiredLineCount === 0), matching Part 35.
-  const readyToPost = Boolean(props.isCurrentVerified && posting && posting.status !== "POSTED" && posting.requiredLineCount > 0);
+  // A delivery conflict blocks posting (GA080) -- never "Ready to Post" until resolved.
+  const readyToPost = Boolean(props.isCurrentVerified && posting && posting.status !== "POSTED" && posting.requiredLineCount > 0 && deliveryResolution === null);
 
   async function handleDownload() {
     setDownloadPending(true);
@@ -286,6 +298,25 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
             ) : null}
           </div>
         </div>
+
+        {/* ============ DELIVERY CONFLICT (blocks posting -- GA080) ============ */}
+        {props.isCurrentVerified && deliveryResolution && posting && posting.status !== "POSTED" ? (
+          <div className="mt-4">
+            <div className="rounded-xl border border-red-800 bg-red-950/20 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-red-400">Delivery conflict — resolve before posting</p>
+              <p className="mt-1 text-sm text-zinc-300">
+                The same physical delivery was recorded more than once, so the effective quantity cannot be trusted. Posting is blocked until you confirm whether these are separate deliveries or duplicates. This does not change inventory.
+              </p>
+            </div>
+            <div className="mt-3">
+              <DeliveryResolver
+                purchaseDocumentId={props.purchaseDocumentId}
+                data={deliveryResolution}
+                onResolved={() => setDeliveryReloadKey((k) => k + 1)}
+              />
+            </div>
+          </div>
+        ) : null}
 
         {/* ============ READY TO POST ============ */}
         {/* Receiving UX Interaction System pass, Part 32-33: the ONE

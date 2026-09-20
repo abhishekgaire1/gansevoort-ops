@@ -82,6 +82,8 @@ function unavailableState(reason: Extract<PriceComparisonResult, { available: fa
       return "NOT_APPLICABLE";
     case "FIRST_PURCHASE":
       return "NO_COMPARABLE_HISTORY";
+    case "PENDING_DELIVERY_RESOLUTION":
+      return "PENDING_DELIVERY_RESOLUTION";
     case "NO_VENDOR":
     case "MISSING_LINE_TOTAL":
     case "MISSING_CONVERSION":

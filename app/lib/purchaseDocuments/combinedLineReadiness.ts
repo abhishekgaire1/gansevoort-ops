@@ -29,10 +29,20 @@ export interface CombinedLineReadinessInput {
    * unit whose RECEIVED unit still differs from the item's base unit), so
    * a line can no longer read "Ready" here and then fail at posting. */
   hasPostingBlocker?: boolean;
+  /** True when this inventory line is part of an AMBIGUOUS delivery lineage
+   * (the same physical delivery recorded more than once). Posting is blocked
+   * by GA080 until the recorded deliveries are resolved, so such a line can
+   * NEVER read "Ready" -- it is a delivery conflict the manager must resolve
+   * first. This is what keeps the Ready / Needs-attention counts from ever
+   * contradicting the delivery-conflict banner. */
+  hasDeliveryConflict?: boolean;
 }
 
 export function classifyLineOutcome(input: CombinedLineReadinessInput): LineOutcome {
   if (input.status === "CONFIRMED" && input.disposition === "NON_INVENTORY") return "expense";
+  // A delivery conflict blocks an inventory line before any other check -- it
+  // would multiply inventory at posting, so it can never be "ready".
+  if (input.hasDeliveryConflict) return "needs_attention";
   if (input.status !== "CONFIRMED") return "needs_attention";
   if (input.disposition !== "INVENTORY") return "needs_attention";
   if (input.hasPackageMismatch) return "needs_attention";

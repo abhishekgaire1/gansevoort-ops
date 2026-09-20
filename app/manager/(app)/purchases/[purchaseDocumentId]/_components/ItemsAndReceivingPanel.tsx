@@ -844,12 +844,18 @@ export function ItemsAndReceivingPanel({
   // "2 of 9 reviewed" while this same panel's own completion banner said
   // "ALL 9 LINES REVIEWED" -- there is now exactly one.
   const receivingByLineKey = new Map(receivingLineState.map((l) => [l.lineKey, l]));
+  // Lines whose delivery lineage is AMBIGUOUS (deliveryResolution is non-null
+  // only in that state). These can never read "Ready" -- they are delivery
+  // conflicts that gate posting until resolved (GA080), and they drive the
+  // "Delivery conflict" label + counts consistently across the whole step.
+  const deliveryConflictKeys = new Set(deliveryResolution?.affectedLineKeys ?? []);
   const combinedLines = (lines ?? []).map((line) => {
     const receiving = receivingByLineKey.get(line.lineKey) ?? null;
     const receivingReady = line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null;
     const postingBlockerReason = line.lineKey !== null ? (postingBlockersByLineKey.get(line.lineKey) ?? null) : null;
-    const outcome = classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady, hasPostingBlocker: postingBlockerReason !== null });
-    return { line, receiving, outcome, postingBlockerReason };
+    const hasDeliveryConflict = line.lineKey !== null && deliveryConflictKeys.has(line.lineKey);
+    const outcome = classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady, hasPostingBlocker: postingBlockerReason !== null, hasDeliveryConflict });
+    return { line, receiving, outcome, postingBlockerReason, hasDeliveryConflict };
   });
   const summary = summarizeCombinedStep(combinedLines.map((c) => c.outcome));
   // Fold unacknowledged significant price changes into the SAME readiness
@@ -970,6 +976,9 @@ export function ItemsAndReceivingPanel({
   // PLUS unacknowledged significant price changes.
   const blockingIssueCount = summary.needsAttentionCount + priceAckLines.length;
   const stepAllResolved = summary.allResolved && priceAckLines.length === 0;
+  // How many of the needs-attention lines are delivery conflicts (a subset of
+  // needsAttentionCount, never added on top of it -- keeps counts consistent).
+  const deliveryConflictCount = combinedLines.filter((c) => c.hasDeliveryConflict).length;
 
   // The ordered list of unresolved operational lines the correction drawer
   // navigates with Previous/Next. (Unacknowledged price changes are handled by
@@ -1029,11 +1038,12 @@ export function ItemsAndReceivingPanel({
     return priceCheckDisplay(review.state, c ? { direction: c.direction, deltaPct: c.deltaPct, vendorName: c.previous.vendorName } : null);
   };
 
-  const renderLine = ({ line, receiving, outcome, postingBlockerReason }: (typeof combinedLines)[number]) => (
+  const renderLine = ({ line, receiving, outcome, postingBlockerReason, hasDeliveryConflict }: (typeof combinedLines)[number]) => (
     <LineCard
       key={line.lineKey}
       id={`classification-line-${line.lineKey}`}
       outcome={outcome}
+      deliveryConflict={hasDeliveryConflict}
       line={line}
       receiving={receiving}
       priceCheck={priceCheckFor(line.lineKey)}
@@ -1193,6 +1203,11 @@ export function ItemsAndReceivingPanel({
                 <p className="text-sm font-medium text-zinc-200 tabular-nums">
                   {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {summary.needsAttentionCount} needs attention · {summary.readyCount} ready inventory · {summary.expenseCount} non-inventory
                 </p>
+                {deliveryConflictCount > 0 ? (
+                  <p className="mt-0.5 text-xs font-semibold text-red-300 tabular-nums">
+                    {deliveryConflictCount} delivery conflict{deliveryConflictCount === 1 ? "" : "s"} — resolve the recorded deliveries before these lines can post
+                  </p>
+                ) : null}
                 {blockingIssueCount > 0 ? (
                   <p className="mt-0.5 text-xs font-medium text-amber-300 tabular-nums">
                     {blockingIssueCount} issue{blockingIssueCount === 1 ? "" : "s"} must be resolved before Review &amp; Post
@@ -1732,6 +1747,7 @@ function formatPurchasePackageDescription(line: LineClassificationRow): string {
 function LineCard({
   id,
   outcome,
+  deliveryConflict,
   line,
   receiving,
   postingBlockerReason,
@@ -1778,6 +1794,9 @@ function LineCard({
 }: {
   id: string;
   outcome: LineOutcome;
+  /** True when this line is part of an AMBIGUOUS delivery lineage -- shown as
+   * a distinct "Delivery conflict" reason, and the reason it is not Ready. */
+  deliveryConflict?: boolean;
   line: LineClassificationRow;
   receiving: ReceivingLineDraft | null;
   /** The authoritative posting-scan reason this line would be refused at
@@ -1943,14 +1962,18 @@ function LineCard({
       receiving,
     });
     // A short problem cue lives on the row; the FULL, untruncated error text
-    // is shown beside the field in the auto-opened drawer.
-    const issueText = issue?.text ?? postingBlockerReason ?? "Needs attention";
+    // is shown beside the field in the auto-opened drawer. A delivery conflict
+    // is the overriding reason -- it must be resolved before anything else on
+    // the line matters, so it is labeled distinctly (GA080).
+    const issueText = deliveryConflict
+      ? "Recorded more than once — resolve the deliveries before this line can post"
+      : (issue?.text ?? postingBlockerReason ?? "Needs attention");
     return (
       <CompactInventoryRow
         id={id}
         rowView={buildCompactRowView(line, receiving, priceComparison, priceCheck, locations)}
         attention
-        statusLabel="Needs attention"
+        statusLabel={deliveryConflict ? "Delivery conflict" : "Needs attention"}
         issueText={issueText}
         priceToneClass={priceCheckToneClass(priceCheck)}
         selectable={selectable}

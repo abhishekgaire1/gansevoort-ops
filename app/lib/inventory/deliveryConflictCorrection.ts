@@ -78,12 +78,12 @@ export async function getPostedDeliveryConflict(
     supabase.rpc("purchase_document_delivery_status", { p_purchase_document_id: purchaseDocumentId, p_organization_id: organizationId }),
     supabase
       .from("purchase_document_inventory_postings")
-      .select("id, created_at")
+      .select("id, posted_at")
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", organizationId),
   ]);
 
-  const postingRows = (postings ?? []) as { id: string; created_at: string | null }[];
+  const postingRows = (postings ?? []) as { id: string; posted_at: string | null }[];
   if (postingRows.length === 0) return empty;
 
   // AMBIGUOUS means an unresolved duplicate lineage; RESOLVED-but-posted with a
@@ -190,7 +190,7 @@ export async function getPostedDeliveryConflict(
     purchaseDocumentId,
     isPostedConflict: items.length > 0,
     postingIds,
-    postedAt: postingRows.map((p) => p.created_at).filter((x): x is string => !!x).sort()[0] ?? null,
+    postedAt: postingRows.map((p) => p.posted_at).filter((x): x is string => !!x).sort()[0] ?? null,
     movementIds: Array.from(allMovementIds),
     items,
   };
