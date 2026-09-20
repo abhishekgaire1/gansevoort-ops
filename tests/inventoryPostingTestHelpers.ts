@@ -61,7 +61,12 @@ export async function createSubmittedPostingDocument(
   supabase: SupabaseClient,
   fx: RpcTestFixtures,
   primaryLocationId: string,
-  specs: PostingTestLineSpec[]
+  specs: PostingTestLineSpec[],
+  /** Records N ADDITIONAL DELIVERY receipts (identical lines, null event id)
+   * before submit -- reproduces the ambiguous duplicate-delivery shape for the
+   * GA080 guard tests. Default 0 (normal single-delivery document).
+   * skipSubmit leaves the document in DRAFT (for the sole-approver path). */
+  opts?: { extraNullEventDeliveries?: number; skipSubmit?: boolean }
 ): Promise<SubmittedPostingDocument> {
   const spendCategoryId = await findOrCreateThrowawaySpendCategory(supabase, fx.organizationId);
   const { data: categoryRow } = await supabase.from("inventory_items").select("category_id").eq("id", fx.noRuleItemId).single();
@@ -120,33 +125,50 @@ export async function createSubmittedPostingDocument(
     itemIds.push(result.inventoryItemId);
   }
 
+  const deliveryLines = specs
+    .map((spec, index) =>
+      spec.receiving === null
+        ? null
+        : {
+            lineNumberSnapshot: index + 1,
+            matchedLineKey: lineKeys[index],
+            vendorSkuSnapshot: `POST-${runTag}-${index}`,
+            descriptionSnapshot: spec.description,
+            invoicePackageQuantity: spec.receiving.receivedQuantity,
+            invoicePackageUnit: spec.receiving.receivedUnit,
+            invoiceMeasuredQuantity: null,
+            invoiceMeasuredUnit: null,
+            actualReceivedPackageQuantity: spec.receiving.receivedQuantity,
+            actualReceivedPackageUnit: spec.receiving.receivedUnit,
+            actualVerifiedBaseQuantity: spec.receiving.verifiedBaseQuantity ?? null,
+            actualVerifiedBaseUnitId: null,
+            locationId: spec.receiving.locationId ?? primaryLocationId,
+          }
+    )
+    .filter((line): line is NonNullable<typeof line> => line !== null);
+
   await recordReceiptRpc(supabase, {
     organizationId: fx.organizationId,
     appUserId: fx.changeableEmployeeAppUserId,
     receiptKind: "DELIVERY",
     purchaseDocumentId,
-    lines: specs
-      .map((spec, index) =>
-        spec.receiving === null
-          ? null
-          : {
-              lineNumberSnapshot: index + 1,
-              matchedLineKey: lineKeys[index],
-              vendorSkuSnapshot: `POST-${runTag}-${index}`,
-              descriptionSnapshot: spec.description,
-              invoicePackageQuantity: spec.receiving.receivedQuantity,
-              invoicePackageUnit: spec.receiving.receivedUnit,
-              invoiceMeasuredQuantity: null,
-              invoiceMeasuredUnit: null,
-              actualReceivedPackageQuantity: spec.receiving.receivedQuantity,
-              actualReceivedPackageUnit: spec.receiving.receivedUnit,
-              actualVerifiedBaseQuantity: spec.receiving.verifiedBaseQuantity ?? null,
-              actualVerifiedBaseUnitId: null,
-              locationId: spec.receiving.locationId ?? primaryLocationId,
-            }
-      )
-      .filter((line): line is NonNullable<typeof line> => line !== null),
+    lines: deliveryLines,
   });
+
+  // Optional: additional independent DELIVERY receipts with NO delivery_event_id
+  // -- the ambiguous historical-duplicate shape the GA080 guard must reject.
+  for (let extra = 0; extra < (opts?.extraNullEventDeliveries ?? 0); extra += 1) {
+    await recordReceiptRpc(supabase, {
+      organizationId: fx.organizationId,
+      appUserId: fx.changeableEmployeeAppUserId,
+      receiptKind: "DELIVERY",
+      purchaseDocumentId,
+      lines: deliveryLines,
+      // Distinct idempotency key so it is a genuinely separate receipt row; no
+      // delivery_event_id -> ambiguous lineage (never auto-summed).
+      idempotencyKey: `${runTag}:extra-delivery:${extra}`,
+    });
+  }
 
   await correctDocumentDeliveryVerifierRpc(supabase, {
     documentId,
@@ -154,6 +176,10 @@ export async function createSubmittedPostingDocument(
     appUserId: fx.changeableEmployeeAppUserId,
     newEmployeeId: deliveryVerifierEmployeeId,
   });
+
+  if (opts?.skipSubmit) {
+    return { purchaseDocumentId, documentId, lineKeys, itemIds, submittedVersion: 1 };
+  }
 
   const submitted = await submitPurchaseDocumentForVerificationRpc(supabase, {
     purchaseDocumentId,
@@ -169,9 +195,10 @@ export async function createVerifiedPostingDocument(
   supabase: SupabaseClient,
   fx: RpcTestFixtures,
   primaryLocationId: string,
-  specs: PostingTestLineSpec[]
+  specs: PostingTestLineSpec[],
+  opts?: { extraNullEventDeliveries?: number }
 ): Promise<VerifiedPostingDocument> {
-  const submitted = await createSubmittedPostingDocument(supabase, fx, primaryLocationId, specs);
+  const submitted = await createSubmittedPostingDocument(supabase, fx, primaryLocationId, specs, opts);
   await verifyPurchaseDocumentRpc(supabase, {
     purchaseDocumentId: submitted.purchaseDocumentId,
     organizationId: fx.organizationId,

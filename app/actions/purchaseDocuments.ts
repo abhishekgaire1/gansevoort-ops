@@ -41,6 +41,7 @@ import {
   SoleApproverPermissionDeniedError,
   SoleApproverReasonRequiredError,
   PriceReviewRequiredError,
+  DeliveryConflictError,
 } from "@/app/lib/purchaseDocuments/errors";
 import { InventoryPostingBlockedError, AmendmentLineageAlreadyPostedError, type InventoryPostingBlocker } from "@/app/lib/inventory/errors";
 import { isAmbiguousDeliveryLineage, AMBIGUOUS_DELIVERY_REASON } from "@/app/lib/purchaseDocuments/duplicateDelivery";
@@ -879,6 +880,7 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
     const isKnownRejection =
       isKnownInventoryError ||
       err instanceof PriceReviewRequiredError ||
+      err instanceof DeliveryConflictError ||
       err instanceof SoleApproverPermissionDeniedError ||
       err instanceof SoleApproverReasonRequiredError ||
       err instanceof PreparationIncompleteError ||
@@ -904,6 +906,11 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
         message: "The price or received quantity changed after acknowledgment, or a significant price change has not been reviewed. Review the price change again in Items & Receiving before posting.",
         reference: "GA079",
       };
+    }
+    if (err instanceof DeliveryConflictError) {
+      // Ambiguous delivery lineage raised by the database posting guard (GA080),
+      // independent of price -- direct-RPC-proof backstop.
+      return { ok: false, reason: "delivery_conflict", message: AMBIGUOUS_DELIVERY_REASON, reference: "GA080" };
     }
     if (err instanceof SoleApproverPermissionDeniedError) {
       return { ok: false, reason: "not_eligible", message: "You do not have permission to post without a second reviewer." };

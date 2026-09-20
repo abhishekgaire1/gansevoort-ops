@@ -1,7 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { mapInventoryRpcError } from "@/app/lib/inventory/errors";
-import { mapPurchaseDocumentRpcError, PriceReviewRequiredError, PURCHASE_DOCUMENT_SQLSTATE } from "@/app/lib/purchaseDocuments/errors";
+import { mapPurchaseDocumentRpcError, PriceReviewRequiredError, DeliveryConflictError, PURCHASE_DOCUMENT_SQLSTATE } from "@/app/lib/purchaseDocuments/errors";
 
 export interface PostPurchaseDocumentInventoryInput {
   purchaseDocumentId: string;
@@ -36,6 +36,7 @@ export async function postPurchaseDocumentInventoryRpc(
     // is always the price-review guard (never inventory-correction input).
     if (error.code === "GA003") throw mapPurchaseDocumentRpcError(error);
     if (error.code === PURCHASE_DOCUMENT_SQLSTATE.PRICE_REVIEW_REQUIRED) throw new PriceReviewRequiredError(error.message);
+    if (error.code === PURCHASE_DOCUMENT_SQLSTATE.DELIVERY_CONFLICT) throw new DeliveryConflictError(error.message);
     throw mapInventoryRpcError(error);
   }
 

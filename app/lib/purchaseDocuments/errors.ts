@@ -30,6 +30,12 @@ export const PURCHASE_DOCUMENT_SQLSTATE = {
    * GA079 can ONLY be this guard (the correction RPCs are a different path), so
    * the posting wrappers map it here unambiguously. */
   PRICE_REVIEW_REQUIRED: "GA079",
+  /** The posting-boundary delivery-lineage guard (assert_delivery_lineage_
+   * unambiguous, 20260811100172) refused: this document has ambiguous delivery
+   * lineage (the same physical delivery recorded more than once, or historical/
+   * unidentified duplicates) that would multiply inventory. Dedicated to
+   * delivery integrity -- never reused by price or correction codes. */
+  DELIVERY_CONFLICT: "GA080",
 } as const;
 
 /** The purchase document's version didn't match, or it wasn't in the
@@ -142,6 +148,15 @@ export class PriceReviewRequiredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "PriceReviewRequiredError";
+  }
+}
+
+/** The posting-boundary delivery-lineage guard refused (GA080): ambiguous
+ * delivery lineage must be reviewed before inventory can post. */
+export class DeliveryConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeliveryConflictError";
   }
 }
 

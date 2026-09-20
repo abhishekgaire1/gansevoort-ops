@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { mapPurchaseDocumentRpcError, PriceReviewRequiredError, PURCHASE_DOCUMENT_SQLSTATE } from "@/app/lib/purchaseDocuments/errors";
+import { mapPurchaseDocumentRpcError, PriceReviewRequiredError, DeliveryConflictError, PURCHASE_DOCUMENT_SQLSTATE } from "@/app/lib/purchaseDocuments/errors";
 import { mapInventoryRpcError, INVENTORY_SQLSTATE } from "@/app/lib/inventory/errors";
 import type { SoleApproverReasonCode } from "@/app/lib/purchaseDocuments/soleApproverReason";
 
@@ -68,6 +68,9 @@ function mapSoleApproverRpcError(error: { code?: string; message: string; detail
   // the generic inventory check that would otherwise mislabel it.
   if (error.code === PURCHASE_DOCUMENT_SQLSTATE.PRICE_REVIEW_REQUIRED) {
     return new PriceReviewRequiredError(error.message);
+  }
+  if (error.code === PURCHASE_DOCUMENT_SQLSTATE.DELIVERY_CONFLICT) {
+    return new DeliveryConflictError(error.message);
   }
   if (error.code && (Object.values(INVENTORY_SQLSTATE) as string[]).includes(error.code)) {
     return mapInventoryRpcError(error);
