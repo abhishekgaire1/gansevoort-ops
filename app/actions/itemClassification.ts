@@ -466,6 +466,9 @@ export interface ApproveNewItemClassificationInput {
   secondaryUsageUnitCode?: string | null;
   secondaryConversionFactor?: number | null;
   secondaryRequiresMeasurement?: boolean;
+  /** Written explanation for a line classified to a catch-all expense
+   * category that requires one (e.g. "Other Non-inventory Expense"). */
+  explanation?: string | null;
 }
 
 export type ApproveClassificationResult =
@@ -473,7 +476,7 @@ export type ApproveClassificationResult =
   | AuthFailure
   | {
       ok: false;
-      reason: "line_not_found" | "not_pending" | "not_preparer" | "duplicate_item_name" | "line_conflict" | "invalid_usage_unit" | "misconfigured";
+      reason: "line_not_found" | "not_pending" | "not_preparer" | "duplicate_item_name" | "line_conflict" | "invalid_usage_unit" | "explanation_required" | "misconfigured";
       message: string;
       existingItemId?: string | null;
       existingItemName?: string | null;
@@ -483,8 +486,27 @@ export async function approveNewItemClassification(input: ApproveNewItemClassifi
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
+  const supabase = getServiceRoleClient();
+
+  // Catch-all expense categories require a written explanation. Enforce it
+  // server-side (never trust the client): if the chosen expense category is
+  // flagged requires_explanation and no explanation was given, reject
+  // before persisting anything.
+  const explanation = input.explanation?.trim() ? input.explanation.trim() : null;
+  if (input.disposition === "NON_INVENTORY" && input.spendCategoryId) {
+    const { data: cat } = await supabase
+      .from("spend_categories")
+      .select("requires_explanation")
+      .eq("id", input.spendCategoryId)
+      .eq("organization_id", auth.manager.organizationId)
+      .maybeSingle();
+    if (cat?.requires_explanation && !explanation) {
+      return { ok: false, reason: "explanation_required", message: "A written explanation is required for this expense category." };
+    }
+  }
+
   try {
-    const result = await approveLineClassificationNewItemRpc(getServiceRoleClient(), {
+    const result = await approveLineClassificationNewItemRpc(supabase, {
       purchaseDocumentId: input.purchaseDocumentId,
       lineKey: input.lineKey,
       organizationId: auth.manager.organizationId,
@@ -503,6 +525,17 @@ export async function approveNewItemClassification(input: ApproveNewItemClassifi
       secondaryConversionFactor: input.secondaryConversionFactor,
       secondaryRequiresMeasurement: input.secondaryRequiresMeasurement,
     });
+    // Persist the explanation onto the line classification (audited). Only
+    // for non-inventory lines that carry one.
+    if (input.disposition === "NON_INVENTORY" && explanation) {
+      await supabase.rpc("set_line_classification_explanation", {
+        p_organization_id: auth.manager.organizationId,
+        p_actor_app_user_id: auth.manager.appUserId,
+        p_purchase_document_id: input.purchaseDocumentId,
+        p_line_key: input.lineKey,
+        p_explanation: explanation,
+      });
+    }
     return { ok: true, inventoryItemId: result.inventoryItemId };
   } catch (err) {
     return mapClassificationApprovalError(err);

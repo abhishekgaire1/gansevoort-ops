@@ -83,3 +83,29 @@ export async function setSpendCategoryActiveRpc(
   });
   if (error) throw mapItemMasterRpcError(error);
 }
+
+export async function updateInventoryCategoryDescriptionRpc(
+  supabase: SupabaseClient,
+  input: { organizationId: string; appUserId: string; categoryId: string; description: string | null }
+): Promise<void> {
+  const { error } = await supabase.rpc("update_inventory_category_description", {
+    p_organization_id: input.organizationId,
+    p_actor_app_user_id: input.appUserId,
+    p_category_id: input.categoryId,
+    p_description: input.description,
+  });
+  if (error) throw mapItemMasterRpcError(error);
+}
+
+export async function updateSpendCategoryDescriptionRpc(
+  supabase: SupabaseClient,
+  input: { organizationId: string; appUserId: string; categoryId: string; description: string | null }
+): Promise<void> {
+  const { error } = await supabase.rpc("update_spend_category_description", {
+    p_organization_id: input.organizationId,
+    p_actor_app_user_id: input.appUserId,
+    p_category_id: input.categoryId,
+    p_description: input.description,
+  });
+  if (error) throw mapItemMasterRpcError(error);
+}

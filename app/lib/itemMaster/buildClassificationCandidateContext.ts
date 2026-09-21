@@ -28,7 +28,9 @@ export async function buildClassificationCandidateContext(supabase: SupabaseClie
 
   return {
     inventoryCategories: (categoryRows ?? []).map((c) => ({ id: c.id as string, name: c.name as string })),
-    spendCategories,
+    // The AI only needs id + path to pick from; requiresExplanation is a
+    // manager-UI concern, deliberately not part of the AI candidate context.
+    spendCategories: spendCategories.map((s) => ({ id: s.id, path: s.path })),
     units: (unitRows ?? []).map((u) => ({ code: u.code as string, name: u.name as string })),
   };
 }

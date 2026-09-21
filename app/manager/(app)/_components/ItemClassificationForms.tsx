@@ -324,6 +324,7 @@ export function NewItemApprovalForm({
   // toggle, their explicit choice wins from then on.
   const [advancedManuallyOpen, setAdvancedManuallyOpen] = useState<boolean | null>(null);
   const [categoryDiscrepancyAcknowledged, setCategoryDiscrepancyAcknowledged] = useState(false);
+  const [explanation, setExplanation] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -382,7 +383,13 @@ export function NewItemApprovalForm({
     setAdvancedManuallyOpen(true);
   }
 
-  const canVerifyOverall = canVerify && (!categoryConfirmationNeeded || categoryDiscrepancyAcknowledged);
+  // Catch-all expense categories (e.g. "Other Non-inventory Expense")
+  // require a written explanation on the line before it can be verified.
+  const selectedSpendRequiresExplanation =
+    disposition === "NON_INVENTORY" && (spendPaths.find((s) => s.id === spendCategoryId)?.requiresExplanation ?? false);
+  const explanationSatisfied = !selectedSpendRequiresExplanation || explanation.trim() !== "";
+
+  const canVerifyOverall = canVerify && (!categoryConfirmationNeeded || categoryDiscrepancyAcknowledged) && explanationSatisfied;
 
   async function handleVerify() {
     if (!canVerifyOverall) return;
@@ -403,6 +410,7 @@ export function NewItemApprovalForm({
       secondaryUsageUnitCode: hasSecondaryUsageUnit ? secondaryUsageUnitCode : null,
       secondaryConversionFactor: hasSecondaryUsageUnit && !secondaryRequiresMeasurement ? Number(secondaryConversionFactor) : null,
       secondaryRequiresMeasurement: hasSecondaryUsageUnit ? secondaryRequiresMeasurement : false,
+      explanation: disposition === "NON_INVENTORY" && explanation.trim() !== "" ? explanation.trim() : null,
     });
     if (!result.ok) {
       setPending(false);
@@ -453,8 +461,8 @@ export function NewItemApprovalForm({
               onChange={(e) => setDisposition(e.target.value as "INVENTORY" | "NON_INVENTORY")}
               className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100"
             >
-              <option value="INVENTORY">Inventory</option>
-              <option value="NON_INVENTORY">Non-inventory</option>
+              <option value="INVENTORY">Inventory item</option>
+              <option value="NON_INVENTORY">Expense</option>
             </select>
           </label>
         ) : (
@@ -480,7 +488,7 @@ export function NewItemApprovalForm({
             {categoryConfirmationNeeded ? (
               <div className="flex flex-col gap-1.5 rounded-lg border border-amber-800 bg-amber-950/20 px-3 py-2">
                 <p className="text-[11px] text-amber-300">
-                  Inventory category (&ldquo;{categoryName}&rdquo;) and spend category (&ldquo;{spendPath}&rdquo;) are different -- confirm this is intentional.
+                  Inventory category (&ldquo;{categoryName}&rdquo;) and expense category (&ldquo;{spendPath}&rdquo;) are different -- confirm this is intentional.
                 </p>
                 <label className="flex items-center gap-2 text-[11px] text-zinc-300">
                   <input type="checkbox" checked={categoryDiscrepancyAcknowledged} onChange={(e) => setCategoryDiscrepancyAcknowledged(e.target.checked)} />
@@ -511,7 +519,7 @@ export function NewItemApprovalForm({
               </label>
               <label className="flex flex-col gap-1 text-xs text-zinc-400">
                 <span className="flex items-center gap-2">
-                  Spend category
+                  Expense category
                   {spendCategoryStatus === "ai" ? <AiBadge /> : null}
                 </span>
                 <select
@@ -532,25 +540,40 @@ export function NewItemApprovalForm({
             </div>
           </div>
         ) : (
-          <label className="flex flex-col gap-1 text-xs text-zinc-400">
-            <span className="flex items-center gap-2">
-              Spend category
-              {spendCategoryStatus === "ai" ? <AiBadge /> : null}
-            </span>
-            <select
-              value={spendCategoryId}
-              onChange={(e) => setSpendCategoryId(e.target.value)}
-              className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 ${!spendCategoryId ? "border-red-700" : "border-zinc-700"}`}
-            >
-              <option value="">Select category…</option>
-              {spendPaths.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.path}
-                </option>
-              ))}
-            </select>
-            <CategoryNotListedHint onRefresh={onSpendCategoryCreated} />
-          </label>
+          <div className="flex flex-col gap-2">
+            <p className="text-[11px] text-zinc-500">This line will not add inventory.</p>
+            <label className="flex flex-col gap-1 text-xs text-zinc-400">
+              <span className="flex items-center gap-2">
+                Expense category
+                {spendCategoryStatus === "ai" ? <AiBadge /> : null}
+              </span>
+              <select
+                value={spendCategoryId}
+                onChange={(e) => setSpendCategoryId(e.target.value)}
+                className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 ${!spendCategoryId ? "border-red-700" : "border-zinc-700"}`}
+              >
+                <option value="">Select category…</option>
+                {spendPaths.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.path}
+                  </option>
+                ))}
+              </select>
+              <CategoryNotListedHint onRefresh={onSpendCategoryCreated} />
+            </label>
+            {selectedSpendRequiresExplanation ? (
+              <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                <span>Explanation *</span>
+                <textarea
+                  value={explanation}
+                  onChange={(e) => setExplanation(e.target.value)}
+                  rows={2}
+                  placeholder="Briefly explain this expense (required for this category)."
+                  className={`rounded-lg border bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 ${explanation.trim() === "" ? "border-red-700" : "border-zinc-700"}`}
+                />
+              </label>
+            ) : null}
+          </div>
         )}
       </div>
 

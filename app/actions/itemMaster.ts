@@ -10,6 +10,8 @@ import {
   setInventoryCategoryActiveRpc,
   renameSpendCategoryRpc,
   setSpendCategoryActiveRpc,
+  updateInventoryCategoryDescriptionRpc,
+  updateSpendCategoryDescriptionRpc,
 } from "@/app/lib/itemMaster/createCategoryRpc";
 import { ItemProposalReferencedError, ItemNotPendingReviewError, CategoryAlreadyExistsError, CategoryDeactivationBlockedError } from "@/app/lib/itemMaster/errors";
 
@@ -78,23 +80,41 @@ export interface CategorySummary {
   id: string;
   name: string;
   isActive?: boolean;
+  description?: string | null;
+  /** How many active CONFIRMED inventory items are classified here (admin
+   * page only; undefined for the active-only picker calls). */
+  usageCount?: number;
 }
 
 export type ListCategoriesResult = { ok: true; categories: CategorySummary[] } | AuthFailure;
 
 /** Active-only by default -- pickers (new-item form, review modal) never
  * offer a deactivated category. Pass includeInactive for the settings
- * page, which needs to show and reactivate them. */
+ * page, which needs to show and reactivate them (and gets usage counts). */
 export async function listInventoryCategories(options?: { includeInactive?: boolean }): Promise<ListCategoriesResult> {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();
-  let query = supabase.from("inventory_categories").select("id, name, is_active").eq("organization_id", auth.manager.organizationId).order("name");
+  let query = supabase.from("inventory_categories").select("id, name, is_active, description").eq("organization_id", auth.manager.organizationId).order("name");
   if (!options?.includeInactive) query = query.eq("is_active", true);
 
   const { data } = await query;
-  return { ok: true, categories: (data ?? []).map((c) => ({ id: c.id as string, name: c.name as string, isActive: c.is_active as boolean })) };
+  const counts = new Map<string, number>();
+  if (options?.includeInactive) {
+    const { data: countRows } = await supabase.rpc("get_inventory_category_item_counts", { p_organization_id: auth.manager.organizationId });
+    for (const r of (countRows ?? []) as { out_category_id: string; out_item_count: number }[]) counts.set(r.out_category_id, Number(r.out_item_count));
+  }
+  return {
+    ok: true,
+    categories: (data ?? []).map((c) => ({
+      id: c.id as string,
+      name: c.name as string,
+      isActive: c.is_active as boolean,
+      description: (c.description as string | null) ?? null,
+      usageCount: options?.includeInactive ? counts.get(c.id as string) ?? 0 : undefined,
+    })),
+  };
 }
 
 export interface SpendCategorySummary {
@@ -102,25 +122,45 @@ export interface SpendCategorySummary {
   parentId: string | null;
   name: string;
   isActive?: boolean;
+  description?: string | null;
+  /** True for the catch-all ("Other Non-inventory Expense") that requires a
+   * written explanation on every line classified to it. */
+  requiresExplanation?: boolean;
+  /** How many CONFIRMED non-inventory classifications reference this
+   * expense category (admin page only). */
+  usageCount?: number;
 }
 
 export type ListSpendCategoriesResult = { ok: true; categories: SpendCategorySummary[] } | AuthFailure;
 
-/** Flat list (any depth) -- the UI flattens this into "Food > Protein >
- * Poultry"-style paths for the picker (plan §14). Active-only by default,
- * same includeInactive escape hatch as listInventoryCategories. */
+/** Flat list -- the UI flattens this for the picker. Active-only by
+ * default, same includeInactive escape hatch as listInventoryCategories
+ * (and includeInactive also fetches usage counts for the admin page). */
 export async function listSpendCategories(options?: { includeInactive?: boolean }): Promise<ListSpendCategoriesResult> {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
   const supabase = getServiceRoleClient();
-  let query = supabase.from("spend_categories").select("id, parent_id, name, is_active").eq("organization_id", auth.manager.organizationId).order("name");
+  let query = supabase.from("spend_categories").select("id, parent_id, name, is_active, description, requires_explanation").eq("organization_id", auth.manager.organizationId).order("name");
   if (!options?.includeInactive) query = query.eq("is_active", true);
 
   const { data } = await query;
+  const counts = new Map<string, number>();
+  if (options?.includeInactive) {
+    const { data: countRows } = await supabase.rpc("get_spend_category_usage_counts", { p_organization_id: auth.manager.organizationId });
+    for (const r of (countRows ?? []) as { out_category_id: string; out_usage_count: number }[]) counts.set(r.out_category_id, Number(r.out_usage_count));
+  }
   return {
     ok: true,
-    categories: (data ?? []).map((c) => ({ id: c.id as string, parentId: c.parent_id as string | null, name: c.name as string, isActive: c.is_active as boolean })),
+    categories: (data ?? []).map((c) => ({
+      id: c.id as string,
+      parentId: c.parent_id as string | null,
+      name: c.name as string,
+      isActive: c.is_active as boolean,
+      description: (c.description as string | null) ?? null,
+      requiresExplanation: (c.requires_explanation as boolean) ?? false,
+      usageCount: options?.includeInactive ? counts.get(c.id as string) ?? 0 : undefined,
+    })),
   };
 }
 
@@ -224,7 +264,7 @@ export async function createSpendCategory(name: string): Promise<CreateCategoryR
     if (err instanceof CategoryAlreadyExistsError) {
       return { ok: false, reason: "duplicate", message: "An expense category with that name already exists." };
     }
-    return { ok: false, reason: "misconfigured", message: "Could not create the spend category. Try again." };
+    return { ok: false, reason: "misconfigured", message: "Could not create the expense category. Try again." };
   }
 }
 
@@ -270,8 +310,8 @@ export async function renameSpendCategory(categoryId: string, newName: string): 
     await renameSpendCategoryRpc(getServiceRoleClient(), { organizationId: auth.manager.organizationId, appUserId: auth.manager.appUserId, categoryId, newName: newName.trim() });
     return { ok: true };
   } catch (err) {
-    if (err instanceof CategoryAlreadyExistsError) return { ok: false, reason: "duplicate", message: "A spend category with that name already exists at that level." };
-    return { ok: false, reason: "misconfigured", message: "Could not rename the spend category. Try again." };
+    if (err instanceof CategoryAlreadyExistsError) return { ok: false, reason: "duplicate", message: "An expense category with that name already exists." };
+    return { ok: false, reason: "misconfigured", message: "Could not rename the expense category. Try again." };
   }
 }
 
@@ -287,6 +327,31 @@ export async function setSpendCategoryActive(categoryId: string, isActive: boole
     return { ok: true };
   } catch (err) {
     if (err instanceof CategoryDeactivationBlockedError) return { ok: false, reason: "blocked", message: err.message };
-    return { ok: false, reason: "misconfigured", message: "Could not update the spend category. Try again." };
+    return { ok: false, reason: "misconfigured", message: "Could not update the expense category. Try again." };
+  }
+}
+
+/** Admin-only: edit a category's description (shown on Admin > Categories
+ * and, for expense categories, alongside the picker during invoice
+ * classification). A blank description clears it. */
+export async function updateInventoryCategoryDescription(categoryId: string, description: string): Promise<CategoryActionResult> {
+  const auth = await requireAdmin();
+  if (!auth.ok) return ADMIN_NOT_AUTHORIZED;
+  try {
+    await updateInventoryCategoryDescriptionRpc(getServiceRoleClient(), { organizationId: auth.manager.organizationId, appUserId: auth.manager.appUserId, categoryId, description: description.trim() || null });
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "misconfigured", message: "Could not update the category description. Try again." };
+  }
+}
+
+export async function updateSpendCategoryDescription(categoryId: string, description: string): Promise<CategoryActionResult> {
+  const auth = await requireAdmin();
+  if (!auth.ok) return ADMIN_NOT_AUTHORIZED;
+  try {
+    await updateSpendCategoryDescriptionRpc(getServiceRoleClient(), { organizationId: auth.manager.organizationId, appUserId: auth.manager.appUserId, categoryId, description: description.trim() || null });
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "misconfigured", message: "Could not update the expense category description. Try again." };
   }
 }

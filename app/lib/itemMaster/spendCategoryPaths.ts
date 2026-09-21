@@ -2,11 +2,15 @@ export interface SpendCategoryPathInput {
   id: string;
   name: string;
   parentId: string | null;
+  /** Catch-all expense categories require a written explanation on every
+   * line classified to them. Optional so existing callers stay valid. */
+  requiresExplanation?: boolean;
 }
 
 export interface SpendCategoryPath {
   id: string;
   path: string;
+  requiresExplanation: boolean;
 }
 
 /** Framework-free (no "use client"/"use server") so both the manager UI's
@@ -20,5 +24,5 @@ export function flattenSpendCategoryPaths(categories: SpendCategoryPathInput[]):
     const parent = c.parentId ? byId.get(c.parentId) : null;
     return parent ? `${pathFor(parent)} > ${c.name}` : c.name;
   }
-  return categories.map((c) => ({ id: c.id, path: pathFor(c) })).sort((a, b) => a.path.localeCompare(b.path));
+  return categories.map((c) => ({ id: c.id, path: pathFor(c), requiresExplanation: c.requiresExplanation ?? false })).sort((a, b) => a.path.localeCompare(b.path));
 }
