@@ -44,6 +44,11 @@ export const ADMIN_SQLSTATE = {
    * code was invalid where a specific value is required (null/zero/
    * negative/NaN, or a mode/behavior mismatch). */
   INVALID_CONVERSION_FACTOR: "GA079",
+  /** Storage-location admin (20260811100180). */
+  LOCATION_NAME_INVALID: "GA082",
+  LOCATION_HAS_STOCK: "GA083",
+  LOCATION_DEFAULT_PROTECTED: "GA084",
+  LOCATION_INVALID_DEFAULT: "GA085",
 } as const;
 
 /** One error shape for every Admin mutation -- `code` lets the action
@@ -121,6 +126,14 @@ export function mapAdminRpcError(error: { code?: string; message: string; detail
       return new AdminActionError("INVALID_STATION_ASSIGNMENT", "One or more selected stations are not active. Refresh and try again.");
     case ADMIN_SQLSTATE.INVALID_CONVERSION_FACTOR:
       return new AdminActionError("INVALID_CONVERSION_FACTOR", "Check the unit, receiving behavior, and conversion factor and try again.");
+    case ADMIN_SQLSTATE.LOCATION_NAME_INVALID:
+      return new AdminActionError("LOCATION_NAME_INVALID", error.message, error.details ?? undefined);
+    case ADMIN_SQLSTATE.LOCATION_HAS_STOCK:
+      return new AdminActionError("LOCATION_HAS_STOCK", "This location still holds stock. Transfer or zero its inventory before deactivating or removing storage eligibility.");
+    case ADMIN_SQLSTATE.LOCATION_DEFAULT_PROTECTED:
+      return new AdminActionError("LOCATION_DEFAULT_PROTECTED", "This is the default storage location. Set a different default first.");
+    case ADMIN_SQLSTATE.LOCATION_INVALID_DEFAULT:
+      return new AdminActionError("LOCATION_INVALID_DEFAULT", "Only an active, storage-eligible location can be the default.");
     default:
       return new AdminActionError("UNKNOWN", "Unable to save. Try again.");
   }

@@ -140,6 +140,7 @@ function buildNav(isAdmin: boolean): NavItem[] {
       children: [
         { label: "Users", href: "/manager/admin/users", isActive: (p) => p.startsWith("/manager/admin/users") },
         { label: "Stations", href: "/manager/admin/stations", isActive: (p) => p.startsWith("/manager/admin/stations") },
+        { label: "Storage Locations", href: "/manager/admin/locations", isActive: (p) => p.startsWith("/manager/admin/locations") },
         // Admin Master Data milestone: Vendors and Categories are
         // Admin-only configuration -- ONE Categories entry (Inventory +
         // Spend live as tabs on that one page), never two sidebar

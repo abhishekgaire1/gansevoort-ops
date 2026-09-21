@@ -234,8 +234,15 @@ export function ReceivingPanel({
     }
     if (locationsResult.ok) setLocations(locationsResult.locations);
     if (linesResult.ok) {
-      const soleLocationId = locationsResult.ok && locationsResult.locations.length === 1 ? locationsResult.locations[0].id : "";
-      setDefaultLocationId((current) => current || soleLocationId);
+      // Auto-select the destination: the sole eligible location when there's
+      // exactly one, otherwise the org default. Never overrides a choice the
+      // manager has already made.
+      const autoLocationId = locationsResult.ok
+        ? locationsResult.locations.length === 1
+          ? locationsResult.locations[0].id
+          : (locationsResult.locations.find((l) => l.isDefault)?.id ?? "")
+        : "";
+      setDefaultLocationId((current) => current || autoLocationId);
       const loadedLocations = locationsResult.ok ? locationsResult.locations : [];
       // Functional update -- reads the CURRENT draft state at merge time
       // without needing lineState in this callback's own dependencies,
@@ -327,6 +334,18 @@ export function ReceivingPanel({
       }
     }
 
+    // Every received line must target an active, storage-eligible location.
+    // If a previously-chosen destination has since been deactivated or made
+    // non-storage-eligible it is no longer in `locations`, and the delivery
+    // is blocked until a valid destination is chosen.
+    const eligibleLocationIds = new Set(locations.map((loc) => loc.id));
+    for (const l of lineState) {
+      if (l.receivedQuantity.trim() !== "" && (l.locationId.trim() === "" || !eligibleLocationIds.has(l.locationId))) {
+        setError("Choose an active, storage-eligible location for every received line before confirming.");
+        return;
+      }
+    }
+
     setPending(true);
     setError(null);
     const includedLines = lineState.filter((l) => l.receivedQuantity.trim() !== "");
@@ -384,6 +403,12 @@ export function ReceivingPanel({
   }
 
   const exceptionCount = lineState.filter((l) => !lineIsReady(l)).length;
+
+  // Exactly one eligible destination -> auto-selected and the selector is
+  // hidden (the destination is shown as static text). More than one -> the
+  // manager picks. See the receiving destination rules.
+  const singleLocation = locations.length === 1;
+  const soleLocationName = singleLocation ? locations[0].name : null;
 
   // Collapsed recorded-summary mode: an effective delivery exists and the
   // manager hasn't explicitly started an additional one. The editable
@@ -458,24 +483,32 @@ export function ReceivingPanel({
         {formVisible ? (
           <>
             <div className="mt-4 flex flex-wrap items-end gap-2 border-t border-zinc-800 pt-4">
-              <label className="flex flex-col gap-1 text-xs text-zinc-400">
-                Default location for this delivery
-                <select
-                  value={defaultLocationId}
-                  onChange={(e) => setDefaultLocationId(e.target.value)}
-                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
-                >
-                  <option value="">Select…</option>
-                  {locations.map((loc) => (
-                    <option key={loc.id} value={loc.id}>
-                      {loc.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button type="button" onClick={handleApplyDefaultLocationToAll} disabled={!defaultLocationId} className="rounded-full border border-zinc-700 px-4 py-1.5 text-xs text-zinc-200 disabled:opacity-40">
-                Apply to All Eligible Lines
-              </button>
+              {singleLocation ? (
+                <p className="text-xs text-zinc-400">
+                  Destination: <span className="font-medium text-zinc-100">{soleLocationName}</span>
+                </p>
+              ) : (
+                <>
+                  <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                    Default location for this delivery
+                    <select
+                      value={defaultLocationId}
+                      onChange={(e) => setDefaultLocationId(e.target.value)}
+                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
+                    >
+                      <option value="">Select…</option>
+                      {locations.map((loc) => (
+                        <option key={loc.id} value={loc.id}>
+                          {loc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button type="button" onClick={handleApplyDefaultLocationToAll} disabled={!defaultLocationId} className="rounded-full border border-zinc-700 px-4 py-1.5 text-xs text-zinc-200 disabled:opacity-40">
+                    Apply to All Eligible Lines
+                  </button>
+                </>
+              )}
               <button type="button" onClick={handleEverythingReceivedAsInvoiced} className="rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950">
                 Everything Received As Invoiced
               </button>
@@ -539,21 +572,23 @@ export function ReceivingPanel({
                     </label>
                   ) : null}
 
-                  <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
-                    Location
-                    <select
-                      value={line.locationId}
-                      onChange={(e) => updateEditLine(line.receiptLineId, { locationId: e.target.value })}
-                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
-                    >
-                      <option value="">Select…</option>
-                      {locations.map((loc) => (
-                        <option key={loc.id} value={loc.id}>
-                          {loc.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  {singleLocation ? null : (
+                    <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+                      Location
+                      <select
+                        value={line.locationId}
+                        onChange={(e) => updateEditLine(line.receiptLineId, { locationId: e.target.value })}
+                        className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100"
+                      >
+                        <option value="">Select…</option>
+                        {locations.map((loc) => (
+                          <option key={loc.id} value={loc.id}>
+                            {loc.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
 
                   <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
                     Condition
@@ -718,22 +753,24 @@ export function ReceivingPanel({
                     </label>
                   ) : null}
 
-                  <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
-                    Location
-                    <select
-                      value={l.locationId}
-                      disabled={readOnly}
-                      onChange={(e) => updateLine(l.lineKey, { locationId: e.target.value })}
-                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 disabled:opacity-60"
-                    >
-                      <option value="">Select…</option>
-                      {locations.map((loc) => (
-                        <option key={loc.id} value={loc.id}>
-                          {loc.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  {singleLocation ? null : (
+                    <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
+                      Location
+                      <select
+                        value={l.locationId}
+                        disabled={readOnly}
+                        onChange={(e) => updateLine(l.lineKey, { locationId: e.target.value })}
+                        className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 disabled:opacity-60"
+                      >
+                        <option value="">Select…</option>
+                        {locations.map((loc) => (
+                          <option key={loc.id} value={loc.id}>
+                            {loc.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
 
                   <label className="flex flex-col gap-0.5 text-xs text-zinc-500">
                     Condition

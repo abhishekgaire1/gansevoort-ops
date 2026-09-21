@@ -164,6 +164,7 @@ export async function getReceivingLinesForPurchaseDocument(purchaseDocumentId: s
 export interface LocationSummary {
   id: string;
   name: string;
+  isDefault: boolean;
 }
 
 export type ListLocationsResult = { ok: true; locations: LocationSummary[] } | AuthFailure;
@@ -172,9 +173,18 @@ export async function listLocations(): Promise<ListLocationsResult> {
   const auth = await requireManagerOrAdmin();
   if (!auth.ok) return NOT_AUTHORIZED;
 
+  // Receiving may only target ACTIVE, STORAGE-ELIGIBLE locations (the same
+  // rule the cycle-count/waste flows enforce). A location that is inactive
+  // or not storage-eligible must never appear as a receiving destination.
   const supabase = getServiceRoleClient();
-  const { data } = await supabase.from("locations").select("id, name").eq("organization_id", auth.manager.organizationId).eq("is_active", true).order("name");
-  return { ok: true, locations: (data ?? []).map((l) => ({ id: l.id as string, name: l.name as string })) };
+  const { data } = await supabase
+    .from("locations")
+    .select("id, name, is_default")
+    .eq("organization_id", auth.manager.organizationId)
+    .eq("is_active", true)
+    .eq("is_storage_eligible", true)
+    .order("name");
+  return { ok: true, locations: (data ?? []).map((l) => ({ id: l.id as string, name: l.name as string, isDefault: !!l.is_default })) };
 }
 
 export interface EmployeeSummary {
