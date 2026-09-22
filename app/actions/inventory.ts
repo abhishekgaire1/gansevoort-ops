@@ -12,7 +12,7 @@ type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
 
 export type PostToInventoryResult =
-  | { ok: true; status: "POSTED" | "ALREADY_POSTED"; postedLineCount: number }
+  | { ok: true; status: "POSTED" | "ALREADY_POSTED" | "NO_INVENTORY_CHANGES"; postedLineCount: number }
   | AuthFailure
   | { ok: false; reason: "blocked"; message: string; blockers: InventoryPostingBlocker[] }
   | { ok: false; reason: "wrong_status" | "misconfigured"; message: string };

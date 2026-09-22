@@ -80,6 +80,32 @@ invoice_system_reviews
 invoice_match_results
 duplicate_candidates
 
+purchase_document_line_classifications carries the authoritative
+**line treatment** for every invoice line (20260811100182):
+INVENTORY_PURCHASE, EXPENSE, FREIGHT_FEE, TAX, DISCOUNT, CREDIT_RETURN
+(with credit_subtype FINANCIAL_CREDIT / RETURNABLE_CONTAINER_CREDIT /
+INVENTORY_RETURN) or UNRESOLVED. The coarse disposition column
+(INVENTORY / NON_INVENTORY / UNRESOLVED) is derived from the treatment by
+a trigger and kept only for existing consumers; the two can never
+disagree (CHECK constraint). UNRESOLVED is never a valid posting
+classification. AI/rule proposals are stored beside the decision
+(ai_proposed_treatment, ai_proposed_credit_subtype,
+ai_proposed_spend_category_id, ai_reason, ai_evidence, ai_review_fields)
+so the manager's change is always visible next to what was proposed.
+
+vendor_line_treatment_rules -- organization-scoped, vendor-specific
+prior decisions for non-item lines (vendor + SKU or normalized
+description -> treatment + category/subtype). Created only when a
+manager explicitly chooses to remember a decision, auditable, Admin-
+editable (deactivate), ignored automatically when the referenced expense
+category is deactivated, and never applied when it contradicts the
+current line's own evidence.
+
+purchase_document_inventory_return_lines -- links an INVENTORY_RETURN
+credit line to the VENDOR_RETURN movement it posted (append-only;
+classification_id UNIQUE is the idempotency backbone, like
+receipt_line_id on purchase_document_inventory_posting_lines).
+
 Original uploaded files must be retained.
 
 OCR results must be preserved separately from corrected/approved values.
@@ -100,18 +126,21 @@ Inventory movements must use explicit movement types.
 
 Never infer business meaning from positive/negative quantity signs.
 
-Initial movement types include:
+Movement types currently enforced by the schema (CHECK constraint,
+20260811100182):
 
-PURCHASE_RECEIPT
-ISSUE_TO_STATION
-STATION_TRANSFER
-RETURN_TO_CENTRAL
-WASTE
-COUNT_ADJUSTMENT
-BATCH_INPUT
-BATCH_OUTPUT
-VENDOR_RETURN
-LEGACY_IMPORT
+PURCHASE_RECEIPT (inbound)
+ISSUE_TO_STATION (outbound)
+TRANSFER_IN / TRANSFER_OUT
+WASTE (outbound)
+COUNT_ADJUSTMENT_IN / COUNT_ADJUSTMENT_OUT
+INVENTORY_CORRECTION_IN / INVENTORY_CORRECTION_OUT
+VENDOR_RETURN (outbound -- tracked merchandise physically returned to a
+vendor, posted from an INVENTORY_RETURN credit line; never a negative
+receipt)
+
+Planned, not yet in the schema: STATION_TRANSFER, RETURN_TO_CENTRAL,
+BATCH_INPUT, BATCH_OUTPUT, LEGACY_IMPORT.
 
 V1 does not require authoritative station inventory balances.
 

@@ -17,6 +17,9 @@ const MOVEMENT_DISPLAY_LABEL: Record<InventoryMovementType, string> = {
   COUNT_ADJUSTMENT_OUT: "Cycle Count Adjustment",
   TRANSFER_IN: "Transfer In",
   TRANSFER_OUT: "Transfer Out",
+  INVENTORY_CORRECTION_IN: "Correction",
+  INVENTORY_CORRECTION_OUT: "Correction",
+  VENDOR_RETURN: "Returned to Vendor",
 };
 
 /** Never expose the raw enum string (e.g. "COUNT_ADJUSTMENT_OUT")
@@ -35,7 +38,7 @@ export function movementGlyph(movementType: InventoryMovementType): "↑" | "↓
   return IN_MOVEMENT_TYPES.has(movementType) ? "↑" : "↓";
 }
 
-const IN_MOVEMENT_TYPES = new Set<InventoryMovementType>(["PURCHASE_RECEIPT", "COUNT_ADJUSTMENT_IN", "TRANSFER_IN"]);
+const IN_MOVEMENT_TYPES = new Set<InventoryMovementType>(["PURCHASE_RECEIPT", "COUNT_ADJUSTMENT_IN", "TRANSFER_IN", "INVENTORY_CORRECTION_IN"]);
 
 /** The verb preceding the actor's name -- precise about the role the
  * stored app_user id actually represents for that movement type (Part
@@ -52,6 +55,11 @@ export function actorLabelVerb(movementType: InventoryMovementType): string | nu
     case "COUNT_ADJUSTMENT_IN":
     case "COUNT_ADJUSTMENT_OUT":
       return "Completed by";
+    case "VENDOR_RETURN":
+      return "Posted by";
+    case "INVENTORY_CORRECTION_IN":
+    case "INVENTORY_CORRECTION_OUT":
+      return "Corrected by";
     default:
       return null;
   }

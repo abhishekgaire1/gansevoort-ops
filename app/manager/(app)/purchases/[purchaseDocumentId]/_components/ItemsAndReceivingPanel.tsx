@@ -7,7 +7,6 @@ import {
   ensureItemMatchingStarted,
   getClassificationMatchingStatus,
   approveExistingItemClassification,
-  markLineNonInventory,
   bulkConfirmClassifications,
   type LineClassificationRow,
 } from "@/app/actions/itemClassification";
@@ -32,7 +31,12 @@ import { getPriceComparisons } from "@/app/actions/priceComparison";
 import type { PriceComparisonResult } from "@/app/lib/purchasing/priceComparison";
 import { priceChangeTone } from "@/app/lib/purchasing/priceChangePresentation";
 import { formatPackageConfirmation } from "@/app/lib/purchaseDocuments/packageUnitMismatch";
-import { classifyLineOutcome, summarizeCombinedStep, checklistCompletion, type LineOutcome } from "@/app/lib/purchaseDocuments/combinedLineReadiness";
+import { checklistCompletion, type LineOutcome } from "@/app/lib/purchaseDocuments/combinedLineReadiness";
+import { evaluateLineReadiness, summarizeLineReadiness, issueCountLabel, type LineReadiness } from "@/app/lib/purchaseDocuments/lineReadiness";
+import { readinessInputFromRow } from "@/app/lib/purchaseDocuments/readinessInputFromRow";
+import { LINE_TREATMENT_LABEL, CREDIT_SUBTYPE_LABEL, signedLineAmount } from "@/app/lib/purchaseDocuments/lineTreatment";
+import { formatMoney } from "@/app/lib/formatMoney";
+import { ClassifyLineDrawer } from "./ClassifyLineDrawer";
 import {
   receivingLineIsReady,
   missingReceivingReason,
@@ -62,7 +66,7 @@ import {
 import type { ReceivingLineEdit } from "@/app/lib/receiving/effectiveReceivingEdit";
 import { computeReceivingPrefill, recomputeFixedConversionVerifiedQuantity } from "@/app/lib/receiving/computeReceivingPrefill";
 import { mergeReceivingLineState, type ReceivingLineDraft } from "@/app/lib/receiving/mergeReceivingLineState";
-import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, inlineWarningClass, inlineNeutralClass } from "@/app/components/manager/surfaces";
+import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, inlineWarningClass } from "@/app/components/manager/surfaces";
 import { secondaryButtonClass } from "@/app/components/manager/buttonStyles";
 
 /**
@@ -89,6 +93,9 @@ import { secondaryButtonClass } from "@/app/components/manager/buttonStyles";
  */
 
 function lineToCandidate(line: LineClassificationRow, vendorName: string | null, documentNumber: string | null): NewItemReviewCandidate | null {
+  // Only an unmatched INVENTORY PURCHASE is ever a "new item". Expenses,
+  // tax, credits, discounts and fees never enter New Items Found.
+  if (line.lineTreatment !== "INVENTORY_PURCHASE") return null;
   if (!line.aiSuggestedIsNewProposal || !line.aiSuggestedInventoryItemId || !line.aiNewItemProposal) return null;
   return {
     key: line.lineKey,
@@ -141,6 +148,8 @@ const secondaryButtonClassCompact =
 export function ItemsAndReceivingPanel({
   purchaseDocumentId,
   vendorName,
+  currency = null,
+  focusLineKey = null,
   readOnly,
   onChange,
   onAllResolvedChange,
@@ -150,6 +159,9 @@ export function ItemsAndReceivingPanel({
 }: {
   purchaseDocumentId: string;
   vendorName?: string | null;
+  currency?: string | null;
+  /** ?line= deep link -- opened once after the first load. */
+  focusLineKey?: string | null;
   /** Manager 2's final-review view -- item mapping/receiving is Manager
    * 1's job to have substantially completed already. */
   readOnly?: boolean;
@@ -163,8 +175,8 @@ export function ItemsAndReceivingPanel({
   onProgressChange?: (progress: { readyCount: number; totalLines: number; expenseCount: number; needsAttentionCount: number }) => void;
   onContinue?: () => void;
   /** The "Correct invoice unit" corrective action on a purchase-package
-   * mismatch warning -- jumps back to Step 1. */
-  onNavigateToStep1?: () => void;
+   * mismatch warning -- jumps back to Step 1 (optionally to a line). */
+  onNavigateToStep1?: (lineKey?: string) => void;
 }) {
   const [lines, setLines] = useState<LineClassificationRow[] | null>(null);
   const [items, setItems] = useState<InventoryItemSummary[]>([]);
@@ -215,6 +227,13 @@ export function ItemsAndReceivingPanel({
   // invoice at a glance -- Ready and Non-inventory are no longer hidden just
   // because a blocker exists. The collapse controls remain for tidying up.
   const [readyOpen, setReadyOpen] = useState(true);
+  const [returnsOpen, setReturnsOpen] = useState(true);
+  const [creditsOpen, setCreditsOpen] = useState(true);
+  const [taxesOpen, setTaxesOpen] = useState(true);
+  // The shared "Classify invoice line" drawer (non-inventory treatments,
+  // unresolved lines, and "Change classification" on an inventory line).
+  const [classifyingLineKey, setClassifyingLineKey] = useState<string | null>(null);
+  const focusConsumed = useRef(false);
   // Step 2 line filter. "all" shows the exception-first grouped view (Needs
   // attention -> Ready -> Non-inventory); a specific filter shows a flat
   // matching list. Visibility only -- never changes readiness/section state.
@@ -516,21 +535,6 @@ export function ItemsAndReceivingPanel({
     await load();
   }
 
-  async function handleMarkNonInventory(line: LineClassificationRow) {
-    if (actionPendingLineKey) return;
-    setActionPendingLineKey(line.lineKey);
-    const name = line.aiSuggestedInventoryItemName ?? line.description ?? "Non-inventory line";
-    const result = await markLineNonInventory(purchaseDocumentId, line.lineKey, name, line.aiSuggestedIsNewProposal ? line.aiSuggestedInventoryItemId : null);
-    setActionPendingLineKey(null);
-    if (!result.ok) {
-      setError(result.message);
-      return;
-    }
-    setPackageReviewLineKey(null);
-    flashSaved(line.lineKey);
-    await load();
-  }
-
   const bulkEligible = (lines ?? []).filter(
     (l) => l.classificationId && l.status === "PENDING_REVIEW" && l.resolutionSource === "AI_SUGGESTED" && l.aiSuggestedInventoryItemId && !l.aiSuggestedIsNewProposal
   );
@@ -608,7 +612,10 @@ export function ItemsAndReceivingPanel({
       // creating a duplicate DELIVERY. A genuine additional delivery is a
       // separate, explicit action with its own fresh identity.
       idempotencyKey: `primary-delivery:${purchaseDocumentId}`,
-      deliveryEventId: `primary:${purchaseDocumentId}`,
+      // receipts.delivery_event_id is a uuid (20260811100171): the document's
+      // own id IS the stable identity of its primary delivery (one per
+      // document; a genuine additional delivery gets a fresh uuid).
+      deliveryEventId: purchaseDocumentId,
       lines: includedLines.map((l) => ({
         lineNumberSnapshot: null,
         matchedLineKey: l.lineKey,
@@ -854,15 +861,37 @@ export function ItemsAndReceivingPanel({
     const receivingReady = line.disposition === "INVENTORY" && line.status === "CONFIRMED" ? Boolean(receiving && receivingLineIsReady(receiving)) : null;
     const postingBlockerReason = line.lineKey !== null ? (postingBlockersByLineKey.get(line.lineKey) ?? null) : null;
     const hasDeliveryConflict = line.lineKey !== null && deliveryConflictKeys.has(line.lineKey);
-    const outcome = classifyLineOutcome({ status: line.status, disposition: line.disposition, hasPackageMismatch: line.hasPackageMismatch, receivingReady, hasPostingBlocker: postingBlockerReason !== null, hasDeliveryConflict });
-    return { line, receiving, outcome, postingBlockerReason, hasDeliveryConflict };
+    // THE authoritative per-line readiness (lineReadiness.ts) -- the same
+    // evaluation Step 1, Step 3 and the wizard read; an unacknowledged
+    // significant price change is folded in here so the footer, stepper
+    // and Step 3 gate can never disagree.
+    const readiness: LineReadiness = evaluateLineReadiness(
+      readinessInputFromRow(line, {
+        receivingReady,
+        hasPostingBlocker: postingBlockerReason !== null,
+        hasDeliveryConflict,
+        priceRequiresAck: priceRequiresAck.has(line.lineKey),
+        inventoryIncrease: receiving
+          ? {
+              quantity: receiving.verifiedQuantity.trim() !== "" ? Number(receiving.verifiedQuantity) : receiving.info.receivingBehavior === "SAME_UNIT" && receiving.receivedQuantity.trim() !== "" ? Number(receiving.receivedQuantity) : null,
+              unitCode: receiving.info.baseUnitCode,
+            }
+          : null,
+      })
+    );
+    const outcome: LineOutcome = !readiness.ready ? "needs_attention" : readiness.treatment === "INVENTORY_PURCHASE" ? "ready" : "expense";
+    return { line, receiving, outcome, readiness, postingBlockerReason, hasDeliveryConflict };
   });
-  const summary = summarizeCombinedStep(combinedLines.map((c) => c.outcome));
-  // Fold unacknowledged significant price changes into the SAME readiness
-  // the stepper/footer/Step 3 gate consume, so all four always agree.
-  const priceAckBlockingCount = priceRequiresAck.size;
-  const stepNeedsAttentionCount = summary.needsAttentionCount + priceAckBlockingCount;
-  const stepResolved = summary.allResolved && priceAckBlockingCount === 0;
+  const readinessSummary = summarizeLineReadiness(combinedLines.map((c) => c.readiness));
+  const summary = {
+    totalLines: readinessSummary.totalLines,
+    readyCount: combinedLines.filter((c) => c.outcome === "ready").length,
+    needsAttentionCount: readinessSummary.needsAttentionCount,
+    expenseCount: combinedLines.filter((c) => c.outcome === "expense").length,
+    allResolved: readinessSummary.allReady,
+  };
+  const stepNeedsAttentionCount = summary.needsAttentionCount;
+  const stepResolved = summary.allResolved;
 
   useEffect(() => {
     if (lines === null) return; // nothing loaded yet -- never report a premature "0 of 0"
@@ -900,15 +929,39 @@ export function ItemsAndReceivingPanel({
   const firstUnresolvedKey = combinedLines.find((c) => c.outcome === "needs_attention")?.line.lineKey ?? null;
   useEffect(() => {
     if (readOnly || drawerDismissed) return;
-    if (editingLineKey !== null || showNewItemModal || newItemCandidates.length > 0) return;
+    if (editingLineKey !== null || classifyingLineKey !== null || showNewItemModal || newItemCandidates.length > 0) return;
+    // A ?line= deep link wins over the first-issue default, once.
+    if (focusLineKey && !focusConsumed.current && lines !== null) {
+      focusConsumed.current = true;
+      const target = combinedLines.find((c) => c.line.lineKey === focusLineKey);
+      if (target) {
+        // Deliberate open-on-deep-link: this effect is the one place the
+        // ?line= parameter turns into an open editor, once.
+        if (target.line.lineTreatment === "INVENTORY_PURCHASE" && target.readiness.status !== "needs_classification") {
+          // eslint-disable-next-line react-hooks/set-state-in-effect
+          void handleEditLine(focusLineKey);
+        } else {
+          setClassifyingLineKey(focusLineKey);
+        }
+        requestAnimationFrame(() => document.getElementById(`classification-line-${focusLineKey}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+        return;
+      }
+    }
     if (firstUnresolvedKey === null) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    const firstUnresolved = combinedLines.find((c) => c.line.lineKey === firstUnresolvedKey);
+    if (firstUnresolved && (firstUnresolved.line.lineTreatment !== "INVENTORY_PURCHASE" || firstUnresolved.readiness.status === "needs_classification")) {
+      // Non-inventory / unclassified: the classification drawer is the
+      // resolving control -- open it and focus it, no discovery click.
+      setClassifyingLineKey(firstUnresolvedKey);
+      requestAnimationFrame(() => document.getElementById(`classification-line-${firstUnresolvedKey}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+      return;
+    }
     void handleEditLine(firstUnresolvedKey);
     requestAnimationFrame(() => document.getElementById(`classification-line-${firstUnresolvedKey}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
     // handleEditLine is a stable-enough closure; re-running only when the gate
     // conditions change is exactly what we want (open once, then no-op).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readOnly, drawerDismissed, editingLineKey, showNewItemModal, newItemCandidates.length, firstUnresolvedKey]);
+  }, [readOnly, drawerDismissed, editingLineKey, classifyingLineKey, showNewItemModal, newItemCandidates.length, firstUnresolvedKey, focusLineKey, lines === null]);
 
   // Fetch the delivery-lineage resolution state whenever the lines (re)load or a
   // resolution is saved. Only the AMBIGUOUS state surfaces the resolver.
@@ -961,11 +1014,17 @@ export function ItemsAndReceivingPanel({
 
   const spendCategoryPathById = new Map(flattenSpendCategoryPaths(spendCategories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId }))).map((p) => [p.id, p.path]));
 
-  const attentionLines = combinedLines.filter((c) => c.outcome === "needs_attention");
-  // A ready line whose significant price change is not yet acknowledged is
-  // pulled out of "Ready" and shown as a blocking price-review card.
-  const readyLines = combinedLines.filter((c) => c.outcome === "ready" && !(c.line.lineKey && priceRequiresAck.has(c.line.lineKey)));
-  const expenseLines = combinedLines.filter((c) => c.outcome === "expense");
+  // Exception-first groups (lineReadiness.ts's READINESS_GROUP_ORDER):
+  // Needs attention -> Ready inventory -> Inventory returns -> Expenses ->
+  // Credits & adjustments -> Taxes & charges. An unacknowledged significant
+  // price change is a needs-attention line rendered as its own review card.
+  const attentionLines = combinedLines.filter((c) => c.outcome === "needs_attention" && !(c.line.lineKey && priceRequiresAck.has(c.line.lineKey)));
+  const readyLines = combinedLines.filter((c) => c.readiness.ready && c.readiness.group === "inventory");
+  const returnLines = combinedLines.filter((c) => c.readiness.ready && c.readiness.group === "inventory_return");
+  const expenseLines = combinedLines.filter((c) => c.readiness.ready && c.readiness.group === "expense");
+  const creditLines = combinedLines.filter((c) => c.readiness.ready && c.readiness.group === "credit_adjustment");
+  const taxLines = combinedLines.filter((c) => c.readiness.ready && c.readiness.group === "tax_charge");
+  const nonInventoryLines = [...returnLines, ...expenseLines, ...creditLines, ...taxLines];
   const priceAckLines = combinedLines
     .filter((c) => c.line.lineKey && priceRequiresAck.has(c.line.lineKey))
     .map((c) => ({ line: c.line, review: priceReviewByLineKey.get(c.line.lineKey!) ?? null }))
@@ -974,8 +1033,8 @@ export function ItemsAndReceivingPanel({
   // The single blocking-issue count and completion verdict the footer,
   // stepper and Step 3 gate all read: operational needs-attention lines
   // PLUS unacknowledged significant price changes.
-  const blockingIssueCount = summary.needsAttentionCount + priceAckLines.length;
-  const stepAllResolved = summary.allResolved && priceAckLines.length === 0;
+  const blockingIssueCount = summary.needsAttentionCount;
+  const stepAllResolved = summary.allResolved;
   // How many of the needs-attention lines are delivery conflicts (a subset of
   // needsAttentionCount, never added on top of it -- keeps counts consistent).
   const deliveryConflictCount = combinedLines.filter((c) => c.hasDeliveryConflict).length;
@@ -1017,7 +1076,7 @@ export function ItemsAndReceivingPanel({
     needs_attention: blockingIssueCount,
     price_changes: priceChangeLines.length,
     ready: readyLines.length,
-    expenses: expenseLines.length,
+    expenses: nonInventoryLines.length,
   };
   const filteredLines =
     effectiveFilter === "needs_attention"
@@ -1027,7 +1086,7 @@ export function ItemsAndReceivingPanel({
         : effectiveFilter === "ready"
           ? readyLines
           : effectiveFilter === "expenses"
-            ? expenseLines
+            ? nonInventoryLines
             : combinedLines;
 
   const priceCheckFor = (lineKey: string | null): PriceCheckDisplay | null => {
@@ -1038,11 +1097,18 @@ export function ItemsAndReceivingPanel({
     return priceCheckDisplay(review.state, c ? { direction: c.direction, deltaPct: c.deltaPct, vendorName: c.previous.vendorName } : null);
   };
 
-  const renderLine = ({ line, receiving, outcome, postingBlockerReason, hasDeliveryConflict }: (typeof combinedLines)[number]) => (
+  const renderLine = ({ line, receiving, outcome, readiness, postingBlockerReason, hasDeliveryConflict }: (typeof combinedLines)[number]) => (
     <LineCard
       key={line.lineKey}
       id={`classification-line-${line.lineKey}`}
       outcome={outcome}
+      readiness={readiness}
+      currency={currency}
+      onClassify={() => {
+        if (editingLineKey) handleCloseEditor(editingLineKey);
+        setDrawerDismissed(false);
+        setClassifyingLineKey(line.lineKey);
+      }}
       deliveryConflict={hasDeliveryConflict}
       line={line}
       receiving={receiving}
@@ -1078,7 +1144,6 @@ export function ItemsAndReceivingPanel({
       }}
       onNavigateToStep1={onNavigateToStep1}
       onApproveExisting={(itemId, vendorPackage) => handleApproveExisting(line.lineKey, itemId, vendorPackage)}
-      onMarkNonInventory={() => handleMarkNonInventory(line)}
       onReviewNewItem={() => setShowNewItemModal(true)}
       actionPending={actionPendingLineKey === line.lineKey}
       alreadyReceived={alreadyReceived}
@@ -1201,7 +1266,10 @@ export function ItemsAndReceivingPanel({
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
               <div className="min-w-0">
                 <p className="text-sm font-medium text-zinc-200 tabular-nums">
-                  {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {summary.needsAttentionCount} needs attention · {summary.readyCount} ready inventory · {summary.expenseCount} non-inventory
+                  {summary.totalLines} line{summary.totalLines === 1 ? "" : "s"} · {summary.needsAttentionCount} needs attention · {summary.readyCount} ready inventory
+                  {returnLines.length > 0 ? ` · ${returnLines.length} return${returnLines.length === 1 ? "" : "s"}` : ""} · {expenseLines.length} expense{expenseLines.length === 1 ? "" : "s"}
+                  {creditLines.length > 0 ? ` · ${creditLines.length} credit${creditLines.length === 1 ? "" : "s"}/adjustment${creditLines.length === 1 ? "" : "s"}` : ""}
+                  {taxLines.length > 0 ? ` · ${taxLines.length} tax/charge${taxLines.length === 1 ? "" : "s"}` : ""}
                 </p>
                 {deliveryConflictCount > 0 ? (
                   <p className="mt-0.5 text-xs font-semibold text-red-300 tabular-nums">
@@ -1295,7 +1363,7 @@ export function ItemsAndReceivingPanel({
       {summary.totalLines > 0 ? (
         <div className="flex flex-wrap gap-1.5">
           {(["all", "needs_attention", "price_changes", "ready", "expenses"] as LineFilter[]).map((f) => {
-            const label = f === "all" ? "All" : f === "needs_attention" ? "Needs attention" : f === "price_changes" ? "Price changes" : f === "ready" ? "Ready inventory" : "Non-inventory";
+            const label = f === "all" ? "All" : f === "needs_attention" ? "Needs attention" : f === "price_changes" ? "Price changes" : f === "ready" ? "Ready inventory" : "Expenses & adjustments";
             return (
               <button
                 key={f}
@@ -1318,7 +1386,7 @@ export function ItemsAndReceivingPanel({
         <section>
           <div className="mb-2 flex items-center gap-2">
             <h3 className="text-[13px] font-semibold uppercase tracking-wide text-zinc-300">
-              {effectiveFilter === "needs_attention" ? "Needs attention" : effectiveFilter === "price_changes" ? "Price changes" : effectiveFilter === "ready" ? "Ready inventory" : "Non-inventory"}
+              {effectiveFilter === "needs_attention" ? "Needs attention" : effectiveFilter === "price_changes" ? "Price changes" : effectiveFilter === "ready" ? "Ready inventory" : "Expenses & adjustments"}
             </h3>
             <span className="text-xs text-zinc-500">{filteredLines.length} line{filteredLines.length === 1 ? "" : "s"}</span>
           </div>
@@ -1385,50 +1453,113 @@ export function ItemsAndReceivingPanel({
         </section>
       ) : null}
 
-      {/* ============ READY TO POST -- finished inventory work, collapsed
-          into one green bar; expand to spot-check. ============ */}
-      {readyLines.length > 0 ? (
-        <section className={panelClass}>
-          <button
-            type="button"
-            aria-expanded={readyOpen}
-            onClick={() => setReadyOpen((v) => !v)}
-            className="flex w-full items-center gap-3 px-4 py-3.5 text-left hover:bg-zinc-800/40"
-          >
-            <span aria-hidden className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400" />
-            <span className="text-sm font-semibold text-zinc-100">Ready to post</span>
-            <span className="text-[13px] text-zinc-400">· {readyLines.length} inventory line{readyLines.length === 1 ? "" : "s"}</span>
-            <span className={`ml-auto text-xs text-zinc-500 transition-transform ${readyOpen ? "rotate-90" : ""}`}>▸</span>
-          </button>
-          {readyOpen ? <div className="border-t border-zinc-800">{readyLines.map(renderLine)}</div> : null}
-        </section>
-      ) : null}
+      {/* ============ READY INVENTORY ============ */}
+      <LineGroupSection
+        title="Ready inventory"
+        count={readyLines.length}
+        noun="inventory line"
+        tone="success"
+        open={readyOpen}
+        onToggle={() => setReadyOpen((v) => !v)}
+        blurb="These lines will add stock when the invoice is posted."
+      >
+        {readyLines.map(renderLine)}
+      </LineGroupSection>
 
-      {/* ============ NON-INVENTORY -- no inventory impact. Expanded by
-          default so the manager can inspect and correct these too. ======= */}
-      {expenseLines.length > 0 ? (
-        <section className={panelClass}>
-          <button
-            type="button"
-            aria-expanded={expensesOpen}
-            onClick={() => setExpensesOpen((v) => !v)}
-            className="flex w-full items-center gap-3 px-4 py-3.5 text-left hover:bg-zinc-800/40"
-          >
-            <span aria-hidden className="h-2.5 w-2.5 shrink-0 rounded-full bg-zinc-500" />
-            <span className="text-sm font-semibold text-zinc-100">Non-inventory</span>
-            <span className="text-[13px] text-zinc-400">· {expenseLines.length} line{expenseLines.length === 1 ? "" : "s"}</span>
-            <span className={`ml-auto text-xs text-zinc-500 transition-transform ${expensesOpen ? "rotate-90" : ""}`}>▸</span>
-          </button>
-          {expensesOpen ? (
-            <div className="border-t border-zinc-800">
-              <p className="px-4 pt-3 text-xs text-zinc-400">These lines will not add inventory when the document is posted.</p>
-              {expenseLines.map(renderLine)}
-            </div>
-          ) : null}
-        </section>
-      ) : null}
+      {/* ============ INVENTORY RETURNS ============ */}
+      <LineGroupSection
+        title="Inventory returns"
+        count={returnLines.length}
+        noun="return"
+        tone="info"
+        open={returnsOpen}
+        onToggle={() => setReturnsOpen((v) => !v)}
+        blurb="Tracked merchandise that physically left the store. Posting records an audited inventory decrease."
+      >
+        {returnLines.map(renderLine)}
+      </LineGroupSection>
+
+      {/* ============ EXPENSES ============ */}
+      <LineGroupSection
+        title="Expenses"
+        count={expenseLines.length}
+        noun="line"
+        tone="neutral"
+        open={expensesOpen}
+        onToggle={() => setExpensesOpen((v) => !v)}
+        blurb="These lines are classified as expenses or freight/fees and will not add inventory."
+      >
+        {expenseLines.map(renderLine)}
+      </LineGroupSection>
+
+      {/* ============ CREDITS & ADJUSTMENTS ============ */}
+      <LineGroupSection
+        title="Credits & adjustments"
+        count={creditLines.length}
+        noun="line"
+        tone="info"
+        open={creditsOpen}
+        onToggle={() => setCreditsOpen((v) => !v)}
+        blurb="Credits and discounts reduce the invoice total. They do not affect inventory unless physical stock leaves the store."
+      >
+        {creditLines.map(renderLine)}
+      </LineGroupSection>
+
+      {/* ============ TAXES & CHARGES ============ */}
+      <LineGroupSection
+        title="Taxes & charges"
+        count={taxLines.length}
+        noun="line"
+        tone="neutral"
+        open={taxesOpen}
+        onToggle={() => setTaxesOpen((v) => !v)}
+        blurb="Document-level tax. Not an item, no expense category, no inventory effect."
+      >
+        {taxLines.map(renderLine)}
+      </LineGroupSection>
       </>
       )}
+
+      {!readOnly ? (
+        <ClassifyLineDrawer
+          open={classifyingLineKey !== null}
+          line={classifyingLineKey ? (lines.find((l) => l.lineKey === classifyingLineKey) ?? null) : null}
+          purchaseDocumentId={purchaseDocumentId}
+          currency={currency}
+          spendCategories={spendCategories}
+          items={items}
+          units={units}
+          locations={locations}
+          documentLines={lines.map((l) => ({ lineKey: l.lineKey, description: l.description }))}
+          onSaved={async (lineKey) => {
+            flashSaved(lineKey);
+            setClassifyingLineKey(null);
+            await load();
+            focusRow(lineKey);
+          }}
+          onRequestClose={() => {
+            setDrawerDismissed(true);
+            setClassifyingLineKey(null);
+          }}
+          onChangeItemMatch={(lineKey) => {
+            setClassifyingLineKey(null);
+            void handleEditLine(lineKey);
+            setOverrideFormLineKey(lineKey);
+          }}
+          onPrev={(() => {
+            const idx = classifyingLineKey ? unresolvedLineKeys.indexOf(classifyingLineKey) : -1;
+            return idx > 0 ? () => setClassifyingLineKey(unresolvedLineKeys[idx - 1]) : undefined;
+          })()}
+          onNext={(() => {
+            const idx = classifyingLineKey ? unresolvedLineKeys.indexOf(classifyingLineKey) : -1;
+            return idx >= 0 && idx < unresolvedLineKeys.length - 1 ? () => setClassifyingLineKey(unresolvedLineKeys[idx + 1]) : undefined;
+          })()}
+          navLabel={(() => {
+            const idx = classifyingLineKey ? unresolvedLineKeys.indexOf(classifyingLineKey) : -1;
+            return idx >= 0 && unresolvedLineKeys.length > 1 ? `Issue ${idx + 1} of ${unresolvedLineKeys.length}` : undefined;
+          })()}
+        />
+      ) : null}
 
       {!readOnly && showNewItemModal ? (
         <NewItemReviewModal
@@ -1447,7 +1578,7 @@ export function ItemsAndReceivingPanel({
           contextLabel={
             stepAllResolved
               ? `${summary.totalLines} line${summary.totalLines === 1 ? "" : "s"} complete · ${summary.readyCount} inventory · ${summary.expenseCount} non-inventory`
-              : `${blockingIssueCount} issue${blockingIssueCount === 1 ? "" : "s"} remaining`
+              : issueCountLabel(blockingIssueCount)
           }
           contextTone={stepAllResolved ? "neutral" : "warning"}
           primaryLabel="Continue to Review & Post"
@@ -1637,48 +1768,159 @@ function CompactInventoryRow({
   );
 }
 
-// Non-inventory compact row (Invoice line | Classification | Amount |
-// Inventory effect | Status | Action).
-const NON_INVENTORY_ROW_GRID = "sm:grid-cols-[minmax(0,1.7fr)_minmax(0,1.3fr)_minmax(0,0.9fr)_minmax(0,1.1fr)_110px_84px]";
+// Non-inventory row (Invoice line | Treatment | Amount | Invoice effect |
+// Inventory effect | Status | Action) -- what the invoice says, what the
+// AI selected, what the manager can change, and both effects, in one
+// scannable row. The only editor is the shared classification drawer.
+const NON_INVENTORY_ROW_GRID = "sm:grid-cols-[minmax(0,1.6fr)_minmax(0,1.4fr)_minmax(0,0.8fr)_minmax(0,1.2fr)_minmax(0,1fr)_120px_120px]";
 
-function CompactNonInventoryRow({
+function NonInventoryRow({
   id,
-  description,
-  classification,
-  amount,
-  onEditLine,
-  toggleLabel,
+  line,
+  readiness,
+  currency,
+  spendCategoryPath,
+  readOnly,
+  onClassify,
+  savedFlash,
 }: {
   id: string;
-  description: string;
-  classification: string;
-  amount: string;
-  onEditLine: () => void;
-  toggleLabel: string;
+  line: LineClassificationRow;
+  readiness: LineReadiness;
+  currency: string | null;
+  spendCategoryPath?: string;
+  readOnly?: boolean;
+  onClassify: () => void;
+  savedFlash?: boolean;
 }) {
+  const attention = !readiness.ready;
+  const treatment = line.lineTreatment;
+  const treatmentLabel = treatment === "UNRESOLVED" ? "Needs classification" : LINE_TREATMENT_LABEL[treatment];
+  const detail =
+    treatment === "EXPENSE" || treatment === "FREIGHT_FEE"
+      ? (spendCategoryPath ?? line.spendCategoryName ?? "No category")
+      : treatment === "CREDIT_RETURN"
+        ? line.creditSubtype
+          ? line.creditSubtype === "INVENTORY_RETURN"
+            ? `${CREDIT_SUBTYPE_LABEL[line.creditSubtype]} · ${line.inventoryItemName ?? "item not chosen"}`
+            : CREDIT_SUBTYPE_LABEL[line.creditSubtype]
+          : "Credit type not chosen"
+        : treatment === "DISCOUNT"
+          ? line.discountScope === "LINE" ? "Line discount" : line.discountScope === "DOCUMENT" ? "Document discount" : "Scope not chosen"
+          : treatment === "TAX"
+            ? "Sales tax · document level"
+            : line.aiProposedTreatment && line.aiProposedTreatment !== "UNRESOLVED"
+              ? `AI guess: ${LINE_TREATMENT_LABEL[line.aiProposedTreatment]} (${line.aiConfidence !== null ? Math.round(line.aiConfidence * 100) : "?"}%)`
+              : "Unclear line — choose a treatment";
+  const signed = signedLineAmount(treatment, line.lineTotal);
+  const invoiceEffect =
+    treatment === "CREDIT_RETURN" || treatment === "DISCOUNT"
+      ? signed !== null ? `Invoice total decreases by ${formatMoney(Math.abs(signed), currency)}` : "—"
+      : treatment === "TAX"
+        ? "Document tax"
+        : treatment === "UNRESOLVED"
+          ? "—"
+          : "Adds to invoice total";
+  const inventoryEffect =
+    readiness.inventoryEffect.kind === "decrease"
+      ? `Decrease ${readiness.inventoryEffect.quantity ?? "?"} ${readiness.inventoryEffect.unitCode ?? ""}${line.returnLocationName ? ` from ${line.returnLocationName}` : ""}`
+      : "None";
+  const actionLabel =
+    treatment === "UNRESOLVED"
+      ? "Resolve issue"
+      : attention
+        ? readiness.status === "review_recommended" ? "Confirm" : "Resolve issue"
+        : treatment === "EXPENSE" || treatment === "FREIGHT_FEE"
+          ? "Edit classification"
+          : "Change treatment";
   return (
     <div
       id={id}
-      className={`grid grid-cols-1 gap-1.5 border-b border-zinc-800 bg-zinc-950/30 px-3 py-2.5 last:border-0 hover:bg-zinc-800/10 sm:items-center sm:gap-3 ${NON_INVENTORY_ROW_GRID}`}
+      tabIndex={-1}
+      className={`grid grid-cols-1 gap-1.5 border-b border-zinc-800 px-3 py-2.5 last:border-0 focus:outline-none sm:items-start sm:gap-3 ${NON_INVENTORY_ROW_GRID} ${
+        attention ? "border-l-2 border-l-amber-500 bg-amber-950/5 hover:bg-amber-950/10" : "bg-zinc-950/30 hover:bg-zinc-800/10"
+      }`}
     >
-      <p className="truncate text-sm text-zinc-300">{description}</p>
-      <p className="truncate text-xs text-zinc-500">
-        <span className="sm:hidden">Classification: </span>
-        {classification}
-      </p>
-      <p className="truncate text-sm text-zinc-300 tabular-nums">
+      <div className="min-w-0">
+        <p className="truncate text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
+        <p className="truncate text-xs text-zinc-500">{line.vendorSku ? `SKU ${line.vendorSku}` : ""}{line.vendorSku && formatSourceQuantity(line) ? " · " : ""}{formatSourceQuantity(line) ?? ""}</p>
+        {readiness.primaryIssue ? <p className="mt-1 text-xs font-medium text-amber-300">{readiness.primaryIssue}</p> : null}
+      </div>
+      <div className="min-w-0">
+        <p className={`text-sm ${treatment === "UNRESOLVED" ? "text-amber-200" : "text-zinc-100"}`}>
+          <span className="text-zinc-500 sm:hidden">Treatment: </span>
+          {treatmentLabel}
+        </p>
+        <p className="truncate text-xs text-zinc-400">{detail}</p>
+        {readiness.aiLabel ? <p className="text-[11px] text-zinc-500">{readiness.aiLabel}{line.aiConfidence !== null ? ` · ${Math.round(line.aiConfidence * 100)}%` : ""}</p> : null}
+      </div>
+      <p className={`text-sm tabular-nums ${signed !== null && signed < 0 ? "text-sky-300" : "text-zinc-300"}`}>
         <span className="text-zinc-500 sm:hidden">Amount: </span>
-        {amount}
+        {signed !== null ? formatMoney(signed, currency) : "—"}
       </p>
-      <p className="truncate text-xs text-zinc-500">Will not add inventory</p>
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-400">
-        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
-        Non-inventory
+      <p className="text-xs text-zinc-400">
+        <span className="text-zinc-500 sm:hidden">Invoice: </span>
+        {invoiceEffect}
+      </p>
+      <p className={`text-xs ${readiness.inventoryEffect.kind === "decrease" ? "font-medium text-sky-300" : "text-zinc-500"}`}>
+        <span className="text-zinc-500 sm:hidden">Inventory: </span>
+        {inventoryEffect}
+      </p>
+      <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${attention ? "text-amber-400" : "text-emerald-400"}`}>
+        <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${attention ? "bg-amber-500" : "bg-emerald-400"}`} />
+        {attention ? readiness.statusLabel : "Ready"}
       </span>
-      <button type="button" onClick={onEditLine} className={secondaryButtonClassCompact}>
-        {toggleLabel}
-      </button>
+      <div className="flex items-center gap-2">
+        {savedFlash ? <span className="text-[11px] font-medium text-emerald-400">Saved</span> : null}
+        {!readOnly ? (
+          <button type="button" onClick={onClassify} className={secondaryButtonClassCompact}>
+            {actionLabel}
+          </button>
+        ) : null}
+      </div>
     </div>
+  );
+}
+
+function LineGroupSection({
+  title,
+  count,
+  noun,
+  tone,
+  open,
+  onToggle,
+  blurb,
+  children,
+}: {
+  title: string;
+  count: number;
+  noun: string;
+  tone: "success" | "info" | "neutral";
+  open: boolean;
+  onToggle: () => void;
+  blurb: string;
+  children: ReactNode;
+}) {
+  if (count === 0) return null;
+  const dot = tone === "success" ? "bg-emerald-400" : tone === "info" ? "bg-sky-400" : "bg-zinc-500";
+  return (
+    <section className={panelClass}>
+      <button type="button" aria-expanded={open} onClick={onToggle} className="flex w-full items-center gap-3 px-4 py-3.5 text-left hover:bg-zinc-800/40">
+        <span aria-hidden className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`} />
+        <span className="text-sm font-semibold text-zinc-100">{title}</span>
+        <span className="text-[13px] text-zinc-400">
+          · {count} {noun}
+          {count === 1 ? "" : "s"}
+        </span>
+        <span className={`ml-auto text-xs text-zinc-500 transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
+      </button>
+      {open ? (
+        <div className="border-t border-zinc-800">
+          <p className="px-4 pt-3 text-xs text-zinc-400">{blurb}</p>
+          {children}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -1747,6 +1989,9 @@ function formatPurchasePackageDescription(line: LineClassificationRow): string {
 function LineCard({
   id,
   outcome,
+  readiness,
+  currency,
+  onClassify,
   deliveryConflict,
   line,
   receiving,
@@ -1772,7 +2017,6 @@ function LineCard({
   onReviewPackage,
   onNavigateToStep1,
   onApproveExisting,
-  onMarkNonInventory,
   onReviewNewItem,
   actionPending,
   alreadyReceived,
@@ -1794,6 +2038,11 @@ function LineCard({
 }: {
   id: string;
   outcome: LineOutcome;
+  /** THE shared readiness result for this line. */
+  readiness: LineReadiness;
+  currency: string | null;
+  /** Opens the shared "Classify invoice line" drawer. */
+  onClassify: () => void;
   /** True when this line is part of an AMBIGUOUS delivery lineage -- shown as
    * a distinct "Delivery conflict" reason, and the reason it is not Ready. */
   deliveryConflict?: boolean;
@@ -1826,9 +2075,8 @@ function LineCard({
   reviewingPackage: boolean;
   onToggleOverrideForm: () => void;
   onReviewPackage: () => void;
-  onNavigateToStep1?: () => void;
+  onNavigateToStep1?: (lineKey?: string) => void;
   onApproveExisting: (itemId: string, vendorPackage?: ExistingItemVendorPackageInput | null) => void;
-  onMarkNonInventory: () => void;
   onReviewNewItem: () => void;
   actionPending?: boolean;
   alreadyReceived: boolean;
@@ -1855,65 +2103,22 @@ function LineCard({
   // (not authorized, or a non-DRAFT document) sees "View details".
   const toggleLabel = readOnly ? (editingOpen ? "Hide details" : "View details") : editingOpen ? "Close" : "Edit";
 
-  // ============ EXPENSE -- a quiet, clearly-labeled row, never styled
-  // like an incomplete inventory line ============
-  if (outcome === "expense" && !editingOpen) {
+  // ============ NON-INVENTORY TREATMENTS (expense / freight / tax /
+  // discount / credit / inventory return) and UNCLASSIFIED lines: one
+  // treatment-aware row whose only editor is the shared classification
+  // drawer -- never the inventory checklist. ============
+  if (line.lineTreatment !== "INVENTORY_PURCHASE" || readiness.status === "needs_classification") {
     return (
-      <CompactNonInventoryRow
+      <NonInventoryRow
         id={id}
-        description={line.description ?? "—"}
-        classification={spendCategoryPath ?? "Uncategorized expense"}
-        amount={line.lineTotal !== null ? `$${line.lineTotal.toFixed(2)}` : (formatSourceQuantity(line) ?? "—")}
-        onEditLine={onEditLine}
-        toggleLabel={toggleLabel}
+        line={line}
+        readiness={readiness}
+        currency={currency}
+        spendCategoryPath={spendCategoryPath}
+        readOnly={readOnly}
+        onClassify={onClassify}
+        savedFlash={savedFlash}
       />
-    );
-  }
-  if (outcome === "expense") {
-    return (
-      <div id={id} className="border-b border-zinc-800 bg-zinc-950/30 p-3.5 last:border-0">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-zinc-100">{line.description ?? "—"}</p>
-            <p className="mt-0.5 text-xs text-zinc-400">
-              {line.vendorSku ? `Vendor SKU ${line.vendorSku}` : null}
-              {orderedQuantity ? ` · Invoice quantity: ${orderedQuantity}` : ""}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-400">
-              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
-              Expense — no stock
-            </span>
-            <button type="button" onClick={onCloseEditor} className={secondaryButtonClassCompact}>
-              {toggleLabel}
-            </button>
-          </div>
-        </div>
-        {savedFlash ? <p className="mt-1 text-xs font-semibold text-emerald-400">✓ Saved</p> : null}
-        <div className={`mt-3 ${inlineNeutralClass}`}>
-          <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-400">
-            <span aria-hidden>✓</span> Expense classified
-          </p>
-          <p className="mt-1 text-sm font-medium text-zinc-200">
-            {line.description ?? "This line"} → {spendCategoryPath ?? "Uncategorized expense"}
-          </p>
-          <p className="mt-1 text-xs font-semibold text-zinc-300">Will not add inventory</p>
-          <ProvenanceLine provenance={provenance} />
-        </div>
-        {!readOnly ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-zinc-800 pt-3">
-            <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className={secondaryButtonClassCompact}>
-              Change item match
-            </button>
-            {overrideFormOpen ? (
-              <div className="w-full">
-                <ExistingItemOverrideForm items={items} units={units} onCancel={onToggleOverrideForm} onConfirm={onApproveExisting} />
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
     );
   }
 
@@ -2147,11 +2352,9 @@ function LineCard({
                   <button type="button" disabled={actionPending} onClick={onToggleOverrideForm} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
                     Change item match
                   </button>
-                  {line.disposition === "INVENTORY" ? (
-                    <button type="button" disabled={actionPending} onClick={onMarkNonInventory} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
-                      {actionPending ? "Marking…" : "Mark as expense"}
-                    </button>
-                  ) : null}
+                  <button type="button" disabled={actionPending} onClick={onClassify} className="rounded-md border border-zinc-500 px-2.5 py-1 text-[11px] text-zinc-100 disabled:opacity-40">
+                    Change classification
+                  </button>
                 </>
               )}
             </div>
@@ -2181,8 +2384,8 @@ function LineCard({
                 Configured unit: <span className="font-semibold text-white">{formatPurchasePackageDescription(line)}</span>
               </p>
               {!readOnly && onNavigateToStep1 ? (
-                <button type="button" onClick={onNavigateToStep1} className="self-start text-[11px] font-medium text-red-300 underline underline-offset-2 hover:text-red-200">
-                  Correct invoice unit
+                <button type="button" onClick={() => onNavigateToStep1(line.lineKey)} className="self-start text-[11px] font-medium text-red-300 underline underline-offset-2 hover:text-red-200">
+                  Correct invoice value
                 </button>
               ) : null}
             </>

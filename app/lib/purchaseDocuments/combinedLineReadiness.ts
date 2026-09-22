@@ -1,11 +1,11 @@
+import { evaluateLineReadiness, type LineReadinessInput } from "@/app/lib/purchaseDocuments/lineReadiness";
+
 /**
- * Redesign: Steps 2 (Confirm Items) and 3 (Confirm Receiving) combined
- * into one "Confirm Items & Receiving" step. This is the SINGLE shared
- * per-line readiness decision -- drives the card's badge (Ready / Needs
- * attention / Expense), whether it auto-expands or collapses, the
- * page-level summary counts, and the combined step's own completion gate.
- * Never recomputed differently in more than one place (the redesign's own
- * explicit "one shared validation result" requirement).
+ * Legacy adapter over lineReadiness.ts (the ONE authoritative per-line
+ * readiness evaluation). Kept so callers that only know the coarse
+ * disposition keep working; every new surface uses evaluateLineReadiness
+ * directly with the full treatment input. Never a second calculation --
+ * every function here delegates.
  */
 
 export type LineOutcome = "ready" | "needs_attention" | "expense";
@@ -13,42 +13,50 @@ export type LineOutcome = "ready" | "needs_attention" | "expense";
 export interface CombinedLineReadinessInput {
   status: "UNCLASSIFIED" | "PENDING_REVIEW" | "STALE" | "CONFIRMED";
   disposition: "INVENTORY" | "NON_INVENTORY" | "UNRESOLVED";
-  /** True exactly when the confirmed purchase package disagrees with the
-   * invoice unit -- see packageUnitMismatch.ts. */
   hasPackageMismatch: boolean;
-  /** True once this line's receiving draft has everything required
-   * (quantity, verified measurement if the package requires it, and a
-   * destination location) -- see ReceivingPanel's own lineIsReady, reused
-   * unchanged. Null when this line isn't an INVENTORY line at all (not
-   * applicable -- never treated as blocking). */
   receivingReady: boolean | null;
-  /** True when the authoritative inventory-posting scan
-   * (get_purchase_document_posting_blockers) would refuse this line -- the
-   * single source of truth posting itself uses. Catches cases the
-   * invoice-unit-based hasPackageMismatch cannot (e.g. a blank invoice
-   * unit whose RECEIVED unit still differs from the item's base unit), so
-   * a line can no longer read "Ready" here and then fail at posting. */
   hasPostingBlocker?: boolean;
-  /** True when this inventory line is part of an AMBIGUOUS delivery lineage
-   * (the same physical delivery recorded more than once). Posting is blocked
-   * by GA080 until the recorded deliveries are resolved, so such a line can
-   * NEVER read "Ready" -- it is a delivery conflict the manager must resolve
-   * first. This is what keeps the Ready / Needs-attention counts from ever
-   * contradicting the delivery-conflict banner. */
   hasDeliveryConflict?: boolean;
 }
 
+function toReadinessInput(input: CombinedLineReadinessInput): LineReadinessInput {
+  return {
+    lineKey: "legacy",
+    status: input.status,
+    treatment: input.disposition === "INVENTORY" ? "INVENTORY_PURCHASE" : input.disposition === "NON_INVENTORY" ? "EXPENSE" : "UNRESOLVED",
+    creditSubtype: null,
+    discountScope: null,
+    resolutionSource: "MANUAL",
+    aiConfidence: null,
+    lineTotal: null,
+    // The legacy caller has no category facts -- a CONFIRMED NON_INVENTORY
+    // line was, by definition, a classified expense.
+    spendCategoryId: input.disposition === "NON_INVENTORY" ? "legacy" : null,
+    spendCategoryActive: true,
+    spendCategoryRequiresExplanation: false,
+    explanation: null,
+    inventoryItemId: input.status === "CONFIRMED" && input.disposition === "INVENTORY" ? "legacy" : null,
+    aiSuggestedInventoryItemId: null,
+    aiSuggestedIsNewProposal: false,
+    hasPackageMismatch: input.hasPackageMismatch,
+    receivingReady: input.receivingReady,
+    hasPostingBlocker: input.hasPostingBlocker,
+    hasDeliveryConflict: input.hasDeliveryConflict,
+    returnQuantity: null,
+    returnUnitCode: null,
+    returnLocationId: null,
+    returnReason: null,
+    returnImpactAcknowledged: false,
+    returnBaseQuantity: null,
+    returnBaseUnitCode: null,
+    returnOnHandQuantity: null,
+  };
+}
+
 export function classifyLineOutcome(input: CombinedLineReadinessInput): LineOutcome {
-  if (input.status === "CONFIRMED" && input.disposition === "NON_INVENTORY") return "expense";
-  // A delivery conflict blocks an inventory line before any other check -- it
-  // would multiply inventory at posting, so it can never be "ready".
-  if (input.hasDeliveryConflict) return "needs_attention";
-  if (input.status !== "CONFIRMED") return "needs_attention";
-  if (input.disposition !== "INVENTORY") return "needs_attention";
-  if (input.hasPackageMismatch) return "needs_attention";
-  if (input.hasPostingBlocker) return "needs_attention";
-  if (input.receivingReady !== true) return "needs_attention";
-  return "ready";
+  const result = evaluateLineReadiness(toReadinessInput(input));
+  if (!result.ready) return "needs_attention";
+  return result.treatment === "INVENTORY_PURCHASE" ? "ready" : "expense";
 }
 
 export interface CombinedStepSummary {
@@ -56,8 +64,6 @@ export interface CombinedStepSummary {
   readyCount: number;
   needsAttentionCount: number;
   expenseCount: number;
-  /** True only when every line is ready or a correctly-classified expense
-   * -- the combined step's own completion gate. */
   allResolved: boolean;
 }
 
@@ -75,21 +81,13 @@ export interface ChecklistCompletion {
   receivingReadyOk: boolean;
 }
 
-/** The per-panel "which of the three checks is actually done" breakdown
- * shown on an inventory line's card -- the SAME three facts
- * classifyLineOutcome already folds into a single ready/needs_attention
- * verdict, exposed separately here so a needs-attention card can point at
- * the specific incomplete check instead of a single undifferentiated
- * warning. Never a competing calculation: a line is "ready" exactly when
- * all three of these are true. */
+/** The three sub-checks of the SAME verdict, exposed so a needs-attention
+ * card can point at the specific incomplete check. */
 export function checklistCompletion(input: ChecklistCompletionInput): ChecklistCompletion {
   const itemMatchOk = input.status === "CONFIRMED";
   const isInventory = itemMatchOk && input.disposition === "INVENTORY";
   return {
     itemMatchOk,
-    // A posting blocker is folded into the package check -- in practice it
-    // is a purchase-package/unit problem (an unconfirmed package, or a
-    // received unit that does not match the item's base unit).
     packageOk: isInventory && !input.hasPackageMismatch && !input.hasPostingBlocker,
     receivingReadyOk: isInventory && input.receivingReady === true,
   };
@@ -99,11 +97,7 @@ export function summarizeCombinedStep(outcomes: LineOutcome[]): CombinedStepSumm
   const readyCount = outcomes.filter((o) => o === "ready").length;
   const expenseCount = outcomes.filter((o) => o === "expense").length;
   const needsAttentionCount = outcomes.filter((o) => o === "needs_attention").length;
-  return {
-    totalLines: outcomes.length,
-    readyCount,
-    needsAttentionCount,
-    expenseCount,
-    allResolved: outcomes.length > 0 && needsAttentionCount === 0,
-  };
+  // Same rule as summarizeLineReadiness().allReady: an empty document is
+  // never resolved, and one needs-attention line blocks the step.
+  return { totalLines: outcomes.length, readyCount, needsAttentionCount, expenseCount, allResolved: outcomes.length > 0 && needsAttentionCount === 0 };
 }

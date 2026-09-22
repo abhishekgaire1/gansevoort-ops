@@ -102,6 +102,27 @@ function shortDate(value: string | null): string {
   return new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+
+/** Read-only label for a non-purchase line in the posted/verified summary:
+ * names the treatment (and the credit subtype) so a manager reading the
+ * record can see WHY it created no purchase receipt. */
+function nonInventoryTreatmentLabel(treatment: string | null, creditSubtype: string | null): string {
+  switch (treatment) {
+    case "EXPENSE":
+      return "Expense";
+    case "CREDIT_RETURN":
+      return creditSubtype === "INVENTORY_RETURN" ? "Inventory return (audited inventory decrease)" : creditSubtype === "RETURNABLE_CONTAINER_CREDIT" ? "Returnable-container credit" : "Financial credit";
+    case "DISCOUNT":
+      return "Discount";
+    case "TAX":
+      return "Tax";
+    case "FREIGHT_FEE":
+      return "Freight / fee";
+    default:
+      return "Non-inventory";
+  }
+}
+
 export function VerifiedPurchaseDocumentSummary(props: Props) {
   const router = useRouter();
   const [downloadPending, setDownloadPending] = useState(false);
@@ -650,7 +671,10 @@ export function VerifiedPurchaseDocumentSummary(props: Props) {
                     <li key={line.lineKey} className="flex items-baseline justify-between gap-3 py-2 text-sm">
                       <div>
                         <p className="font-medium text-zinc-100">{line.description ?? "—"}</p>
-                        {line.spendCategoryPath ? <p className="text-xs text-zinc-500">Spend Category: {line.spendCategoryPath}</p> : null}
+                        <p className="text-xs text-zinc-500">
+                          {nonInventoryTreatmentLabel(line.lineTreatment, line.creditSubtype)}
+                          {line.spendCategoryPath ? ` · Spend Category: ${line.spendCategoryPath}` : ""}
+                        </p>
                       </div>
                       <span className="text-zinc-200">{formatMoney(line.lineTotal, props.header.currency)}</span>
                     </li>

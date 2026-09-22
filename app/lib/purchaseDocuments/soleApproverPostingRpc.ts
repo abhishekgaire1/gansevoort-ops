@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { mapPurchaseDocumentRpcError, PriceReviewRequiredError, DeliveryConflictError, PURCHASE_DOCUMENT_SQLSTATE } from "@/app/lib/purchaseDocuments/errors";
+import { mapPurchaseDocumentRpcError, PriceReviewRequiredError, DeliveryConflictError, UnresolvedLinesError, PURCHASE_DOCUMENT_SQLSTATE } from "@/app/lib/purchaseDocuments/errors";
 import { mapInventoryRpcError, INVENTORY_SQLSTATE } from "@/app/lib/inventory/errors";
 import type { SoleApproverReasonCode } from "@/app/lib/purchaseDocuments/soleApproverReason";
 
@@ -36,7 +36,7 @@ export interface PostPurchaseDocumentSoleApproverResult {
   status: string;
   verifiedAt: string;
   verificationMethod: string;
-  postingStatus: "POSTED" | "ALREADY_POSTED";
+  postingStatus: "POSTED" | "ALREADY_POSTED" | "NO_INVENTORY_CHANGES";
   postingId: string | null;
   postedLineCount: number;
   movementCount: number;
@@ -44,6 +44,11 @@ export interface PostPurchaseDocumentSoleApproverResult {
   inventoryValue: number;
   inventoryLineCount: number;
   expenseLineCount: number;
+  creditLineCount: number;
+  discountLineCount: number;
+  taxLineCount: number;
+  returnLineCount: number;
+  acceptedLineCount: number;
 }
 
 interface PostPurchaseDocumentSoleApproverRow {
@@ -51,7 +56,7 @@ interface PostPurchaseDocumentSoleApproverRow {
   out_status: string;
   out_verified_at: string;
   out_verification_method: string;
-  out_posting_status: "POSTED" | "ALREADY_POSTED";
+  out_posting_status: "POSTED" | "ALREADY_POSTED" | "NO_INVENTORY_CHANGES";
   out_posting_id: string | null;
   out_posted_line_count: number;
   out_movement_count: number;
@@ -59,6 +64,11 @@ interface PostPurchaseDocumentSoleApproverRow {
   out_inventory_value: number;
   out_inventory_line_count: number;
   out_expense_line_count: number;
+  out_credit_line_count: number;
+  out_discount_line_count: number;
+  out_tax_line_count: number;
+  out_return_line_count: number;
+  out_accepted_line_count: number;
 }
 
 function mapSoleApproverRpcError(error: { code?: string; message: string; details?: string | null }): Error {
@@ -71,6 +81,9 @@ function mapSoleApproverRpcError(error: { code?: string; message: string; detail
   }
   if (error.code === PURCHASE_DOCUMENT_SQLSTATE.DELIVERY_CONFLICT) {
     return new DeliveryConflictError(error.message);
+  }
+  if (error.code === PURCHASE_DOCUMENT_SQLSTATE.UNRESOLVED_LINES) {
+    return new UnresolvedLinesError(error.message, error.details ?? undefined);
   }
   if (error.code && (Object.values(INVENTORY_SQLSTATE) as string[]).includes(error.code)) {
     return mapInventoryRpcError(error);
@@ -114,5 +127,10 @@ export async function postPurchaseDocumentSoleApproverRpc(
     inventoryValue: row.out_inventory_value,
     inventoryLineCount: row.out_inventory_line_count,
     expenseLineCount: row.out_expense_line_count,
+    creditLineCount: Number(row.out_credit_line_count ?? 0),
+    discountLineCount: Number(row.out_discount_line_count ?? 0),
+    taxLineCount: Number(row.out_tax_line_count ?? 0),
+    returnLineCount: Number(row.out_return_line_count ?? 0),
+    acceptedLineCount: Number(row.out_accepted_line_count ?? 0),
   };
 }

@@ -1,10 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { savePurchaseDocumentDraft, submitPurchaseDocumentForVerification, getPurchaseDocumentPreparationStatus } from "@/app/actions/purchaseDocuments";
-import { getPurchaseDocumentLineClassifications } from "@/app/actions/itemClassification";
+import { getPurchaseDocumentLineClassifications, ensureItemMatchingStarted, getClassificationMatchingStatus, type LineClassificationRow } from "@/app/actions/itemClassification";
+import { acceptAiAssignedClassifications } from "@/app/actions/lineTreatment";
+import { listInventoryItems, listSpendCategories, listUnits, type InventoryItemSummary, type SpendCategorySummary, type UnitSummary } from "@/app/actions/itemMaster";
+import { listLocations, type LocationSummary } from "@/app/actions/receiving";
+import { evaluateLineReadiness, summarizeLineReadiness, type LineReadiness } from "@/app/lib/purchaseDocuments/lineReadiness";
+import { readinessInputFromRow } from "@/app/lib/purchaseDocuments/readinessInputFromRow";
+import { Step3Unavailable } from "./Step3Unavailable";
 import { reconcileStaleUnitFlags, buildResolvedUnitNotes, type ResolvedUnitNote } from "@/app/lib/purchaseDocuments/lineUnitResolution";
+import { reconcileTreatmentFlags, reconcileTotalMismatchFlag } from "@/app/lib/purchaseDocuments/treatmentFlagReconciliation";
+import { reconcileTotals } from "@/app/lib/purchaseDocuments/totalsReconciliation";
 import { useCompactAskGansevoort } from "@/app/components/manager/askGansevoort/AskGansevoortDensityContext";
 import { Stepper } from "./Stepper";
 import { Step1ReviewInvoice, emptyStep1Line } from "./Step1ReviewInvoice";
@@ -142,11 +150,26 @@ export function PreparationWizard({
   // optimistically hides a genuine warning for a moment.
   const [resolvedLineKeys, setResolvedLineKeys] = useState<Set<string> | null>(null);
   const [resolvedUnitNotes, setResolvedUnitNotes] = useState<ResolvedUnitNote[]>([]);
+  // Line-treatment model: the authoritative classification rows are needed
+  // on Step 1 now (AI treatment / confidence / status per line), plus the
+  // lookup lists the classification editor needs. Fetched once here and
+  // refetched after every classification change.
+  const [classificationRows, setClassificationRows] = useState<LineClassificationRow[] | null>(null);
+  const [spendCategories, setSpendCategories] = useState<SpendCategorySummary[]>([]);
+  const [items, setItems] = useState<InventoryItemSummary[]>([]);
+  const [units, setUnits] = useState<UnitSummary[]>([]);
+  const [locations, setLocations] = useState<LocationSummary[]>([]);
+  const [matchingActive, setMatchingActive] = useState(false);
+  const matchingAttempted = useRef(false);
+  // ?line=<lineKey> deep link (Step 3's "Review line", Step 1's "Change
+  // item match") -- consumed once by the step that mounts.
+  const [focusLineKey, setFocusLineKey] = useState<string | null>(() => searchParams.get("line"));
 
   const setRequestedStep = useCallback(
-    (step: WizardStepId) => {
+    (step: WizardStepId, lineKey?: string | null) => {
       setRequestedStepState(step);
-      router.push(`/manager/purchases/${purchaseDocumentId}?step=${WIZARD_STEP_SLUGS[step]}`, { scroll: false });
+      setFocusLineKey(lineKey ?? null);
+      router.push(`/manager/purchases/${purchaseDocumentId}?step=${WIZARD_STEP_SLUGS[step]}${lineKey ? `&line=${encodeURIComponent(lineKey)}` : ""}`, { scroll: false });
     },
     [purchaseDocumentId, router]
   );
@@ -156,8 +179,39 @@ export function PreparationWizard({
   // exact same CONFIRMED classification status Step 2 already treats as
   // authoritative, just applied here to stop a genuinely-resolved line's
   // stale-unit warning from lingering on Step 1.
-  const draftFlags = useMemo(() => reconcileStaleUnitFlags(rawDraftFlags, lines, resolvedLineKeys ?? new Set()), [rawDraftFlags, lines, resolvedLineKeys]);
-  const step1Complete = !draftFlags.some((f) => f.severity === "error");
+  // A credit/discount line is EXPECTED to be negative -- its extraction-time
+  // "negative amount" errors are removed once the treatment says so (decided,
+  // or AI-proposed and pending), never re-derived here.
+  const treatmentByLineKey = useMemo(() => new Map((classificationRows ?? []).map((r) => [r.lineKey, r.lineTreatment] as const)), [classificationRows]);
+  const treatmentAwareReconciles = useMemo(
+    () =>
+      classificationRows === null
+        ? null
+        : reconcileTotals(
+            lines.map((l) => ({ treatment: (l.lineKey && treatmentByLineKey.get(l.lineKey)) || "UNRESOLVED", lineTotal: l.lineTotal })),
+            { tax: header.tax, fees: header.fees, total: header.total }
+          ).reconciles,
+    [classificationRows, lines, treatmentByLineKey, header.tax, header.fees, header.total]
+  );
+  const draftFlags = useMemo(
+    () => reconcileTotalMismatchFlag(reconcileTreatmentFlags(reconcileStaleUnitFlags(rawDraftFlags, lines, resolvedLineKeys ?? new Set()), lines, treatmentByLineKey), treatmentAwareReconciles),
+    [rawDraftFlags, lines, resolvedLineKeys, treatmentByLineKey, treatmentAwareReconciles]
+  );
+  // THE shared per-line readiness (lineReadiness.ts) -- Step 1's gate is
+  // "every saved line's classification is settled"; Step 2 adds receiving.
+  const readinessByLineKey = useMemo(() => {
+    const map = new Map<string, LineReadiness>();
+    for (const row of classificationRows ?? []) map.set(row.lineKey, evaluateLineReadiness(readinessInputFromRow(row)));
+    return map;
+  }, [classificationRows]);
+  const readinessSummary = useMemo(() => summarizeLineReadiness(Array.from(readinessByLineKey.values())), [readinessByLineKey]);
+  const savedLineKeys = useMemo(() => new Set(lines.map((l) => l.lineKey).filter((k): k is string => Boolean(k))), [lines]);
+  const unsettledLineKeys = useMemo(
+    () => Array.from(readinessByLineKey.values()).filter((r) => !r.classificationSettled && savedLineKeys.has(r.lineKey)).map((r) => r.lineKey),
+    [readinessByLineKey, savedLineKeys]
+  );
+  const classificationsSettled = classificationRows !== null && unsettledLineKeys.length === 0 && !matchingActive;
+  const step1Complete = !draftFlags.some((f) => f.severity === "error") && classificationsSettled;
   const isDirty = useMemo(
     () => purchaseDocumentDiffCount(computePurchaseDocumentDiff(lastSavedHeader, lastSavedLines, header, lines)) > 0,
     [lastSavedHeader, lastSavedLines, header, lines]
@@ -166,9 +220,25 @@ export function PreparationWizard({
   const refetchLineClassifications = useCallback(async () => {
     const result = await getPurchaseDocumentLineClassifications(purchaseDocumentId);
     if (!result.ok) return;
+    setClassificationRows(result.lines);
     setResolvedLineKeys(new Set(result.lines.filter((l) => l.status === "CONFIRMED").map((l) => l.lineKey)));
     setResolvedUnitNotes(buildResolvedUnitNotes(rawDraftFlags, lines, result.lines));
   }, [purchaseDocumentId, rawDraftFlags, lines]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([listSpendCategories(), listInventoryItems(), listUnits(), listLocations()]).then(([spend, itemsResult, unitsResult, locationsResult]) => {
+      if (cancelled) return;
+      if (spend.ok) setSpendCategories(spend.categories);
+      if (itemsResult.ok) setItems(itemsResult.items);
+      if (unitsResult.ok) setUnits(unitsResult.units);
+      if (locationsResult.ok) setLocations(locationsResult.locations);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
 
   const refetchPreparationStatus = useCallback(async () => {
     const result = await getPurchaseDocumentPreparationStatus(purchaseDocumentId);
@@ -186,6 +256,38 @@ export function PreparationWizard({
     }
     await refetchLineClassifications();
   }, [purchaseDocumentId, refetchLineClassifications]);
+
+  // Classification runs on Step 1 too (it used to start only on Step 2):
+  // kick off item matching for any unclassified/stale line once, poll the
+  // run, and refetch rows as soon as it finishes so the AI treatments
+  // appear on Review Invoice.
+  useEffect(() => {
+    if (!editable || classificationRows === null) return;
+    const needsRun = classificationRows.some((r) => r.status === "UNCLASSIFIED" || r.status === "STALE");
+    if (!needsRun) {
+      matchingAttempted.current = false;
+      return;
+    }
+    if (matchingAttempted.current) return;
+    matchingAttempted.current = true;
+    let cancelled = false;
+    (async () => {
+      setMatchingActive(true);
+      await ensureItemMatchingStarted(purchaseDocumentId);
+      for (let attempt = 0; attempt < 40 && !cancelled; attempt++) {
+        const status = await getClassificationMatchingStatus(purchaseDocumentId);
+        if (!status.ok || !status.active) break;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      if (cancelled) return;
+      setMatchingActive(false);
+      await refetchPreparationStatus();
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editable, classificationRows === null, classificationRows?.some((r) => r.status === "UNCLASSIFIED" || r.status === "STALE")]);
 
   const { steps, activeStep, furthestReachableStep } = deriveWizardProgress({
     step1Complete,
@@ -244,6 +346,17 @@ export function PreparationWizard({
     setContinuePending(true);
     setStep1Error(null);
     const result = await continueFromStep1({ step1Complete, editable, isDirty, persistDraft });
+    if (result.advanced && editable) {
+      // The manager's acceptance of every "AI assigned" / "Matched previous
+      // decision" proposal still pending -- recorded as their own decision.
+      const accepted = await acceptAiAssignedClassifications(purchaseDocumentId);
+      if (!accepted.ok) {
+        setContinuePending(false);
+        setStep1Error(accepted.message);
+        return;
+      }
+      await refetchLineClassifications();
+    }
     setContinuePending(false);
     if (result.advanced) {
       setRequestedStep(2);
@@ -300,6 +413,10 @@ export function PreparationWizard({
   // that doesn't exist -- what's actually true is READINESS (every line
   // is either ready for inventory or a classified expense), so the
   // sublabel says exactly that, never a stale/mismatched word.
+  const step3Unavailable = requestedStep === 3 && unsettledLineKeys.length > 0;
+  // Direct navigation to Review & Post: never flash Step 1 while the
+  // classification rows (which decide reachability) are still loading.
+  const step3Pending = requestedStep === 3 && classificationRows === null;
   const step2StatusText = step2Progress
     ? step2Progress.needsAttentionCount > 0
       ? `${step2Progress.needsAttentionCount} issue${step2Progress.needsAttentionCount === 1 ? "" : "s"} remaining`
@@ -315,12 +432,30 @@ export function PreparationWizard({
         activeStep={activeStep}
         furthestReachableStep={furthestReachableStep}
         onNavigate={setRequestedStep}
-        stepStatusText={step2StatusText ? { 2: step2StatusText } : undefined}
+        stepStatusText={{
+          ...(step2StatusText ? { 2: step2StatusText } : {}),
+          ...(unsettledLineKeys.length > 0 ? { 3: `Unavailable — classify ${unsettledLineKeys.length} invoice line${unsettledLineKeys.length === 1 ? "" : "s"}` } : {}),
+        }}
         readyToContinue={{ 1: step1Complete, 2: (step2Progress?.needsAttentionCount ?? 0) === 0 && (step2Progress?.totalLines ?? 0) > 0 }}
       />
 
-      {activeStep === 1 ? (
+      {step3Pending ? (
+        <div aria-busy="true" className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+          <p className="text-sm text-zinc-300">Loading…</p>
+        </div>
+      ) : null}
+
+      {step3Unavailable ? (
+        <Step3Unavailable
+          count={unsettledLineKeys.length}
+          onReviewLine={() => setRequestedStep(1, unsettledLineKeys[0] ?? null)}
+          onBack={() => setRequestedStep(2)}
+        />
+      ) : null}
+
+      {activeStep === 1 && !step3Unavailable && !step3Pending ? (
         <Step1ReviewInvoice
+          purchaseDocumentId={purchaseDocumentId}
           viewUrl={viewUrl}
           viewError={viewError}
           contentType={contentType}
@@ -341,6 +476,17 @@ export function PreparationWizard({
           resolvedUnitNotes={resolvedUnitNotes}
           aiWarnings={aiWarnings}
           aiModel={aiModel}
+          classificationRows={classificationRows}
+          readinessByLineKey={readinessByLineKey}
+          matchingActive={matchingActive}
+          spendCategories={spendCategories}
+          items={items}
+          units={units}
+          locations={locations}
+          onClassificationChanged={refetchPreparationStatus}
+          onChangeItemMatch={(lineKey) => setRequestedStep(2, lineKey)}
+          isDirty={isDirty}
+          focusLineKey={focusLineKey}
           onContinue={handleContinueFromStep1}
           continuePending={continuePending}
           onSave={handleSave}
@@ -350,23 +496,27 @@ export function PreparationWizard({
         />
       ) : null}
 
-      {activeStep === 2 ? (
+      {activeStep === 2 && !step3Unavailable && !step3Pending ? (
         <ItemsAndReceivingPanel
           purchaseDocumentId={purchaseDocumentId}
           vendorName={vendorName}
+          currency={header.currency}
           readOnly={!editable}
+          focusLineKey={focusLineKey}
           onChange={refetchPreparationStatus}
           onAllResolvedChange={setStep2Resolved}
           onProgressChange={setStep2Progress}
           onContinue={editable ? () => setRequestedStep(3) : undefined}
-          onNavigateToStep1={editable ? () => setRequestedStep(1) : undefined}
+          onNavigateToStep1={editable ? (lineKey?: string) => setRequestedStep(1, lineKey ?? null) : undefined}
         />
       ) : null}
 
-      {activeStep === 3 ? (
+      {activeStep === 3 && !step3Unavailable && !step3Pending ? (
         <Step4ReviewSend
           header={header}
           lines={lines}
+          classificationRows={classificationRows}
+          readinessSummary={readinessSummary}
           documentStatus={documentStatus}
           version={version}
           vendorName={vendorName}
@@ -380,7 +530,7 @@ export function PreparationWizard({
           onSend={handleSend}
           sendPending={sendPending}
           sendError={sendError}
-          onNavigateToStep={setRequestedStep}
+          onNavigateToStep={(step, lineKey) => setRequestedStep(step, lineKey ?? null)}
           onPreparationStatusChange={refetchPreparationStatus}
           onPostedSoleApprover={onSubmitted}
         />

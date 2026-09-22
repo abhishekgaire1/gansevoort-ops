@@ -1,42 +1,35 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getPurchaseDocumentReviewSummary, canUseSoleApproverPosting, postPurchaseDocumentSoleApprover, getAmendmentAlreadyPosted } from "@/app/actions/purchaseDocuments";
 import { listActiveEmployees, correctDocumentDeliveryVerifier, type EmployeeSummary } from "@/app/actions/receiving";
 import { getPurchaseDocumentPriceReviewAction, type GetPriceReviewResult } from "@/app/actions/priceReview";
+import type { LineClassificationRow } from "@/app/actions/itemClassification";
 import type { PreparationStatus } from "@/app/lib/purchaseDocuments/getPreparationStatus";
 import type { PurchaseDocumentReviewSummary } from "@/app/lib/purchaseDocuments/getReviewSummary";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine } from "@/app/lib/purchaseDocuments/types";
-import { buildFinalReviewRows, type FinalReviewRow } from "@/app/lib/purchaseDocuments/finalReviewTable";
 import { deriveSendActionState } from "@/app/lib/purchaseDocuments/sendActionState";
 import type { SoleApproverReasonCode } from "@/app/lib/purchaseDocuments/soleApproverReason";
+import { postPrimaryLabel, type ReadinessSummary } from "@/app/lib/purchaseDocuments/lineReadiness";
+import { LINE_TREATMENT_LABEL, CREDIT_SUBTYPE_LABEL, signedLineAmount } from "@/app/lib/purchaseDocuments/lineTreatment";
+import { reconcileTotals } from "@/app/lib/purchaseDocuments/totalsReconciliation";
 import { formatMoney } from "@/app/lib/formatMoney";
 import { WorkflowFooter } from "@/app/components/receiving/WorkflowFooter";
 import { SoleApproverPostModal } from "./SoleApproverPostModal";
-import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, panelMetaClass, inlineWarningClass, tableWrapClass, tableClass, tableHeadClass, tableHeadCellClass, tableHeadCellRightClass, tableRowClass, tableCellClass, tableCellRightClass, tableCellMutedClass } from "@/app/components/manager/surfaces";
-import { secondaryButtonClass, textLinkClass } from "@/app/components/manager/buttonStyles";
+import { panelClass, panelHeaderClass, panelBodyClass, panelTitleClass, panelMetaClass, tableWrapClass, tableClass, tableHeadClass, tableHeadCellClass, tableHeadCellRightClass, tableRowClass, tableCellClass, tableCellRightClass, tableCellMutedClass } from "@/app/components/manager/surfaces";
+import { textLinkClass } from "@/app/components/manager/buttonStyles";
 
 /**
- * Redesign: this is now Step 3 ("Review & Post") of the 3-step wizard --
- * only its position/label changed (it was Step 4, "Review & Send," when
- * the wizard had a separate Confirm Items and Confirm Receiving step; the
- * component itself was already a pure summary of decisions made upstream,
- * so its own content needed no changes).
- *
- * Manager 1's final check before submission. Three layers, each
- * shown exactly ONCE (the previous layout repeated every line name across
- * separate Items/Receiving/Non-Inventory sections):
- *   1. A compact readiness strip -- driven ENTIRELY by preparationStatus,
- *      the same RPC-enforced rule submit_purchase_document_for_verification
- *      itself uses. Never recomputed here.
- *   2. A compact document grid (header + preparation facts).
- *   3. ONE consolidated read-only line table -- invoice commercials
- *      (qty/unit/price/total) side by side with mapping and effective
- *      receiving facts, merged by buildFinalReviewRows from the SAME
- *      authoritative read models the gates use (no new calculations).
- * Nothing here is editable; a manager who spots a problem navigates back
- * via the stepper/back links to fix it, and this summary refreshes on
- * return.
+ * Step 3 -- Review & Post. Separate, truthful summaries per treatment
+ * (inventory to receive / inventory returns / expenses / credits &
+ * discounts / taxes & charges), a totals reconciliation across all line
+ * types, the inventory-impact panel, and the same readiness the Stepper
+ * and Step 2 use. The primary action is the authorized manager's post
+ * ("Post invoice & inventory" when inventory changes exist, "Post
+ * invoice" otherwise -- never "Post to inventory" for an expense-only
+ * invoice); Send for Final Review remains the second-reviewer route.
+ * Nothing here is editable; every fact comes from the authoritative read
+ * models (classification rows, effective receipts, preparation status).
  */
 
 const DOCUMENT_TYPE_LABEL: Record<string, string> = {
@@ -50,15 +43,11 @@ function date(value: string | null): string {
   return new Date(value).toLocaleDateString();
 }
 
-const STATUS_BADGE_CLASS: Record<FinalReviewRow["status"]["kind"], string> = {
-  ready: "bg-emerald-400/10 text-emerald-300",
-  needs_review: "bg-amber-400/10 text-amber-300",
-  exception: "bg-orange-400/10 text-orange-300",
-};
-
 export function Step4ReviewSend({
   header,
   lines,
+  classificationRows,
+  readinessSummary,
   documentStatus,
   version,
   vendorName,
@@ -77,18 +66,12 @@ export function Step4ReviewSend({
   onPostedSoleApprover,
 }: {
   header: PurchaseDocumentHeaderDraft;
-  /** The current draft lines exactly as they will be submitted -- the
-   * authoritative source for the table's commercial columns. */
   lines: PurchaseDocumentLine[];
-  /** Lifecycle truth for the primary action: Send exists only while
-   * DRAFT; once READY_FOR_VERIFICATION the button becomes an inert
-   * "✓ Sent" state (Withdraw Submission is the separate explicit action
-   * to take it back). The submit RPC remains the integrity boundary. */
+  /** The authoritative classification rows (null while loading). */
+  classificationRows: LineClassificationRow[] | null;
+  /** THE shared readiness summary (lineReadiness.ts). */
+  readinessSummary: ReadinessSummary;
   documentStatus: "DRAFT" | "READY_FOR_VERIFICATION";
-  /** The document's current optimistic-concurrency version -- required by
-   * Post Now as Sole Approver (post_purchase_document_sole_approver's own
-   * p_expected_version lock), the same version Send for Second Review
-   * already submits via onSend upstream. */
   version: number;
   vendorName: string | null;
   preparationStatus: PreparationStatus | null;
@@ -97,28 +80,12 @@ export function Step4ReviewSend({
   preparedAt: string | null;
   purchaseDocumentId: string;
   documentId: string;
-  /** Whether this is the document's own preparer, actively viewing a
-   * still-mutable DRAFT -- mirrors every other step's own editable prop.
-   * The "Set Delivery Verifier" control below must never render live for
-   * anyone else (a non-preparer viewing someone else's draft, or the
-   * preparer looking back at their own already-submitted document) --
-   * the backend now rejects it outside DRAFT regardless (see
-   * 20260811100059), but the control itself must not even offer the
-   * false impression that it would work. */
   editable: boolean;
   onSend: () => void;
   sendPending: boolean;
   sendError: string | null;
-  /** Redesign: step 2 is now the combined "Confirm Items & Receiving"
-   * step -- every non-invoice-date blocker routes back there, never to a
-   * separate receiving step (that step no longer exists). */
-  onNavigateToStep: (step: 1 | 2) => void;
-  /** Fires after a successful Post Now as Sole Approver -- the parent
-   * refreshes, same as onSend's own success path, so the page re-renders
-   * as the now-VERIFIED/POSTED document. */
+  onNavigateToStep: (step: 1 | 2, lineKey?: string | null) => void;
   onPostedSoleApprover: () => void;
-  /** Refetches preparationStatus (and deliveryVerifiedByName) after the
-   * inline "Set Delivery Verifier" resolution below succeeds. */
   onPreparationStatusChange: () => void;
 }) {
   const [summary, setSummary] = useState<PurchaseDocumentReviewSummary | null>(null);
@@ -127,29 +94,12 @@ export function Step4ReviewSend({
   const [verifierChoice, setVerifierChoice] = useState("");
   const [verifierPending, setVerifierPending] = useState(false);
   const [verifierError, setVerifierError] = useState<string | null>(null);
-
   const [soleApproverEligible, setSoleApproverEligible] = useState(false);
   const [soleApproverModalOpen, setSoleApproverModalOpen] = useState(false);
   const [soleApproverPending, setSoleApproverPending] = useState(false);
   const [soleApproverError, setSoleApproverError] = useState<string | null>(null);
-  /** Per-line reasons when a Post Now attempt is refused by the posting
-   * gate -- shown in the modal so the manager sees exactly which line and
-   * why, instead of only a generic "Cannot post inventory yet." */
   const [soleApproverBlockers, setSoleApproverBlockers] = useState<{ description: string | null; reason: string }[]>([]);
   const [amendmentAlreadyPosted, setAmendmentAlreadyPosted] = useState(false);
-  // Secondary facts (SKU, unit price, condition, package derivation, price
-  // comparison) move into an expandable row detail -- never crammed into
-  // the primary table alongside Type/Item/Matched/Received/Destination/
-  // Amount/Status.
-  const [expandedRowKeys, setExpandedRowKeys] = useState<Set<string>>(new Set());
-  function toggleRowExpanded(key: string) {
-    setExpandedRowKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -192,12 +142,12 @@ export function Step4ReviewSend({
       expectedVersion: version,
       reason,
       notes: notes || null,
+      // A fresh key per attempt; the database converges a retry on the
+      // existing posting (unique receipt_line_id / classification_id).
       idempotencyKey: crypto.randomUUID(),
     });
     setSoleApproverPending(false);
     if (!result.ok) {
-      // Surface the server's ACTUAL rejection reason (never a bare "try
-      // again"), including a quotable reference / correlation id when present.
       const reference = "reference" in result && result.reference ? result.reference : null;
       const correlationId = "correlationId" in result && result.correlationId ? result.correlationId : null;
       const suffix = reference ? ` (Reference: ${reference})` : correlationId ? ` (Reference: ${correlationId})` : "";
@@ -205,10 +155,6 @@ export function Step4ReviewSend({
       if (result.reason === "blocked") {
         setSoleApproverBlockers(result.blockers.map((b) => ({ description: b.description, reason: b.reason })));
       }
-      // Retry safety: posting is idempotent at the database level (the unique
-      // receipt_line_id backbone converges a duplicate/retry on the existing
-      // posting -> ALREADY_POSTED), and the button stays disabled while
-      // pending, so a double-click or retry can never double-post.
       return;
     }
     setSoleApproverModalOpen(false);
@@ -217,11 +163,10 @@ export function Step4ReviewSend({
 
   const ready = preparationStatus?.ready ?? false;
   const blockers = preparationStatus?.blockers ?? [];
-  // Ambiguous delivery lineage (GA080): a document-level blocker. While it
-  // stands, no inventory line may show Ready -- its posting quantity is unknown.
   const hasDeliveryConflict = blockers.some((b) => /recorded deliveries|delivery records|separate physical deliveries/i.test(b.reason));
   const missingDeliveryVerifier = blockers.some((b) => /delivery verified/i.test(b.reason));
   const typeLabel = header.documentType ? (DOCUMENT_TYPE_LABEL[header.documentType] ?? header.documentType) : "—";
+  const currency = header.currency;
 
   useEffect(() => {
     if (!missingDeliveryVerifier) return;
@@ -249,219 +194,320 @@ export function Step4ReviewSend({
     onPreparationStatusChange();
   }
 
-  const locationsComplete = summary ? summary.receiving.every((r) => r.locationName !== null) : null;
-  const exceptionCount = summary?.exceptions.length ?? 0;
-  const rows = buildFinalReviewRows({ lines, summary, blockers });
-  const sendAction = deriveSendActionState({ status: documentStatus, editable, ready });
+  // ---- Per-treatment summaries from the authoritative rows ----
+  const rows = useMemo(() => classificationRows ?? [], [classificationRows]);
+  const rowByLineKey = useMemo(() => new Map(rows.map((r) => [r.lineKey, r])), [rows]);
+  const lineByKey = useMemo(() => new Map(lines.filter((l) => l.lineKey).map((l) => [l.lineKey as string, l])), [lines]);
+  const receivingByLineKey = useMemo(() => new Map((summary?.receiving ?? []).map((r) => [r.lineKey, r])), [summary]);
+  const priceStateByLineKey = useMemo(() => new Map((priceReview?.lines ?? []).map((l) => [l.lineKey, l.state])), [priceReview]);
 
-  // Preview only, for the sole-approver confirmation modal -- the server
-  // independently recomputes and records the authoritative figures in
-  // the audit trail; this never needs to match to the cent for the modal
-  // itself to be useful.
-  const inventoryLineKeys = new Set((summary?.items ?? []).filter((i) => i.disposition === "INVENTORY").map((i) => i.lineKey));
-  const soleApproverInventoryValue = lines.reduce((sum, line) => (line.lineKey && inventoryLineKeys.has(line.lineKey) ? sum + (line.lineTotal ?? 0) : sum), 0);
-  const soleApproverInventoryLineCount = summary ? summary.items.filter((i) => i.disposition === "INVENTORY").length : 0;
-  const soleApproverExpenseLineCount = summary ? summary.nonInventory.length : 0;
+  const inventoryRows = rows.filter((r) => r.lineTreatment === "INVENTORY_PURCHASE");
+  const returnRows = rows.filter((r) => r.lineTreatment === "CREDIT_RETURN" && r.creditSubtype === "INVENTORY_RETURN");
+  const expenseRows = rows.filter((r) => r.lineTreatment === "EXPENSE" || r.lineTreatment === "FREIGHT_FEE");
+  const creditRows = rows.filter((r) => r.lineTreatment === "DISCOUNT" || (r.lineTreatment === "CREDIT_RETURN" && r.creditSubtype !== "INVENTORY_RETURN"));
+  const taxRows = rows.filter((r) => r.lineTreatment === "TAX");
+  const unresolvedRows = rows.filter((r) => r.lineTreatment === "UNRESOLVED" || r.status === "UNCLASSIFIED");
+
+  const totals = useMemo(
+    () => reconcileTotals(lines.map((l) => ({ treatment: (l.lineKey && rowByLineKey.get(l.lineKey)?.lineTreatment) || "UNRESOLVED", lineTotal: l.lineTotal })), { tax: header.tax, fees: header.fees, total: header.total }),
+    [lines, rowByLineKey, header.tax, header.fees, header.total]
+  );
+
+  const hasInventoryChanges = readinessSummary.hasInventoryChanges || inventoryRows.length > 0 || returnRows.length > 0;
+  const primaryLabel = postPrimaryLabel(hasInventoryChanges);
+  const sendAction = deriveSendActionState({ status: documentStatus, editable, ready });
+  const inventoryValue = inventoryRows.reduce((sum, r) => sum + (r.lineTotal ?? 0), 0);
   const soleApproverLocations = Array.from(new Set((summary?.receiving ?? []).map((r) => r.locationName).filter((name): name is string => Boolean(name))));
+  const totalInventoryIncrease = (summary?.receiving ?? []).reduce<Record<string, number>>((acc, r) => {
+    const qty = r.inventoryQuantity ?? (r.requiresVerifiedMeasurement ? r.verifiedQuantity : r.receivedQuantity);
+    const unit = r.inventoryQuantity !== null || r.requiresVerifiedMeasurement ? r.verifiedUnit : r.receivedUnit;
+    if (qty === null || !unit) return acc;
+    acc[unit] = (acc[unit] ?? 0) + qty;
+    return acc;
+  }, {});
+
+  const priceStateLabel = (lineKey: string): string => {
+    const state = priceStateByLineKey.get(lineKey);
+    switch (state) {
+      case "ACKNOWLEDGED":
+        return "Reviewed";
+      case "REQUIRES_ACKNOWLEDGMENT":
+        return "Needs review";
+      case "INFORMATIONAL_CHANGE":
+        return "Change noted";
+      case "NO_MATERIAL_CHANGE":
+        return "No material change";
+      case "NO_COMPARABLE_HISTORY":
+        return "No prior purchase";
+      default:
+        return "—";
+    }
+  };
 
   return (
     <div className="mt-3 flex flex-col gap-3">
-      {/* ============ COMPACT READINESS STRIP ============ */}
+      {/* ============ READINESS STRIP ============ */}
       <div className={panelClass}>
         <div className={panelHeaderClass}>
-          <h2 className={panelTitleClass}>{ready ? "Ready for Second Review" : "Almost Ready"}</h2>
+          <h2 className={panelTitleClass}>{ready ? "Ready to post" : "Almost ready"}</h2>
+          <span className={panelMetaClass}>{readinessSummary.totalLines} line{readinessSummary.totalLines === 1 ? "" : "s"} · {readinessSummary.readyCount} ready</span>
         </div>
         <div className={`${panelBodyClass} grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm sm:grid-cols-3 lg:grid-cols-6`}>
-          <SummaryRow label="Invoice" ok className="Reviewed" />
-          <SummaryRow
-            label="Items"
-            ok={summary ? summary.itemsConfirmedCount === summary.itemsTotalCount : null}
-            className={summary ? `${summary.itemsConfirmedCount} / ${summary.itemsTotalCount} resolved` : "Loading…"}
-          />
-          <SummaryRow
-            label="Receiving"
-            ok={summary ? summary.receivingCompleteCount === summary.receivingTotalCount : null}
-            className={summary ? `${summary.receivingCompleteCount} / ${summary.receivingTotalCount} complete` : "Loading…"}
-          />
-          <SummaryRow label="Locations" ok={locationsComplete} className={locationsComplete === false ? "Incomplete" : "Complete"} />
-          <SummaryRow
-            label="Exceptions"
-            ok={exceptionCount === 0}
-            className={exceptionCount === 0 ? "None" : `${exceptionCount} documented`}
-          />
-          <SummaryRow label="Responsible manager" ok={!missingDeliveryVerifier} className={missingDeliveryVerifier ? "Missing" : (deliveryVerifiedByName ?? "Set")} />
+          <SummaryRow label="Classification" ok={unresolvedRows.length === 0 && readinessSummary.allClassified} text={unresolvedRows.length === 0 ? "Complete" : `${unresolvedRows.length} unclassified`} />
+          <SummaryRow label="Inventory" ok={inventoryRows.length === 0 || (summary ? summary.receivingCompleteCount === summary.receivingTotalCount : null)} text={inventoryRows.length === 0 ? "No inventory lines" : summary ? `${summary.receivingCompleteCount} / ${summary.receivingTotalCount} received` : "Loading…"} />
+          <SummaryRow label="Returns" ok={returnRows.length === 0 || readinessSummary.inventoryReturnCount === returnRows.length} text={returnRows.length === 0 ? "None" : `${returnRows.length} to post`} />
+          <SummaryRow label="Expenses" ok={expenseRows.every((r) => r.spendCategoryId && r.spendCategoryActive !== false)} text={expenseRows.length === 0 ? "None" : `${expenseRows.length} categorized`} />
+          <SummaryRow label="Exceptions" ok={(summary?.exceptions.length ?? 0) === 0} text={(summary?.exceptions.length ?? 0) === 0 ? "None" : `${summary!.exceptions.length} documented`} />
+          <SummaryRow label="Responsible manager" ok={!missingDeliveryVerifier} text={missingDeliveryVerifier ? "Missing" : (deliveryVerifiedByName ?? (inventoryRows.length === 0 ? "Not required" : "Set"))} />
         </div>
       </div>
 
-      {/* ============ PRICE REVIEW -- Step 3 is never the FIRST place a
-          price alert appears; it summarizes what was reviewed on Items &
-          Receiving, and blocks if a significant change is still open. ==== */}
-      {priceReview && (priceReview.requiresAckLineKeys.length > 0 || priceReview.acknowledgedCount > 0 || priceReview.informationalCount > 0 || priceReview.noComparableCount > 0) ? (
+      {/* ============ PRICE REVIEW ============ */}
+      {priceReview && (priceReview.requiresAckLineKeys.length > 0 || priceReview.acknowledgedCount > 0 || priceReview.informationalCount > 0) ? (
         <Section title="Price review">
           {priceReview.requiresAckLineKeys.length > 0 ? (
             <div className="rounded-lg border border-red-800/70 bg-red-950/20 px-3 py-2 text-sm text-red-200">
-              <p className="font-medium">
-                {priceReview.requiresAckLineKeys.length} price change{priceReview.requiresAckLineKeys.length === 1 ? "" : "s"} still require{priceReview.requiresAckLineKeys.length === 1 ? "s" : ""} review.
-              </p>
+              <p className="font-medium">{priceReview.requiresAckLineKeys.length} price change{priceReview.requiresAckLineKeys.length === 1 ? "" : "s"} still require{priceReview.requiresAckLineKeys.length === 1 ? "s" : ""} review.</p>
               <p className="mt-0.5 text-red-300/90">Return to Items &amp; Receiving before posting.</p>
             </div>
           ) : priceReview.acknowledgedCount > 0 ? (
-            <p className="text-sm font-medium text-emerald-300">
-              ✓ {priceReview.acknowledgedCount} significant price change{priceReview.acknowledgedCount === 1 ? "" : "s"} reviewed
-            </p>
+            <p className="text-sm font-medium text-emerald-300">✓ {priceReview.acknowledgedCount} significant price change{priceReview.acknowledgedCount === 1 ? "" : "s"} reviewed</p>
           ) : null}
-
-          {priceReview.acknowledgedCount > 0 ? (
-            <ul className="mt-2 flex flex-col gap-1.5 text-sm">
-              {priceReview.lines
-                .filter((l) => l.state === "ACKNOWLEDGED" && l.comparison)
-                .map((l) => (
-                  <li key={l.lineKey} className="text-zinc-300">
-                    <span className="text-zinc-100">{l.comparison!.previous.vendorName ?? "Vendor"}</span>
-                    {l.vendorSku ? ` · SKU ${l.vendorSku}` : ""} ·{" "}
-                    <span className="tabular-nums">
-                      {formatMoney(l.comparison!.previous.unitCost, null)}/{l.comparison!.baseUnitCode} → {formatMoney(l.comparison!.currentUnitCost, null)}/{l.comparison!.baseUnitCode}
-                    </span>{" "}
-                    · {l.comparison!.direction === "increase" ? "+" : "−"}
-                    {Math.abs(l.comparison!.deltaPct).toFixed(1)}%
-                    {l.acknowledgment?.actorName ? <span className="text-zinc-500"> · Reviewed by {l.acknowledgment.actorName}</span> : null}
-                  </li>
-                ))}
-            </ul>
-          ) : null}
-
-          {priceReview.informationalCount > 0 ? (
-            <p className="mt-2 text-sm text-zinc-400">
-              {priceReview.informationalCount} informational price change{priceReview.informationalCount === 1 ? "" : "s"} noted.
-            </p>
-          ) : null}
-          {priceReview.noComparableCount > 0 ? (
-            <p className="mt-1 text-sm text-zinc-500">
-              {priceReview.noComparableCount} item{priceReview.noComparableCount === 1 ? " has" : "s have"} no previous comparable purchase from this vendor.
-            </p>
-          ) : null}
+          {priceReview.informationalCount > 0 ? <p className="mt-2 text-sm text-zinc-400">{priceReview.informationalCount} informational price change{priceReview.informationalCount === 1 ? "" : "s"} noted.</p> : null}
         </Section>
       ) : null}
 
-      {/* ============ RESTRAINED DOCUMENT SUMMARY ============ */}
+      {/* ============ DOCUMENT ============ */}
       <Section title="Document">
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
           <DetailField label="Vendor" value={vendorName} />
           <DetailField label={`${typeLabel} #`} value={header.documentNumber} />
-          <DetailField label="Document Type" value={typeLabel} />
-          <DetailField label="Invoice Date" value={date(header.documentDate)} />
-          <DetailField label="Delivery Date" value={date(header.deliveryDate)} />
+          <DetailField label="Document type" value={typeLabel} />
+          <DetailField label="Invoice date" value={date(header.documentDate)} />
+          <DetailField label="Delivery date" value={date(header.deliveryDate)} />
           <DetailField label="PO #" value={header.poNumber} />
           <DetailField label="Prepared by" value={preparerName} />
           <DetailField label="Delivery verified by" value={deliveryVerifiedByName} />
-          <DetailField label="Subtotal" value={formatMoney(header.subtotal, header.currency)} />
-          <DetailField label="Tax" value={formatMoney(header.tax, header.currency)} />
-          <DetailField label="Fees" value={formatMoney(header.fees, header.currency)} />
-          <DetailField label="Total" value={formatMoney(header.total, header.currency)} emphasize />
+          <DetailField label="Invoice total" value={formatMoney(header.total, currency)} emphasize />
           <DetailField label="Last updated" value={preparedAt ? new Date(preparedAt).toLocaleString() : null} />
         </div>
       </Section>
 
-      {/* ============ ONE READABLE LINE TABLE -- secondary facts (SKU,
-          unit price, condition, package derivation, price comparison)
-          live in an expandable row detail, never crammed into the
-          primary columns. ============ */}
-      <Section
-        title="Line Review"
-        countLabel={
-          summary
-            ? `${summary.itemsTotalCount} lines · ${summary.itemsConfirmedCount} resolved · ${summary.receivingCompleteCount}/${summary.receivingTotalCount} received`
-            : undefined
-        }
-      >
-        {exceptionCount > 0 ? (
-          <ul className={`mb-3 flex flex-col gap-1 ${inlineWarningClass}`}>
-            {summary!.exceptions.map((exception, index) => (
-              <li key={index}>• {exception.message}</li>
-            ))}
-          </ul>
-        ) : null}
-
-        {summary === null ? (
-          <p className="text-sm text-zinc-500">Loading…</p>
-        ) : (
-          <div className={`max-h-[32rem] overflow-auto ${tableWrapClass}`}>
+      {/* ============ INVENTORY TO RECEIVE ============ */}
+      {inventoryRows.length > 0 ? (
+        <Section title="Inventory to receive" countLabel={`${inventoryRows.length} line${inventoryRows.length === 1 ? "" : "s"}`}>
+          <div className={tableWrapClass}>
             <table className={tableClass}>
               <thead className={tableHeadClass}>
                 <tr>
-                  <th className={tableHeadCellClass}>Type</th>
-                  <th className={tableHeadCellClass}>Invoice Item</th>
-                  <th className={tableHeadCellClass}>Matched Item</th>
-                  <th className={tableHeadCellClass}>Received</th>
-                  <th className={tableHeadCellClass}>Destination</th>
+                  <th className={tableHeadCellClass}>Item</th>
+                  <th className={tableHeadCellClass}>Invoice quantity</th>
+                  <th className={tableHeadCellClass}>Applied purchase package</th>
+                  <th className={tableHeadCellClass}>Normalized quantity</th>
+                  <th className={tableHeadCellClass}>Location</th>
+                  <th className={tableHeadCellClass}>Inventory change</th>
+                  <th className={tableHeadCellClass}>Price review</th>
                   <th className={tableHeadCellRightClass}>Amount</th>
-                  <th className={tableHeadCellClass}>Status</th>
-                  <th className={tableHeadCellClass} aria-label="Expand" />
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row, index) => {
-                  const rowKey = row.lineKey ?? String(index);
-                  const rowExpanded = expandedRowKeys.has(rowKey);
+                {inventoryRows.map((r) => {
+                  const rec = receivingByLineKey.get(r.lineKey);
+                  const line = lineByKey.get(r.lineKey);
+                  const pkg = r.effectiveReceivingBehavior === "FIXED_CONVERSION" && r.effectiveConversionFactor && r.inventoryBaseUnitCode
+                    ? `1 ${r.effectivePurchaseUnitCode ?? ""} = ${r.effectiveConversionFactor} ${r.inventoryBaseUnitCode}`
+                    : r.effectiveReceivingBehavior === "MEASURE_EACH_DELIVERY" || r.effectiveReceivingBehavior === "COUNT_EACH_DELIVERY"
+                      ? `${r.effectivePurchaseUnitCode ?? ""} · measured each delivery`
+                      : r.effectivePurchaseUnitCode ?? r.inventoryBaseUnitCode ?? "—";
+                  const normalized = rec ? (rec.inventoryQuantity !== null ? `${rec.inventoryQuantity} ${rec.verifiedUnit ?? ""}` : rec.requiresVerifiedMeasurement && rec.verifiedQuantity !== null ? `${rec.verifiedQuantity} ${rec.verifiedUnit ?? ""}` : rec.receivedQuantity !== null ? `${rec.receivedQuantity} ${rec.receivedUnit ?? ""}` : "—") : "—";
                   return (
-                    <>
-                      <tr key={rowKey} className={tableRowClass}>
-                        <td className={tableCellMutedClass}>{row.typeLabel}</td>
-                        <td className={`${tableCellClass} max-w-64`}>
-                          <p className="truncate text-zinc-100">{row.description ?? "—"}</p>
-                          {row.secondary ? <p className="mt-0.5 truncate text-xs text-zinc-500">{row.secondary}</p> : null}
-                        </td>
-                        <td className={`${tableCellClass} max-w-52`}>
-                          <p className="truncate">{row.matchedLabel ?? "—"}</p>
-                        </td>
-                        <td className={tableCellClass}>{row.receivedLabel ?? "—"}</td>
-                        <td className={tableCellClass}>{row.locationName ?? "—"}</td>
-                        <td className={tableCellRightClass}>{formatMoney(row.lineTotal, header.currency)}</td>
-                        <td className={tableCellClass}>
-                          <span
-                            className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium ${hasDeliveryConflict && row.status.kind === "ready" ? "bg-amber-500/15 text-amber-300" : STATUS_BADGE_CLASS[row.status.kind]}`}
-                            title={hasDeliveryConflict && row.status.kind === "ready" ? "Posting quantity cannot be confirmed until recorded deliveries are reviewed." : row.problems.length > 0 ? row.problems.join("\n") : undefined}
-                          >
-                            {hasDeliveryConflict && row.status.kind === "ready" ? "Delivery conflict" : row.status.kind === "ready" ? "✓ Ready" : row.status.label}
-                          </span>
-                        </td>
-                        <td className={tableCellClass}>
-                          <button type="button" onClick={() => toggleRowExpanded(rowKey)} className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-300">
-                            {rowExpanded ? "Hide" : "Details"}
-                          </button>
-                        </td>
-                      </tr>
-                      {rowExpanded ? (
-                        <tr key={`${rowKey}-detail`} className="border-b border-zinc-800/70 bg-zinc-950/40">
-                          <td colSpan={8} className="px-3 py-2.5 text-xs text-zinc-400">
-                            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 sm:grid-cols-4">
-                              <DetailField label="SKU" value={row.sku} />
-                              <DetailField label="Qty" value={row.quantity !== null ? `${row.quantity} ${row.unit ?? ""}`.trim() : "—"} />
-                              <DetailField label="Unit Price" value={formatMoney(row.unitPrice, header.currency)} />
-                              <DetailField label="Inventory Qty" value={row.inventoryQuantityLabel ?? "—"} />
-                              <DetailField label="Condition" value={row.conditionLabel ?? "—"} />
-                              {row.problems.length > 0 ? (
-                                <div className="col-span-2 sm:col-span-4">
-                                  <p className={panelMetaClass}>Problems</p>
-                                  <ul className="mt-0.5 flex flex-col gap-0.5 text-amber-300">
-                                    {row.problems.map((p, i) => (
-                                      <li key={i}>• {p}</li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              ) : null}
-                            </div>
-                          </td>
-                        </tr>
-                      ) : null}
-                    </>
+                    <tr key={r.lineKey} className={tableRowClass}>
+                      <td className={tableCellClass}>
+                        <p className="text-zinc-100">{r.inventoryItemName ?? "—"}</p>
+                        <p className="text-xs text-zinc-500">{r.description}</p>
+                      </td>
+                      <td className={tableCellClass}>{line ? `${line.packageQuantity ?? line.measuredQuantity ?? "—"} ${(line.packageQuantity !== null ? line.packageUnit : line.measuredUnit) ?? ""}`.trim() : "—"}</td>
+                      <td className={tableCellClass}>{pkg}</td>
+                      <td className={tableCellClass}>{normalized}</td>
+                      <td className={tableCellClass}>{rec?.locationName ?? "—"}</td>
+                      <td className={`${tableCellClass} font-medium text-emerald-300`}>{normalized !== "—" ? `+${normalized}` : "—"}</td>
+                      <td className={tableCellMutedClass}>{priceStateLabel(r.lineKey)}</td>
+                      <td className={tableCellRightClass}>{formatMoney(r.lineTotal, currency)}</td>
+                    </tr>
                   );
                 })}
               </tbody>
             </table>
           </div>
-        )}
-      </Section>
+        </Section>
+      ) : null}
+
+      {/* ============ INVENTORY RETURNS ============ */}
+      {returnRows.length > 0 ? (
+        <Section title="Inventory returns" countLabel={`${returnRows.length} line${returnRows.length === 1 ? "" : "s"}`}>
+          <div className={tableWrapClass}>
+            <table className={tableClass}>
+              <thead className={tableHeadClass}>
+                <tr>
+                  <th className={tableHeadCellClass}>Item</th>
+                  <th className={tableHeadCellClass}>Quantity leaving</th>
+                  <th className={tableHeadCellClass}>Source location</th>
+                  <th className={tableHeadCellClass}>On hand before → after</th>
+                  <th className={tableHeadCellClass}>Reason</th>
+                  <th className={tableHeadCellRightClass}>Credit amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {returnRows.map((r) => (
+                  <tr key={r.lineKey} className={tableRowClass}>
+                    <td className={tableCellClass}>
+                      <p className="text-zinc-100">{r.inventoryItemName ?? "—"}</p>
+                      <p className="text-xs text-zinc-500">{r.description}</p>
+                    </td>
+                    <td className={`${tableCellClass} font-medium text-sky-300`}>−{r.returnBaseQuantity ?? r.returnQuantity ?? "—"} {r.inventoryBaseUnitCode ?? r.returnUnitCode ?? ""}</td>
+                    <td className={tableCellClass}>{r.returnLocationName ?? "—"}</td>
+                    <td className={tableCellClass}>
+                      {r.returnOnHandQuantity !== null && r.returnBaseQuantity !== null ? `${r.returnOnHandQuantity} → ${r.returnOnHandQuantity - r.returnBaseQuantity} ${r.inventoryBaseUnitCode ?? ""}` : "—"}
+                    </td>
+                    <td className={tableCellMutedClass}>{r.returnReason ?? "—"}</td>
+                    <td className={`${tableCellRightClass} text-sky-300`}>{formatMoney(signedLineAmount("CREDIT_RETURN", r.lineTotal), currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      ) : null}
+
+      {/* ============ EXPENSES ============ */}
+      {expenseRows.length > 0 ? (
+        <Section title="Expense summary" countLabel="Recorded as expenses · no inventory">
+          <div className={tableWrapClass}>
+            <table className={tableClass}>
+              <thead className={tableHeadClass}>
+                <tr>
+                  <th className={tableHeadCellClass}>Description</th>
+                  <th className={tableHeadCellClass}>Category</th>
+                  <th className={tableHeadCellClass}>Type</th>
+                  <th className={tableHeadCellRightClass}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {expenseRows.map((r) => (
+                  <tr key={r.lineKey} className={tableRowClass}>
+                    <td className={tableCellClass}>{r.description ?? "—"}</td>
+                    <td className={tableCellClass}>{r.spendCategoryName ?? <span className="text-amber-300">No category</span>}</td>
+                    <td className={tableCellMutedClass}>{LINE_TREATMENT_LABEL[r.lineTreatment]}</td>
+                    <td className={tableCellRightClass}>{formatMoney(r.lineTotal, currency)}</td>
+                  </tr>
+                ))}
+                <tr>
+                  <td colSpan={3} className={`${tableCellClass} text-right font-semibold`}>Total expenses</td>
+                  <td className={`${tableCellRightClass} font-semibold text-zinc-100`}>{formatMoney(expenseRows.reduce((s, r) => s + (r.lineTotal ?? 0), 0), currency)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-2 text-xs text-zinc-500">Inventory impact: none.</p>
+        </Section>
+      ) : null}
+
+      {/* ============ CREDITS & DISCOUNTS ============ */}
+      {creditRows.length > 0 ? (
+        <Section title="Credits & discounts" countLabel={`${creditRows.length} line${creditRows.length === 1 ? "" : "s"}`}>
+          <div className={tableWrapClass}>
+            <table className={tableClass}>
+              <thead className={tableHeadClass}>
+                <tr>
+                  <th className={tableHeadCellClass}>Description</th>
+                  <th className={tableHeadCellClass}>Type</th>
+                  <th className={tableHeadCellRightClass}>Amount</th>
+                  <th className={tableHeadCellClass}>Inventory effect</th>
+                </tr>
+              </thead>
+              <tbody>
+                {creditRows.map((r) => (
+                  <tr key={r.lineKey} className={tableRowClass}>
+                    <td className={tableCellClass}>{r.description ?? "—"}{r.vendorSku ? <span className="text-xs text-zinc-500"> · SKU {r.vendorSku}</span> : null}</td>
+                    <td className={tableCellMutedClass}>
+                      {r.lineTreatment === "DISCOUNT" ? (r.discountScope === "DOCUMENT" ? "Document discount" : "Line discount") : r.creditSubtype ? `Vendor credit · ${CREDIT_SUBTYPE_LABEL[r.creditSubtype]}` : "Vendor credit"}
+                    </td>
+                    <td className={`${tableCellRightClass} text-sky-300`}>{formatMoney(signedLineAmount(r.lineTreatment, r.lineTotal), currency)}</td>
+                    <td className={tableCellMutedClass}>None</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      ) : null}
+
+      {/* ============ TAXES & CHARGES ============ */}
+      {taxRows.length > 0 || totals.usedHeaderTax ? (
+        <Section title="Taxes & charges">
+          <div className={tableWrapClass}>
+            <table className={tableClass}>
+              <thead className={tableHeadClass}>
+                <tr>
+                  <th className={tableHeadCellClass}>Type</th>
+                  <th className={tableHeadCellRightClass}>Amount</th>
+                  <th className={tableHeadCellClass}>Inventory effect</th>
+                </tr>
+              </thead>
+              <tbody>
+                {taxRows.map((r) => (
+                  <tr key={r.lineKey} className={tableRowClass}>
+                    <td className={tableCellClass}>Sales tax<span className="text-xs text-zinc-500"> · {r.description}</span></td>
+                    <td className={tableCellRightClass}>{formatMoney(r.lineTotal, currency)}</td>
+                    <td className={tableCellMutedClass}>None</td>
+                  </tr>
+                ))}
+                {totals.usedHeaderTax ? (
+                  <tr className={tableRowClass}>
+                    <td className={tableCellClass}>Tax (from invoice header)</td>
+                    <td className={tableCellRightClass}>{formatMoney(header.tax, currency)}</td>
+                    <td className={tableCellMutedClass}>None</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      ) : null}
+
+      {/* ============ TOTALS RECONCILIATION + INVENTORY IMPACT ============ */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Section title="Invoice summary" countLabel={totals.reconciles === null ? undefined : totals.reconciles ? "✓ Reconciles" : `Differs by ${formatMoney(totals.difference, currency)}`}>
+          <dl className="flex flex-col gap-1.5 text-sm">
+            <TotalsRow label="Merchandise subtotal" value={formatMoney(totals.merchandiseSubtotal, currency)} />
+            <TotalsRow label="Expenses & fees" value={formatMoney(totals.expensesAndFees, currency)} />
+            <TotalsRow label="Tax" value={formatMoney(totals.tax, currency)} />
+            <TotalsRow label="Discounts" value={formatMoney(totals.discounts, currency)} />
+            <TotalsRow label="Credits" value={formatMoney(totals.credits, currency)} />
+            {totals.unresolved !== 0 ? <TotalsRow label="Unclassified lines" value={formatMoney(totals.unresolved, currency)} warn /> : null}
+            <TotalsRow label="Final invoice total" value={formatMoney(totals.headerTotal ?? totals.computedTotal, currency)} emphasize />
+          </dl>
+        </Section>
+        <Section title="Inventory impact">
+          {hasInventoryChanges ? (
+            <dl className="flex flex-col gap-1.5 text-sm">
+              {Object.entries(totalInventoryIncrease).map(([unit, qty]) => (
+                <TotalsRow key={unit} label={`Units received (${unit})`} value={`+${Math.round(qty * 100) / 100} ${unit}`} />
+              ))}
+              {returnRows.length > 0 ? (
+                <TotalsRow label="Units returned" value={returnRows.map((r) => `−${r.returnBaseQuantity ?? r.returnQuantity ?? "?"} ${r.inventoryBaseUnitCode ?? r.returnUnitCode ?? ""}`).join(", ")} />
+              ) : null}
+              <TotalsRow label="Locations" value={soleApproverLocations.length > 0 ? soleApproverLocations.join(", ") : returnRows.map((r) => r.returnLocationName).filter(Boolean).join(", ") || "—"} />
+              <TotalsRow label="Price history" value={inventoryRows.length > 0 ? "Recorded for received items" : "No price events"} />
+            </dl>
+          ) : (
+            <>
+              <p className="text-2xl font-semibold text-zinc-100">None</p>
+              <p className="mt-1 text-sm text-zinc-400">This invoice does not add or remove inventory. Posting records the approved classifications only — no receipt, movement, balance, kiosk unit or price-history event.</p>
+            </>
+          )}
+        </Section>
+      </div>
 
       {/* ============ BLOCKERS -- NEXT TO THE PRIMARY ACTION ============ */}
       {!ready && blockers.length > 0 ? (
@@ -471,18 +517,25 @@ export function Step4ReviewSend({
           </p>
           <ul className="mt-2 flex flex-col gap-1 text-sm text-amber-200">
             {blockers.map((b, i) => (
-              <li key={i}>• {b.lineKey ? (b.description ?? "A line") : "This document"} — {b.reason}</li>
+              <li key={i} className="flex flex-wrap items-baseline gap-2">
+                <span>• {b.lineKey ? (b.description ?? "A line") : "This document"} — {b.reason}</span>
+                {b.lineKey && /classif/i.test(b.reason) ? (
+                  <button type="button" onClick={() => onNavigateToStep(1, b.lineKey)} className={`${textLinkClass} text-amber-300`}>
+                    Review line
+                  </button>
+                ) : b.lineKey ? (
+                  <button type="button" onClick={() => onNavigateToStep(2, b.lineKey)} className={`${textLinkClass} text-amber-300`}>
+                    Open line
+                  </button>
+                ) : null}
+              </li>
             ))}
           </ul>
 
           {hasDeliveryConflict ? (
             <div className="mt-3 rounded-lg border border-amber-700 bg-zinc-950/40 p-3">
               <p className="text-sm text-amber-100">Recorded deliveries must be reviewed before this invoice can continue.</p>
-              <button
-                type="button"
-                onClick={() => onNavigateToStep(2)}
-                className="mt-2 rounded-md border border-amber-500 bg-amber-500/10 px-4 py-1.5 text-sm font-semibold text-amber-300"
-              >
+              <button type="button" onClick={() => onNavigateToStep(2)} className="mt-2 rounded-md border border-amber-500 bg-amber-500/10 px-4 py-1.5 text-sm font-semibold text-amber-300">
                 Review recorded deliveries
               </button>
             </div>
@@ -492,56 +545,60 @@ export function Step4ReviewSend({
             <div className="mt-3 flex flex-col gap-2 rounded-lg border border-amber-700 bg-zinc-950/40 p-3">
               <p className="text-xs text-amber-200/80">Who physically checked this delivery before the invoice was entered?</p>
               <div className="flex flex-wrap items-end gap-2">
-              <label className="flex flex-col gap-1 text-xs text-amber-200">
-                Delivery verified by
-                <select
-                  value={verifierChoice}
-                  onChange={(e) => setVerifierChoice(e.target.value)}
-                  className="rounded-lg border border-amber-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
-                >
-                  <option value="">Select…</option>
-                  {employees.map((emp) => (
-                    <option key={emp.id} value={emp.id}>
-                      {emp.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                onClick={handleSetDeliveryVerifier}
-                disabled={!verifierChoice || verifierPending}
-                className="rounded-md bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40"
-              >
-                {verifierPending ? "Saving…" : "Set"}
-              </button>
+                <label className="flex flex-col gap-1 text-xs text-amber-200">
+                  Delivery verified by
+                  <select value={verifierChoice} onChange={(e) => setVerifierChoice(e.target.value)} className="rounded-lg border border-amber-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100">
+                    <option value="">Select…</option>
+                    {employees.map((emp) => (
+                      <option key={emp.id} value={emp.id}>
+                        {emp.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" onClick={handleSetDeliveryVerifier} disabled={!verifierChoice || verifierPending} className="rounded-md bg-amber-400 px-4 py-1.5 text-xs font-semibold text-zinc-950 disabled:opacity-40">
+                  {verifierPending ? "Saving…" : "Set"}
+                </button>
               </div>
               {verifierError ? <p className="w-full text-xs text-red-400">{verifierError}</p> : null}
             </div>
           ) : null}
-
-          {blockers.some((b) => !/delivery verified/i.test(b.reason)) ? (
-            <button
-              type="button"
-              onClick={() => onNavigateToStep(blockers.some((b) => /invoice date/i.test(b.reason)) ? 1 : 2)}
-              className="mt-3 rounded-md border border-amber-700 px-4 py-1.5 text-xs font-semibold text-amber-200"
-            >
-              {blockers.some((b) => /invoice date/i.test(b.reason)) ? "Go to Review Invoice" : "Go to Confirm Items & Receiving"}
-            </button>
-          ) : null}
         </div>
       ) : null}
 
-      {/* ============ ACTIONS -- two clearly separated routes ============ */}
+      {/* ============ ACTIONS ============ */}
       {sendAction.kind === "send" ? (
         <>
           {sendError ? <p className="text-sm text-red-400">{sendError}</p> : null}
-          <div>
-            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-400">Recommended</p>
+          {soleApproverError && !soleApproverModalOpen ? <p className="text-sm text-red-400">{soleApproverError}</p> : null}
+          {soleApproverEligible && !amendmentAlreadyPosted ? (
             <WorkflowFooter
               onBack={() => onNavigateToStep(2)}
-              backLabel="Back to Confirm Items & Receiving"
-              contextLabel={!sendAction.enabled ? "Resolve the items above before sending" : undefined}
+              backLabel="Back to Items & Receiving"
+              contextLabel={!sendAction.enabled ? "Resolve the items above before posting" : hasInventoryChanges ? "Posts the invoice and its inventory changes" : "Records the approved classifications. No inventory changes."}
+              contextTone={!sendAction.enabled ? "warning" : "neutral"}
+              primaryLabel={primaryLabel}
+              onPrimary={() => {
+                setSoleApproverError(null);
+                setSoleApproverBlockers([]);
+                setSoleApproverModalOpen(true);
+              }}
+              primaryDisabled={!sendAction.enabled}
+              primaryPending={soleApproverPending}
+              primaryPendingLabel="Posting…"
+              primaryTitle={!sendAction.enabled ? "Resolve the items above before posting." : undefined}
+              secondaryLabel="Send for Final Review"
+              onSecondary={onSend}
+              secondaryDisabled={!sendAction.enabled}
+              secondaryPending={sendPending}
+              secondaryPendingLabel="Sending…"
+              sticky={false}
+            />
+          ) : (
+            <WorkflowFooter
+              onBack={() => onNavigateToStep(2)}
+              backLabel="Back to Items & Receiving"
+              contextLabel={!sendAction.enabled ? "Resolve the items above before sending" : amendmentAlreadyPosted ? "Inventory was already posted from the original revision" : undefined}
               contextTone="warning"
               primaryLabel="Send for Final Review"
               onPrimary={onSend}
@@ -551,52 +608,21 @@ export function Step4ReviewSend({
               primaryTitle={!sendAction.enabled ? "Resolve the items above before sending for final review." : undefined}
               sticky={false}
             />
-            <p className="mt-1.5 text-xs text-zinc-500">Another authorized manager independently confirms the invoice before inventory is posted.</p>
-          </div>
-
-          {soleApproverEligible ? (
-            <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Authorized manager option</p>
-              {amendmentAlreadyPosted ? (
-                <p className="text-sm text-amber-300">Inventory was already posted from the original revision. This amendment cannot post it again.</p>
-              ) : (
-                <>
-                  <p className="text-sm text-zinc-300">Post immediately without a second review. Your name and posting time will be recorded in the audit history.</p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSoleApproverError(null);
-                      setSoleApproverBlockers([]);
-                      setSoleApproverModalOpen(true);
-                    }}
-                    disabled={!sendAction.enabled}
-                    title={!sendAction.enabled ? "Resolve the items above before posting." : undefined}
-                    className={`mt-2 ${secondaryButtonClass}`}
-                  >
-                    Post Now
-                  </button>
-                </>
-              )}
-            </div>
-          ) : null}
+          )}
+          <p className="text-xs text-zinc-500">
+            {soleApproverEligible && !amendmentAlreadyPosted
+              ? "Posting now records your name, reason and time in the audit history. Send for Final Review lets another manager independently confirm the invoice first."
+              : "Another authorized manager independently confirms the invoice before it is posted."}
+          </p>
         </>
       ) : sendAction.kind === "sent" ? (
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-800 bg-zinc-950/95 px-4 py-3">
           <button type="button" onClick={() => onNavigateToStep(2)} className={textLinkClass}>
-            ← Back to Confirm Items & Receiving
+            ← Back to Items & Receiving
           </button>
           <div className="flex flex-col items-end gap-0.5">
-            {/* Status Language -- Verification, Part "SUCCESS MESSAGE": this
-                inert state IS the submitting manager's success confirmation
-                in this app's design (no separate toast/modal exists) --
-                "Sent," never "Ready," since they just sent it. */}
-            <span className="inline-flex cursor-default items-center gap-2 self-end rounded-md border border-emerald-800 bg-emerald-950/30 px-6 py-2 text-sm font-semibold text-emerald-300">
-              ✓ Sent for Verification
-            </span>
-            <span className="text-xs text-zinc-500">
-              Your review is complete. Another manager can now verify this document.
-              {editable === false ? " Use Withdraw Submission above to make changes." : ""}
-            </span>
+            <span className="inline-flex cursor-default items-center gap-2 self-end rounded-md border border-emerald-800 bg-emerald-950/30 px-6 py-2 text-sm font-semibold text-emerald-300">✓ Sent for Verification</span>
+            <span className="text-xs text-zinc-500">Your review is complete. Another manager can now verify this document.{editable === false ? " Use Withdraw Submission above to make changes." : ""}</span>
           </div>
         </div>
       ) : null}
@@ -606,10 +632,15 @@ export function Step4ReviewSend({
           vendorName={vendorName}
           documentNumber={header.documentNumber}
           invoiceTotal={header.total}
-          currency={header.currency}
-          inventoryLineCount={soleApproverInventoryLineCount}
-          expenseLineCount={soleApproverExpenseLineCount}
-          inventoryValue={soleApproverInventoryValue}
+          currency={currency}
+          inventoryLineCount={inventoryRows.length}
+          expenseLineCount={expenseRows.length}
+          creditLineCount={creditRows.length}
+          taxLineCount={taxRows.length}
+          returnLineCount={returnRows.length}
+          hasInventoryChanges={hasInventoryChanges}
+          confirmLabel={primaryLabel}
+          inventoryValue={inventoryValue}
           locations={soleApproverLocations}
           pending={soleApproverPending}
           error={soleApproverError}
@@ -626,13 +657,13 @@ export function Step4ReviewSend({
   );
 }
 
-function SummaryRow({ label, ok, className }: { label: string; ok: boolean | null; className: string }) {
+function SummaryRow({ label, ok, text }: { label: string; ok: boolean | null; text: string }) {
   return (
     <div>
       <p className="text-xs uppercase tracking-wide text-zinc-500">{label}</p>
       <p className={ok === null ? "text-zinc-500" : ok ? "text-emerald-400" : "text-amber-300"}>
         {ok === null ? "" : ok ? "✓ " : "○ "}
-        {className}
+        {text}
       </p>
     </div>
   );
@@ -655,6 +686,15 @@ function DetailField({ label, value, emphasize }: { label: string; value: string
     <div>
       <p className="text-xs text-zinc-500">{label}</p>
       <p className={emphasize ? "text-base font-semibold text-zinc-100" : "text-sm text-zinc-200"}>{value ?? "—"}</p>
+    </div>
+  );
+}
+
+function TotalsRow({ label, value, emphasize, warn }: { label: string; value: string; emphasize?: boolean; warn?: boolean }) {
+  return (
+    <div className={`flex items-baseline justify-between gap-3 ${emphasize ? "border-t border-zinc-700 pt-2" : ""}`}>
+      <dt className={warn ? "text-amber-300" : "text-zinc-500"}>{label}</dt>
+      <dd className={`tabular-nums ${emphasize ? "text-base font-semibold text-zinc-100" : warn ? "text-amber-200" : "text-zinc-200"}`}>{value}</dd>
     </div>
   );
 }

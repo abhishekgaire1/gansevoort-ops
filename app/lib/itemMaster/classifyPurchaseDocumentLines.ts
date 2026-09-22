@@ -4,7 +4,7 @@ import { getServiceRoleClient } from "@/app/lib/supabase/serviceClient";
 import { resolveAIConfig } from "@/app/lib/ai/router/resolveAIConfig";
 import { executeAITask } from "@/app/lib/ai/router/executeAITask";
 import { runItemClassification } from "@/app/lib/ai/tasks/itemClassification/runItemClassification";
-import type { UnresolvedClassificationLine } from "@/app/lib/ai/tasks/itemClassification/types";
+import type { NormalizedItemClassificationLine, PriorTreatmentDecision, UnresolvedClassificationLine } from "@/app/lib/ai/tasks/itemClassification/types";
 import { resolveDeterministicClassification } from "@/app/lib/itemMaster/resolveDeterministicClassification";
 import { buildItemShortlist } from "@/app/lib/itemMaster/buildItemShortlist";
 import { buildClassificationCandidateContext } from "@/app/lib/itemMaster/buildClassificationCandidateContext";
@@ -14,55 +14,46 @@ import { resolveLineClassificationDeterministicRpc } from "@/app/lib/itemMaster/
 import { recordDeterministicSuggestedCandidateRpc } from "@/app/lib/itemMaster/recordDeterministicSuggestedCandidateRpc";
 import { recordAiSuggestedCandidateRpc } from "@/app/lib/itemMaster/recordAiSuggestedCandidateRpc";
 import { recordAiItemProposalRpc } from "@/app/lib/itemMaster/recordAiItemProposalRpc";
+import { recordAiLineTreatmentRpc, findVendorLineTreatmentRuleRpc, type VendorLineTreatmentRuleMatch } from "@/app/lib/purchaseDocuments/lineTreatmentRpcs";
+import { CONFIDENCE_MEDIUM } from "@/app/lib/purchaseDocuments/lineTreatment";
 import { VerifiedLockedError } from "@/app/lib/purchaseDocuments/errors";
 
 /**
- * The 2A.3 classification orchestrator (plan §4/§9/§13). Safe to invoke
- * from any of its four call sites (auto after() on submit, auto after() on
- * review-correction/atomic-verify, page-load recovery check, manual "Run
- * Item Matching" button) -- concurrency is fully owned by the atomic claim
+ * The classification orchestrator. Safe to invoke from any of its call
+ * sites (auto after() on submit/save, auto after() on review-correction/
+ * atomic-verify, Step 1/Step 2 page-load recovery check, manual "Run Item
+ * Matching" button) -- concurrency is fully owned by the atomic claim
  * RPC, so overlapping invocations always converge to exactly one doing
  * real work.
  *
  * 1. Determine which current lines need (re-)classification (set-based,
  *    never a count comparison -- see getLinesNeedingClassification).
  * 2. If none, no-op without even attempting a claim.
- * 3. Claim the run; ALREADY_RUNNING means another caller already has it,
- *    so this invocation is a no-op too.
- * 4. Deterministic tier first, zero AI calls, for every line it resolves.
- * 5. Whatever's left goes to one batched AI call, using a per-line
- *    org-scoped CONFIRMED-only shortlist.
- * 6. finish the claim SUCCEEDED/FAILED in a try/finally, mirroring
- *    runDocumentExtractionAttempt.ts's shape.
+ * 3. Claim the run; ALREADY_RUNNING means another caller already has it.
+ * 4. Deterministic tiers first, zero AI calls, for every line they resolve:
+ *      a. a vendor-specific PRIOR TREATMENT DECISION (vendor_line_treatment_
+ *         rules -- e.g. Bartlett Dairy + SKU 99 "CASES RETURNED" ->
+ *         returnable-container credit), recorded as a pending "Matched
+ *         previous decision" proposal UNLESS the current line's own
+ *         evidence contradicts it (a credit rule on a positive amount, a
+ *         charge rule on a negative one) -- a contradiction is never
+ *         overridden silently: the rule is passed to the AI as context
+ *         instead and the manager sees the AI's reasoning;
+ *      b. the vendor-item mapping / normalized-name tiers (unchanged) for
+ *         inventory purchases.
+ * 5. Whatever's left goes to one batched AI call that returns each line's
+ *    TREATMENT first (inventory purchase / expense / credit / discount /
+ *    tax / freight / unresolved), then the treatment-specific fields.
+ *    Results route to the writer that owns that treatment; every id was
+ *    validated against the org-scoped candidate lists before this point,
+ *    and the database writers re-validate again.
+ * 6. finish the claim SUCCEEDED/FAILED in a try/finally.
  *
- * Per-line isolation (item-matching robustness fix, reproduced against a
- * real invoice -- Capital Paper Inc #178606): every per-line step below
- * (deterministic resolution, shortlist lookup, and recording an AI result)
- * is individually try/caught. Item matching is assistance, not a single
- * point of failure -- one line's write failing (a transient RPC error, or
- * two sibling lines proposing the identical new-item name, as reproduced)
- * must never discard every OTHER line's already-committed result, and must
- * never turn a run that mostly succeeded into one whose outcome is FAILED.
- * The ONE exception is VerifiedLockedError (GA003): the parent document
- * itself moved out of DRAFT/READY_FOR_VERIFICATION mid-run, so every
- * remaining write would fail identically -- that's a genuine whole-run
- * failure, not a per-line one, and is left to propagate to the outer
- * catch. Everything else is logged (full domain error, line key, stage)
- * for developers and left for getLinesNeedingClassification's set-based
- * recovery check to pick back up on the next run -- the Manager-facing
- * surface only ever needs to know "resolved" vs "still needs review,"
- * never the raw cause.
- *
- * options.includeUnconfirmedAiProposals: only ever passed true by the
- * manual "Run Item Matching" button (see runItemMatchingNow in
- * app/actions/itemClassification.ts) -- also re-resolves PENDING_REVIEW
- * lines whose current proposal came from AI, so a manager can refresh an
- * older proposal (e.g. one produced before a classifier fix) against the
- * current classifier on demand. Never passed true from an automatic
- * trigger (submit, review-correction, page-load recovery), which must keep
- * leaving an awaiting-review proposal alone. record_ai_item_proposal itself
- * reuses the existing pending item row rather than creating a duplicate,
- * and refuses to touch an already-CONFIRMED line regardless of this flag.
+ * Per-line isolation: every per-line step is individually try/caught --
+ * one line's write failing must never discard every OTHER line's
+ * already-committed result. The ONE exception is VerifiedLockedError
+ * (GA003): the parent document itself moved out of DRAFT/READY, so every
+ * remaining write would fail identically -- a whole-run failure.
  */
 export async function classifyPurchaseDocumentLines(
   purchaseDocumentId: string,
@@ -90,10 +81,39 @@ export async function classifyPurchaseDocumentLines(
       .single();
     const vendorId = (purchaseDocument?.vendor_id as string | null | undefined) ?? null;
 
-    const stillUnresolved: LineNeedingClassification[] = [];
+    const stillUnresolved: { line: LineNeedingClassification; priorDecision: PriorTreatmentDecision | null }[] = [];
 
     for (const line of needing) {
       try {
+        // 4a. Vendor-specific prior treatment decision.
+        let priorDecision: PriorTreatmentDecision | null = null;
+        if (vendorId) {
+          const rule = await lookupVendorRule(supabase, organizationId, vendorId, line, purchaseDocumentId);
+          if (rule) {
+            if (ruleContradictsEvidence(rule, line)) {
+              priorDecision = { lineTreatment: rule.lineTreatment, creditSubtype: rule.creditSubtype, spendCategoryId: rule.spendCategoryId, matchBasis: rule.matchBasis };
+            } else {
+              await recordAiLineTreatmentRpc(supabase, {
+                organizationId,
+                purchaseDocumentId,
+                lineKey: line.lineKey,
+                proposedTreatment: rule.lineTreatment,
+                proposedCreditSubtype: rule.creditSubtype,
+                proposedSpendCategoryId: rule.spendCategoryId,
+                proposedDiscountScope: rule.discountScope,
+                confidence: 1,
+                reason: `Matched a previous decision for this vendor (${rule.matchBasis === "VENDOR_SKU" ? `SKU ${line.vendorSku}` : "same description"}).`,
+                evidence: [rule.matchBasis === "VENDOR_SKU" ? `vendor SKU ${line.vendorSku}` : "identical normalized description", "prior manager decision"],
+                fieldsRequiringReview: [],
+                resolutionSource: "VENDOR_TREATMENT_RULE",
+                treatmentRuleId: rule.ruleId,
+              });
+              continue;
+            }
+          }
+        }
+
+        // 4b. Vendor item mapping / normalized name (inventory purchases).
         const match = await resolveDeterministicClassification(supabase, {
           organizationId,
           vendorId,
@@ -120,36 +140,24 @@ export async function classifyPurchaseDocumentLines(
             resolutionSource: match.resolutionSource,
           });
         } else {
-          stillUnresolved.push(line);
+          stillUnresolved.push({ line, priorDecision });
         }
       } catch (err) {
         if (err instanceof VerifiedLockedError) {
-          // Document-wide: every remaining line's write will fail
-          // identically (the parent document itself moved out of
-          // DRAFT/READY_FOR_VERIFICATION). No point isolating further --
-          // rethrow so the outer catch marks the whole run FAILED, which
-          // is what actually happened.
           throw err;
         }
-        // One line's deterministic resolution genuinely failed (e.g. a
-        // transient RPC error) -- never let that discard every OTHER
-        // line's already-committed progress. Log with full detail for
-        // developers; leave this line unresolved so the AI tier gets a
-        // chance at it, and -- if that also can't resolve it --
-        // getLinesNeedingClassification's set-based recovery check picks
-        // it back up on the next run.
         console.error("[item-classification] deterministic resolution failed for one line", {
           purchaseDocumentId,
           lineKey: line.lineKey,
           vendorSku: line.vendorSku,
           error: err instanceof Error ? err.message : String(err),
         });
-        stillUnresolved.push(line);
+        stillUnresolved.push({ line, priorDecision: null });
       }
     }
 
     if (stillUnresolved.length > 0) {
-      await classifyRemainingWithAI(supabase, organizationId, purchaseDocumentId, stillUnresolved, claim.claimId);
+      await classifyRemainingWithAI(supabase, organizationId, purchaseDocumentId, vendorId, stillUnresolved, claim.claimId);
     }
 
     await finishClassificationRunRpc(supabase, { claimId: claim.claimId, organizationId, outcome: "SUCCEEDED" });
@@ -159,26 +167,54 @@ export async function classifyPurchaseDocumentLines(
   }
 }
 
+async function lookupVendorRule(
+  supabase: SupabaseClient,
+  organizationId: string,
+  vendorId: string,
+  line: LineNeedingClassification,
+  purchaseDocumentId: string
+): Promise<VendorLineTreatmentRuleMatch | null> {
+  try {
+    return await findVendorLineTreatmentRuleRpc(supabase, { organizationId, vendorId, vendorSku: line.vendorSku, description: line.description });
+  } catch (err) {
+    // A rule lookup failing is never a reason to stop classifying -- the
+    // line simply proceeds through the other tiers.
+    console.error("[item-classification] vendor treatment rule lookup failed for one line", {
+      purchaseDocumentId,
+      lineKey: line.lineKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/** A prior decision is applied only when the current line's own evidence
+ * is consistent with it: a credit/discount rule needs a non-positive
+ * amount (or no amount), a charge/expense/tax rule a non-negative one.
+ * Anything else is a contradiction the manager must see. */
+export function ruleContradictsEvidence(rule: { lineTreatment: string }, line: { lineTotal: number | null }): boolean {
+  if (line.lineTotal === null) return false;
+  if (rule.lineTreatment === "CREDIT_RETURN" || rule.lineTreatment === "DISCOUNT") return line.lineTotal > 0;
+  return line.lineTotal < 0;
+}
+
 async function classifyRemainingWithAI(
   supabase: SupabaseClient,
   organizationId: string,
   purchaseDocumentId: string,
-  lines: LineNeedingClassification[],
+  vendorId: string | null,
+  entries: { line: LineNeedingClassification; priorDecision: PriorTreatmentDecision | null }[],
   classificationRunClaimId: string
 ): Promise<void> {
-  const candidateContext = await buildClassificationCandidateContext(supabase, organizationId);
+  const candidateContext = await buildClassificationCandidateContext(supabase, organizationId, vendorId);
   const knownUnitCodes = new Set(candidateContext.units.map((u) => u.code));
 
   const linesForAI: UnresolvedClassificationLine[] = [];
-  for (const line of lines) {
+  for (const { line, priorDecision } of entries) {
     let shortlist: Awaited<ReturnType<typeof buildItemShortlist>> = [];
     try {
       shortlist = await buildItemShortlist(supabase, organizationId, line.description);
     } catch (err) {
-      // One line's candidate-shortlist lookup failing must never block the
-      // single shared AI call for every other line -- send this one
-      // through with an empty shortlist (the model can still propose a new
-      // item; it just has no existing-item candidate list to choose from).
       console.error("[item-classification] shortlist lookup failed for one line", {
         purchaseDocumentId,
         lineKey: line.lineKey,
@@ -189,20 +225,17 @@ async function classifyRemainingWithAI(
       lineKey: line.lineKey,
       vendorSku: line.vendorSku,
       description: line.description,
+      packageQuantity: line.packageQuantity,
       packageUnit: line.packageUnit,
+      measuredQuantity: line.measuredQuantity,
       measuredUnit: line.measuredUnit,
+      unitPrice: line.unitPrice,
+      lineTotal: line.lineTotal,
       shortlist,
+      priorDecision,
     });
   }
 
-  // AI Configuration + Usage/Cost Tracking milestone: resolved fresh for
-  // this run (task override -> org default -> app default) -- unlike
-  // invoice extraction, item classification has no pre-existing attempt
-  // table to freeze the choice onto ahead of time, so resolution and
-  // execution happen back-to-back here. requestKey reuses the
-  // classification run's own claim id (already a per-attempt-unique,
-  // idempotency-safe identifier from tryClaimClassificationRunRpc), so a
-  // retried invocation of the same run can never double-record cost.
   const aiConfig = await resolveAIConfig(supabase, organizationId, "ITEM_CLASSIFICATION");
   const result = await executeAITask({
     organizationId,
@@ -220,51 +253,11 @@ async function classifyRemainingWithAI(
 
   for (const resultLine of result.lines) {
     try {
-      if (resultLine.candidateItemId) {
-        await recordAiSuggestedCandidateRpc(supabase, {
-          organizationId,
-          purchaseDocumentId,
-          lineKey: resultLine.lineKey,
-          candidateInventoryItemId: resultLine.candidateItemId,
-          aiConfidence: resultLine.confidence,
-        });
-      } else if (resultLine.proposedName) {
-        await recordAiItemProposalRpc(supabase, {
-          organizationId,
-          purchaseDocumentId,
-          lineKey: resultLine.lineKey,
-          proposedName: resultLine.proposedName,
-          proposedDisposition: resultLine.proposedDisposition,
-          proposedCategoryId: resultLine.proposedCategoryId,
-          proposedSpendCategoryId: resultLine.proposedSpendCategoryId,
-          proposedBaseUnitCode: resultLine.proposedBaseUnitCode,
-          aiConfidence: resultLine.confidence,
-          proposedVendorPurchaseUnitCode: resultLine.proposedVendorPurchaseUnitCode,
-          proposedReceivingBehavior: resultLine.proposedReceivingBehavior,
-          proposedFixedConversionFactor: resultLine.proposedFixedConversionFactor,
-        });
-      }
-      // Neither a candidate nor a usable new-item proposal: AI gave nothing
-      // actionable for this line. No classification row is written, so the
-      // set-based recovery check (getLinesNeedingClassification) will
-      // correctly pick it back up as still-needing-classification on the
-      // next run, rather than silently dropping it.
+      await recordAiResult(supabase, organizationId, purchaseDocumentId, resultLine);
     } catch (err) {
       if (err instanceof VerifiedLockedError) {
-        // Document-wide -- every remaining line's write will fail
-        // identically. Stop here so the outer catch marks the whole run
-        // FAILED, matching what actually happened.
         throw err;
       }
-      // Reproduced against a real invoice (Capital Paper #178606): a
-      // normal purchase line and a separate credit/return line for the
-      // same physical product can both get AI-proposed as the same
-      // brand-new item name. Without this isolation, a single such
-      // collision (or any other one-line write failure) here would abort
-      // the whole loop, discarding every other line's already-successful
-      // result even though the AI call itself succeeded. Log full detail
-      // for developers; leave this line unresolved so it's picked back up
-      // as still-needing-classification on the next run.
       console.error("[item-classification] failed to record AI result for one line", {
         purchaseDocumentId,
         lineKey: resultLine.lineKey,
@@ -272,4 +265,63 @@ async function classifyRemainingWithAI(
       });
     }
   }
+}
+
+/** Routes one validated AI result to the writer that owns its treatment.
+ * Inventory purchases keep the existing item writers (candidate match /
+ * new-item proposal); every other treatment -- and any inventory purchase
+ * too uncertain to propose an item for -- goes to record_ai_line_
+ * treatment, which applies the confidence policy in the database. */
+async function recordAiResult(supabase: SupabaseClient, organizationId: string, purchaseDocumentId: string, resultLine: NormalizedItemClassificationLine): Promise<void> {
+  const treatment = resultLine.proposedLineTreatment ?? (resultLine.candidateItemId || resultLine.proposedName ? "INVENTORY_PURCHASE" : "UNRESOLVED");
+  const confidence = resultLine.confidence ?? 0;
+
+  if (treatment === "INVENTORY_PURCHASE" && resultLine.candidateItemId) {
+    await recordAiSuggestedCandidateRpc(supabase, {
+      organizationId,
+      purchaseDocumentId,
+      lineKey: resultLine.lineKey,
+      candidateInventoryItemId: resultLine.candidateItemId,
+      aiConfidence: resultLine.confidence,
+    });
+    return;
+  }
+
+  if (treatment === "INVENTORY_PURCHASE" && resultLine.proposedName && confidence >= CONFIDENCE_MEDIUM) {
+    await recordAiItemProposalRpc(supabase, {
+      organizationId,
+      purchaseDocumentId,
+      lineKey: resultLine.lineKey,
+      proposedName: resultLine.proposedName,
+      proposedDisposition: "INVENTORY",
+      proposedCategoryId: resultLine.proposedCategoryId,
+      proposedSpendCategoryId: resultLine.proposedSpendCategoryId,
+      proposedBaseUnitCode: resultLine.proposedBaseUnitCode,
+      aiConfidence: resultLine.confidence,
+      proposedVendorPurchaseUnitCode: resultLine.proposedVendorPurchaseUnitCode,
+      proposedReceivingBehavior: resultLine.proposedReceivingBehavior,
+      proposedFixedConversionFactor: resultLine.proposedFixedConversionFactor,
+    });
+    return;
+  }
+
+  // Every non-item treatment, plus an inventory purchase the model could
+  // not confidently resolve to an item (< 0.70): the database writer
+  // lands it UNRESOLVED with the raw proposal preserved for display --
+  // never an invented item named after the description.
+  await recordAiLineTreatmentRpc(supabase, {
+    organizationId,
+    purchaseDocumentId,
+    lineKey: resultLine.lineKey,
+    proposedTreatment: treatment,
+    proposedCreditSubtype: resultLine.proposedCreditSubtype,
+    proposedSpendCategoryId: resultLine.proposedSpendCategoryId,
+    proposedDiscountScope: resultLine.proposedDiscountScope,
+    confidence: resultLine.confidence,
+    reason: resultLine.reasoning,
+    evidence: resultLine.evidence,
+    fieldsRequiringReview: resultLine.fieldsRequiringReview,
+    resolutionSource: "AI_SUGGESTED",
+    treatmentRuleId: null,
+  });
 }

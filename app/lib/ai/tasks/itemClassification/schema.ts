@@ -1,59 +1,69 @@
 import { z } from "zod";
 
 /**
- * Gemini-facing shape for item classification. The model is given a
- * SHORTLIST of candidate items for this organization only (never the full
- * item master -- see buildItemShortlist.ts), the org's canonical category/
- * spend-category/unit CANDIDATE lists (see ClassificationCandidateContext in
- * types.ts -- also never the model's own invention), and the unresolved
- * lines. It must either pick an item candidate by id or propose a new item
- * whose category/spend-category are themselves picked by id from the
- * supplied candidates, never free text. Every field `.nullable()`, not
- * `.optional()`, matching invoiceExtraction's schema convention.
+ * Gemini-facing shape for invoice-line classification. The model is given
+ * a SHORTLIST of candidate items for this organization only (never the
+ * full item master -- see buildItemShortlist.ts), the org's canonical
+ * category / expense-category / unit CANDIDATE lists and the closed
+ * line-treatment vocabulary (see ClassificationCandidateContext in
+ * types.ts -- never the model's own invention), and the unresolved lines.
+ *
+ * For EVERY line it must first decide the line's OPERATIONAL MEANING
+ * (proposedLineTreatment) -- inventory purchase, expense, credit/return,
+ * discount, tax, freight/fee, or unresolved when it genuinely cannot tell
+ * -- and only then, for an inventory purchase, pick an item candidate by
+ * id or propose a new item whose category/spend-category are themselves
+ * picked by id from the supplied candidates, never free text. Every field
+ * `.nullable()`, not `.optional()`, matching invoiceExtraction's schema
+ * convention.
  */
+
+export const LINE_TREATMENT_VALUES = ["INVENTORY_PURCHASE", "EXPENSE", "CREDIT_RETURN", "DISCOUNT", "TAX", "FREIGHT_FEE", "UNRESOLVED"] as const;
+export const CREDIT_SUBTYPE_VALUES = ["FINANCIAL_CREDIT", "RETURNABLE_CONTAINER_CREDIT", "INVENTORY_RETURN"] as const;
+export const DISCOUNT_SCOPE_VALUES = ["LINE", "DOCUMENT"] as const;
 
 export const GeminiItemClassificationLineSchema = z.object({
   lineKey: z.string(),
+  /** The line's operational meaning -- decided BEFORE any item/category
+   * question. UNRESOLVED only when the text/amount genuinely cannot be
+   * classified; never invent a treatment to avoid it. */
+  proposedLineTreatment: z.enum(LINE_TREATMENT_VALUES).nullable(),
+  /** Only for CREDIT_RETURN: did tracked inventory physically leave the
+   * store? Null when the line does not say. */
+  proposedCreditSubtype: z.enum(CREDIT_SUBTYPE_VALUES).nullable(),
+  /** Only for DISCOUNT: does it apply to one line or the whole document? */
+  proposedDiscountScope: z.enum(DISCOUNT_SCOPE_VALUES).nullable(),
   /** Must be an id literally present in the shortlist sent for this line
-   * -- validated independently in validate.ts, never trusted blindly. */
+   * -- validated independently in validate.ts, never trusted blindly.
+   * Only meaningful for INVENTORY_PURCHASE. */
   candidateItemId: z.string().nullable(),
+  /** New-item proposal (INVENTORY_PURCHASE with no candidate). */
   proposedName: z.string().nullable(),
-  proposedDisposition: z.enum(["INVENTORY", "NON_INVENTORY"]).nullable(),
   /** Must be an id literally present in the inventoryCategories candidate
    * list supplied in this same request -- validated independently in
-   * validate.ts, never trusted blindly. Never a free-text category name:
-   * asking the model to invent text and matching it later is exactly the
-   * brittleness this schema avoids (e.g. "Dairy" failing to match a
-   * canonical "Dairy & Eggs"). Null only when genuinely nothing in the
-   * supplied candidates fits. */
+   * validate.ts, never trusted blindly. */
   suggestedInventoryCategoryId: z.string().nullable(),
-  /** Same candidate-id-only resolution as suggestedInventoryCategoryId, but
-   * against the spendCategories candidate list (each entry a full "Root >
-   * Child" path). */
+  /** For EXPENSE / FREIGHT_FEE (required) and, optionally, for a new
+   * inventory item: an id literally present in the spendCategories
+   * candidate list. Never a free-text category name. Null when nothing in
+   * the supplied list fits -- the line is then left for the manager, never
+   * given an invented category. */
   suggestedSpendCategoryId: z.string().nullable(),
-  /** Must be one of the known global unit codes (e.g. "LB", "EACH") --
-   * validated independently in validate.ts. */
   proposedBaseUnitCode: z.string().nullable(),
-  /** The unit the VENDOR sells it in, if different from the base unit
-   * (e.g. a case/box) -- also a known global unit code, same validation as
-   * proposedBaseUnitCode. Derive this from the line's own packageUnit
-   * evidence, not by default-copying proposedBaseUnitCode: a line can
-   * legitimately have packageUnit "CS" and measuredUnit "LB" at the same
-   * time, meaning the vendor purchase unit is the case even though the item
-   * is tracked and priced by the pound. Null/equal-to-base means the vendor
-   * genuinely sells it in the same unit it's tracked in -- never a fallback
-   * used merely because the base unit was resolved. */
   proposedVendorPurchaseUnitCode: z.string().nullable(),
-  /** How receiving that vendor purchase unit converts to the base unit --
-   * never a fabricated fixed rate for something that genuinely varies
-   * (produce sold by the box but priced/tracked by weight must be
-   * MEASURE_EACH_DELIVERY, never a guessed BOX->LB factor). */
   proposedReceivingBehavior: z.enum(["SAME_UNIT", "FIXED_CONVERSION", "MEASURE_EACH_DELIVERY", "COUNT_EACH_DELIVERY"]).nullable(),
-  /** Only meaningful (and only ever applied) when proposedReceivingBehavior
-   * is FIXED_CONVERSION -- e.g. a case of 24 identical bottles. */
   proposedFixedConversionFactor: z.number().nullable(),
+  /** 0..1. >= 0.90 is auto-assigned (manager may change it), 0.70-0.89 is
+   * "review recommended", < 0.70 lands UNRESOLVED. */
   confidence: z.number().nullable(),
+  /** One short plain-language sentence a manager can read. */
   reasoning: z.string().nullable(),
+  /** The concrete evidence used (e.g. "negative amount", "keyword
+   * RETURNED", "vendor is a refrigeration service company"). */
+  evidence: z.array(z.string()).nullable(),
+  /** Field names a human should double-check (e.g. "creditSubtype",
+   * "spendCategoryId", "quantity"). */
+  fieldsRequiringReview: z.array(z.string()).nullable(),
 });
 
 export const GeminiItemClassificationSchema = z.object({

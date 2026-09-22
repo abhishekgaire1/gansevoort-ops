@@ -7,14 +7,15 @@ import type { ClassificationCandidateContext, ItemClassificationIssue, ItemShort
  * that specific line, and every proposedCategoryId/proposedSpendCategoryId
  * is literally present in the org-wide candidate context that was sent for
  * this whole batch (never trusted blindly, even though both were already
- * org-scoped -- belt and suspenders), and validates
- * proposedBaseUnitCode/proposedVendorPurchaseUnitCode against the known
- * global unit-code set. Returns a SANITIZED copy of the lines, never the
- * raw model output directly -- an invalid candidateItemId, category id, unit
+ * org-scoped -- belt and suspenders), validates unit codes against the
+ * known global unit-code set, and strips every field that does not belong
+ * to the returned treatment (a TAX line can never carry an item proposal;
+ * an EXPENSE never carries a purchase package). Returns a SANITIZED copy of
+ * the lines, never the raw model output directly -- an invalid id, unit
  * code, or an internally-inconsistent receiving-behavior/conversion-factor
- * pair is stripped here, downgrading that line to "no confident suggestion"
- * rather than ever letting a hallucinated id, unit, or fabricated fixed
- * conversion for a genuinely variable item reach a database write.
+ * pair is stripped here, downgrading that line to "no confident
+ * suggestion" rather than ever letting a hallucinated id, unit, or
+ * fabricated fixed conversion reach a database write.
  */
 export function validateItemClassification(
   lines: NormalizedItemClassificationLine[],
@@ -29,13 +30,22 @@ export function validateItemClassification(
   const sanitized = lines.map((line): NormalizedItemClassificationLine => {
     let candidateItemId = line.candidateItemId;
     let proposedName = line.proposedName;
-    let proposedDisposition = line.proposedDisposition;
     let proposedCategoryId = line.proposedCategoryId;
     let proposedSpendCategoryId = line.proposedSpendCategoryId;
     let proposedBaseUnitCode = line.proposedBaseUnitCode;
     let proposedVendorPurchaseUnitCode = line.proposedVendorPurchaseUnitCode;
     let proposedReceivingBehavior = line.proposedReceivingBehavior;
     let proposedFixedConversionFactor = line.proposedFixedConversionFactor;
+    let proposedCreditSubtype = line.proposedCreditSubtype ?? null;
+    let proposedDiscountScope = line.proposedDiscountScope ?? null;
+
+    // Treatment: explicit, or derived from the legacy disposition/item
+    // fields when a caller only supplied those.
+    let treatment = line.proposedLineTreatment ?? null;
+    if (treatment === null) {
+      if (candidateItemId !== null || proposedName !== null || line.proposedDisposition === "INVENTORY") treatment = "INVENTORY_PURCHASE";
+      else if (line.proposedDisposition === "NON_INVENTORY") treatment = "EXPENSE";
+    }
 
     if (candidateItemId !== null) {
       const shortlist = shortlistsByLineKey.get(line.lineKey) ?? [];
@@ -50,14 +60,20 @@ export function validateItemClassification(
       }
     }
 
-    if (candidateItemId !== null && (proposedName !== null || proposedDisposition !== null || proposedBaseUnitCode !== null)) {
+    // A candidate item match IS an inventory purchase, whatever the model
+    // said about treatment.
+    if (candidateItemId !== null && treatment !== "INVENTORY_PURCHASE") {
+      issues.push({ lineKey: line.lineKey, code: "CANDIDATE_IMPLIES_INVENTORY_PURCHASE", message: `Model returned a candidate item together with treatment ${treatment} -- treating the line as an inventory purchase.` });
+      treatment = "INVENTORY_PURCHASE";
+    }
+
+    if (candidateItemId !== null && (proposedName !== null || proposedBaseUnitCode !== null)) {
       issues.push({
         lineKey: line.lineKey,
         code: "AMBIGUOUS_BOTH_CANDIDATE_AND_PROPOSAL",
         message: "Model returned both a candidateItemId and new-item proposal fields -- preferring the candidate match, discarding the proposal.",
       });
       proposedName = null;
-      proposedDisposition = null;
       proposedCategoryId = null;
       proposedSpendCategoryId = null;
       proposedBaseUnitCode = null;
@@ -66,7 +82,7 @@ export function validateItemClassification(
       proposedFixedConversionFactor = null;
     }
 
-    if (candidateItemId === null && proposedCategoryId !== null && !validCategoryIds.has(proposedCategoryId)) {
+    if (proposedCategoryId !== null && !validCategoryIds.has(proposedCategoryId)) {
       issues.push({
         lineKey: line.lineKey,
         code: "UNKNOWN_INVENTORY_CATEGORY_ID",
@@ -75,7 +91,7 @@ export function validateItemClassification(
       proposedCategoryId = null;
     }
 
-    if (candidateItemId === null && proposedSpendCategoryId !== null && !validSpendCategoryIds.has(proposedSpendCategoryId)) {
+    if (proposedSpendCategoryId !== null && !validSpendCategoryIds.has(proposedSpendCategoryId)) {
       issues.push({
         lineKey: line.lineKey,
         code: "UNKNOWN_SPEND_CATEGORY_ID",
@@ -84,34 +100,47 @@ export function validateItemClassification(
       proposedSpendCategoryId = null;
     }
 
-    if (candidateItemId === null && proposedDisposition === "INVENTORY" && proposedBaseUnitCode !== null) {
-      if (!knownUnitCodes.has(proposedBaseUnitCode)) {
-        issues.push({
-          lineKey: line.lineKey,
-          code: "UNKNOWN_BASE_UNIT_CODE",
-          message: `Model proposed unrecognized base unit code "${proposedBaseUnitCode}" -- discarded, requires manual selection.`,
-        });
-        proposedBaseUnitCode = null;
+    // Treatment-specific field ownership: strip whatever the treatment
+    // cannot carry, so a writer can never be handed an item proposal for a
+    // tax line or a category for a credit.
+    const isInventory = treatment === "INVENTORY_PURCHASE";
+    if (!isInventory) {
+      if (proposedName !== null || proposedCategoryId !== null || proposedBaseUnitCode !== null || proposedVendorPurchaseUnitCode !== null || proposedReceivingBehavior !== null || proposedFixedConversionFactor !== null) {
+        issues.push({ lineKey: line.lineKey, code: "ITEM_FIELDS_ON_NON_INVENTORY_LINE", message: `Model returned item fields on a ${treatment ?? "unresolved"} line -- discarded.` });
       }
+      proposedName = null;
+      proposedCategoryId = null;
+      proposedBaseUnitCode = null;
+      proposedVendorPurchaseUnitCode = null;
+      proposedReceivingBehavior = null;
+      proposedFixedConversionFactor = null;
+      if (treatment !== "EXPENSE" && treatment !== "FREIGHT_FEE") proposedSpendCategoryId = null;
+    }
+    if (treatment !== "CREDIT_RETURN") proposedCreditSubtype = null;
+    if (treatment !== "DISCOUNT") proposedDiscountScope = null;
+
+    if (isInventory && candidateItemId === null && proposedBaseUnitCode !== null && !knownUnitCodes.has(proposedBaseUnitCode)) {
+      issues.push({
+        lineKey: line.lineKey,
+        code: "UNKNOWN_BASE_UNIT_CODE",
+        message: `Model proposed unrecognized base unit code "${proposedBaseUnitCode}" -- discarded, requires manual selection.`,
+      });
+      proposedBaseUnitCode = null;
     }
 
-    if (candidateItemId === null && proposedDisposition === "INVENTORY" && proposedVendorPurchaseUnitCode !== null) {
-      if (!knownUnitCodes.has(proposedVendorPurchaseUnitCode)) {
-        issues.push({
-          lineKey: line.lineKey,
-          code: "UNKNOWN_VENDOR_PURCHASE_UNIT_CODE",
-          message: `Model proposed unrecognized vendor purchase unit code "${proposedVendorPurchaseUnitCode}" -- discarded, requires manual selection.`,
-        });
-        proposedVendorPurchaseUnitCode = null;
-      }
+    if (isInventory && candidateItemId === null && proposedVendorPurchaseUnitCode !== null && !knownUnitCodes.has(proposedVendorPurchaseUnitCode)) {
+      issues.push({
+        lineKey: line.lineKey,
+        code: "UNKNOWN_VENDOR_PURCHASE_UNIT_CODE",
+        message: `Model proposed unrecognized vendor purchase unit code "${proposedVendorPurchaseUnitCode}" -- discarded, requires manual selection.`,
+      });
+      proposedVendorPurchaseUnitCode = null;
     }
 
-    // Purchase-unit/receiving-behavior concepts are meaningless for a
-    // NON_INVENTORY proposal or when there's no proposal at all (a
-    // candidate match reuses whatever purchase-unit config that EXISTING
-    // item was already confirmed with -- never a fresh AI guess).
-    if (candidateItemId !== null || proposedDisposition !== "INVENTORY") {
-      proposedBaseUnitCode = candidateItemId === null && proposedDisposition === "INVENTORY" ? proposedBaseUnitCode : null;
+    // A candidate match reuses whatever purchase-unit config that EXISTING
+    // item was already confirmed with -- never a fresh AI guess.
+    if (candidateItemId !== null) {
+      proposedBaseUnitCode = null;
       proposedVendorPurchaseUnitCode = null;
       proposedReceivingBehavior = null;
       proposedFixedConversionFactor = null;
@@ -141,14 +170,17 @@ export function validateItemClassification(
     }
 
     if (proposedReceivingBehavior === "SAME_UNIT" && proposedVendorPurchaseUnitCode !== null && proposedBaseUnitCode !== null && proposedVendorPurchaseUnitCode !== proposedBaseUnitCode) {
-      // Internally inconsistent -- SAME_UNIT means there is no distinct
-      // vendor purchase unit. Trust the explicit behavior, drop the
-      // mismatched unit code rather than silently picking one.
       proposedVendorPurchaseUnitCode = proposedBaseUnitCode;
     }
 
+    const proposedDisposition: NormalizedItemClassificationLine["proposedDisposition"] =
+      treatment === null || treatment === "UNRESOLVED" ? null : isInventory ? "INVENTORY" : "NON_INVENTORY";
+
     return {
       lineKey: line.lineKey,
+      proposedLineTreatment: treatment,
+      proposedCreditSubtype,
+      proposedDiscountScope,
       candidateItemId,
       proposedName,
       proposedDisposition,
@@ -160,6 +192,8 @@ export function validateItemClassification(
       proposedFixedConversionFactor,
       confidence: line.confidence,
       reasoning: line.reasoning,
+      evidence: line.evidence ?? [],
+      fieldsRequiringReview: line.fieldsRequiringReview ?? [],
     };
   });
 

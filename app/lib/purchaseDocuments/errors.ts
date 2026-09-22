@@ -36,6 +36,19 @@ export const PURCHASE_DOCUMENT_SQLSTATE = {
    * unidentified duplicates) that would multiply inventory. Dedicated to
    * delivery integrity -- never reused by price or correction codes. */
   DELIVERY_CONFLICT: "GA080",
+  /** set_purchase_document_line_treatment (20260811100182) refused: a
+   * treatment-specific required field is missing/invalid (no expense
+   * category, no credit subtype, no discount scope, an unconfigured return
+   * unit, an inactive category, ...). */
+  INVALID_LINE_TREATMENT: "GA087",
+  /** post_purchase_document_inventory refused: one or more current lines
+   * are UNRESOLVED / not CONFIRMED / carry an invalid treatment -- an
+   * unresolved line can never post. */
+  UNRESOLVED_LINES: "GA088",
+  /** set_line_classification_explanation / set_purchase_document_line_
+   * treatment: the chosen catch-all expense category requires a written
+   * explanation. */
+  EXPLANATION_REQUIRED: "GA086",
 } as const;
 
 /** The purchase document's version didn't match, or it wasn't in the
@@ -160,6 +173,42 @@ export class DeliveryConflictError extends Error {
   }
 }
 
+/** A line treatment was saved with a missing/invalid required field (GA087). */
+export class InvalidLineTreatmentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidLineTreatmentError";
+  }
+}
+
+/** Posting refused because a current line is unresolved / unconfirmed /
+ * invalid (GA088). `blockers` carries the exact per-line reasons. */
+export class UnresolvedLinesError extends Error {
+  blockers: { lineKey: string | null; description: string | null; reason: string }[];
+  constructor(message: string, detail?: string) {
+    super(message);
+    this.name = "UnresolvedLinesError";
+    let parsed: { lineKey: string | null; description: string | null; reason: string }[] = [];
+    if (detail) {
+      try {
+        const raw = JSON.parse(detail) as { lineKey?: string; description?: string; reason?: string }[];
+        parsed = raw.map((b) => ({ lineKey: b.lineKey ?? null, description: b.description ?? null, reason: b.reason ?? "" }));
+      } catch {
+        parsed = [];
+      }
+    }
+    this.blockers = parsed;
+  }
+}
+
+/** The chosen catch-all expense category requires a written explanation (GA086). */
+export class ExplanationRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExplanationRequiredError";
+  }
+}
+
 export function mapPurchaseDocumentRpcError(error: { code?: string; message: string }): Error {
   switch (error.code) {
     case PURCHASE_DOCUMENT_SQLSTATE.STALE_OR_WRONG_STATUS:
@@ -184,6 +233,12 @@ export function mapPurchaseDocumentRpcError(error: { code?: string; message: str
       return new SoleApproverPermissionDeniedError(error.message);
     case PURCHASE_DOCUMENT_SQLSTATE.SOLE_APPROVER_REASON_REQUIRED:
       return new SoleApproverReasonRequiredError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.INVALID_LINE_TREATMENT:
+      return new InvalidLineTreatmentError(error.message);
+    case PURCHASE_DOCUMENT_SQLSTATE.UNRESOLVED_LINES:
+      return new UnresolvedLinesError(error.message, (error as { details?: string | null }).details ?? undefined);
+    case PURCHASE_DOCUMENT_SQLSTATE.EXPLANATION_REQUIRED:
+      return new ExplanationRequiredError(error.message);
     default:
       return new Error(error.message);
   }

@@ -47,6 +47,11 @@ export interface ReviewSummaryNonInventoryLine {
   description: string | null;
   lineTotal: number | null;
   spendCategoryPath: string | null;
+  /** The line's treatment (EXPENSE / CREDIT_RETURN / DISCOUNT / TAX /
+   * FREIGHT_FEE) so the read-only summary can label WHY it did not post as
+   * a purchase -- an inventory return is not an "expense". */
+  lineTreatment: string | null;
+  creditSubtype: string | null;
 }
 
 export interface ReviewSummaryException {
@@ -117,7 +122,7 @@ export async function getPurchaseDocumentReviewSummary(
       .order("line_number"),
     supabase
       .from("purchase_document_line_classifications")
-      .select("line_key, status, disposition, inventory_item_id, spend_category_id")
+      .select("line_key, status, disposition, inventory_item_id, spend_category_id, line_treatment, credit_subtype")
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", organizationId),
     getReceivingLines(supabase, purchaseDocumentId, organizationId),
@@ -204,6 +209,8 @@ export async function getPurchaseDocumentReviewSummary(
         description: line.description as string | null,
         lineTotal: line.line_total as number | null,
         spendCategoryPath: spendCategoryPath((classification?.spend_category_id as string | null) ?? null),
+        lineTreatment: (classification?.line_treatment as string | null) ?? null,
+        creditSubtype: (classification?.credit_subtype as string | null) ?? null,
       });
       continue;
     }

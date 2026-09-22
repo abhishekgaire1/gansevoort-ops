@@ -42,12 +42,30 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
   const [{ data: classifications }, { data: purchaseDocument }] = await Promise.all([
     supabase
       .from("purchase_document_line_classifications")
-      .select("line_key, status, disposition")
+      .select("id, line_key, status, disposition, line_treatment")
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", organizationId),
     supabase.from("purchase_documents").select("document_date, source_document_id").eq("id", purchaseDocumentId).eq("organization_id", organizationId).maybeSingle(),
   ]);
   const classificationByLineKey = new Map((classifications ?? []).map((c) => [c.line_key as string, c]));
+
+  // Line-treatment facts from the SAME database helpers the completeness
+  // gate and the posting RPC use (20260811100182): which pending
+  // proposals the manager's Continue/Post will accept, and which
+  // treatments still have an invalid/missing required field.
+  const acceptableIds = new Set<string>();
+  const treatmentIssueById = new Map<string, string>();
+  await Promise.all(
+    (classifications ?? []).map(async (c) => {
+      const id = c.id as string;
+      const [{ data: acceptable }, { data: issue }] = await Promise.all([
+        c.status === "PENDING_REVIEW" ? supabase.rpc("line_classification_is_auto_acceptable", { p_classification_id: id }) : Promise.resolve({ data: false }),
+        supabase.rpc("line_classification_treatment_issue", { p_classification_id: id }),
+      ]);
+      if (acceptable === true) acceptableIds.add(id);
+      if (typeof issue === "string" && issue.length > 0) treatmentIssueById.set(id, issue);
+    })
+  );
 
   const receivingLines = await getReceivingLines(supabase, purchaseDocumentId, organizationId);
   // The SAME purchase-package-mismatch fact combinedLineReadiness.ts (Step
@@ -87,20 +105,42 @@ export async function getPreparationStatus(supabase: SupabaseClient, purchaseDoc
     const classification = classificationByLineKey.get(line.lineKey);
 
     if (!classification) {
-      blockers.push({ lineKey: line.lineKey, description: line.description, reason: "Needs a classification -- run item matching." });
+      blockers.push({ lineKey: line.lineKey, description: line.description, reason: "Needs classification -- choose how this line should be treated." });
       continue;
     }
-    if (classification.status === "PENDING_REVIEW") {
-      blockers.push({ lineKey: line.lineKey, description: line.description, reason: "Awaiting manager approval of the item match." });
+    if ((classification.line_treatment as string | null) === "UNRESOLVED") {
+      blockers.push({ lineKey: line.lineKey, description: line.description, reason: "Needs classification -- choose how this line should be treated." });
+      continue;
+    }
+    const acceptable = acceptableIds.has(classification.id as string);
+    if (classification.status === "PENDING_REVIEW" && !acceptable) {
+      blockers.push({
+        lineKey: line.lineKey,
+        description: line.description,
+        reason: classification.disposition === "INVENTORY" ? "Awaiting manager approval of the item match." : "Awaiting manager confirmation of the classification.",
+      });
       continue;
     }
     if (classification.status === "STALE") {
       blockers.push({ lineKey: line.lineKey, description: line.description, reason: "Line changed since it was classified -- needs re-review." });
       continue;
     }
-    // CONFIRMED from here. NON_INVENTORY lines are complete as soon as
-    // classification is CONFIRMED -- never blocked by receiving fields.
+    const treatmentIssue = treatmentIssueById.get(classification.id as string);
+    if (treatmentIssue) {
+      blockers.push({ lineKey: line.lineKey, description: line.description, reason: `Classification incomplete -- ${treatmentIssue}.` });
+      continue;
+    }
+    // CONFIRMED (or acceptable) from here. Non-inventory treatments are
+    // complete as soon as their own fields are valid -- never blocked by
+    // receiving fields.
     if (classification.disposition !== "INVENTORY") {
+      continue;
+    }
+    if (acceptable) {
+      // An accepted-on-continue item match still needs receiving before
+      // it can post; the manager sees this as "AI assigned · receiving
+      // needed" on Items & Receiving.
+      blockers.push({ lineKey: line.lineKey, description: line.description, reason: "Not yet received -- accept the item match and record a delivery quantity." });
       continue;
     }
     hasConfirmedInventory = true;

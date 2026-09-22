@@ -223,6 +223,55 @@ gates, duplicate/total checks, the amendment re-post guard — and records
 the acting manager, time, reason, and acknowledgment in the audit trail.
 Only the second human reviewer is waived, never any other control.
 
+## Invoice Line Treatment
+
+"Non-inventory" is not an operational classification. Every invoice line
+must be classified by its operational meaning before any item or expense
+category question is asked:
+
+- Inventory purchase -- physical stock; requires a canonical item, a
+  compatible vendor purchase package, a received quantity/unit (with a
+  measured quantity when the package requires it), an active storage-
+  eligible destination, a condition and a price-review state. Posting
+  creates the positive inventory receipt. Only an unmatched inventory
+  purchase may enter "New Items Found".
+- Expense -- a service, repair or untracked supply; requires an active
+  expense category (a catch-all category also requires a written
+  explanation). No item, package, receiving quantity, location, kiosk unit,
+  inventory movement or price event.
+- Freight / fee -- delivery, fuel, handling, minimum-order and service
+  charges; behaves like an expense, mapped to the freight or vendor-fee
+  categories.
+- Tax -- document-level; no category, no item, no inventory effect;
+  reconciles against the invoice total.
+- Discount -- line or document scope; affects totals only and is never
+  allocated into inventory unit cost.
+- Credit / return -- requires the answer to "Did tracked inventory
+  physically leave the store?": a financial credit or a returnable-
+  container credit reduces the invoice total with no inventory movement;
+  an inventory return requires the canonical item, quantity, unit, source
+  location, reason and an inventory-impact acknowledgment, can never take
+  a location below zero, and posts as an audited VENDOR_RETURN movement --
+  never a normal receipt and never a negative invoice quantity.
+- Unresolved -- the line cannot be classified from its text and amount; it
+  is placed first in Needs Attention and blocks Items & Receiving, Review &
+  Post and posting until a manager chooses a valid treatment.
+
+AI proposals follow one confidence policy: 90% or higher is preselected
+and labeled "AI assigned" (the manager accepts it by continuing or posting
+with it visible, and may change it at any time); 70-89% is preselected and
+labeled "Review recommended" and must be confirmed; below 70% is left
+unresolved and never invents an item name, category, conversion or credit
+type. The AI may only return category ids from the organization's active
+expense categories; anything else is discarded, never saved. Confidence
+never overrides deterministic validation or server checks.
+
+A manager may explicitly remember a vendor-specific decision (vendor + SKU
+or description -> treatment). Remembered decisions are auditable, Admin-
+editable, organization-scoped, surfaced as "Matched previous decision",
+invalidated when their expense category is disabled, and never override
+contradictory evidence on the current line. Nothing is learned invisibly.
+
 ## Invoice Posting
 
 OCR/extraction results may exist in staging data before approval.

@@ -23,6 +23,11 @@ export function SoleApproverPostModal({
   currency,
   inventoryLineCount,
   expenseLineCount,
+  creditLineCount = 0,
+  taxLineCount = 0,
+  returnLineCount = 0,
+  hasInventoryChanges,
+  confirmLabel,
   inventoryValue,
   locations,
   pending,
@@ -38,6 +43,13 @@ export function SoleApproverPostModal({
   currency: string | null;
   inventoryLineCount: number;
   expenseLineCount: number;
+  creditLineCount?: number;
+  taxLineCount?: number;
+  returnLineCount?: number;
+  /** Drives the wording: an expense-only invoice never says "to inventory". */
+  hasInventoryChanges: boolean;
+  /** "Post invoice & inventory" or "Post invoice" (postPrimaryLabel). */
+  confirmLabel: string;
   inventoryValue: number;
   locations: string[];
   pending: boolean;
@@ -68,9 +80,9 @@ export function SoleApproverPostModal({
           Post without a second review?
         </h2>
         <p className="mt-2 text-sm text-zinc-200">
-          A second manager has not reviewed this invoice. By posting now, you confirm that the invoice details, item matches, purchase packages,
-          received quantities, locations, and conditions are accurate. Inventory will be updated immediately, and your name and the posting time
-          will be recorded in the audit history.
+          A second manager has not reviewed this invoice. By posting now, you confirm that the invoice details, classifications
+          {hasInventoryChanges ? ", item matches, purchase packages, received quantities, locations, and conditions" : " and expense categories"} are accurate.
+          {hasInventoryChanges ? " Inventory will be updated immediately, and your" : " No inventory will change. Your"} name and the posting time will be recorded in the audit history.
         </p>
 
         <div className="mt-4 rounded-lg border border-zinc-700 bg-zinc-950 p-3">
@@ -86,8 +98,26 @@ export function SoleApproverPostModal({
             <dd className="text-right text-zinc-100">{inventoryLineCount}</dd>
             <dt className="text-zinc-500">Expense lines</dt>
             <dd className="text-right text-zinc-100">{expenseLineCount}</dd>
+            {creditLineCount > 0 ? (
+              <>
+                <dt className="text-zinc-500">Credits &amp; discounts</dt>
+                <dd className="text-right text-zinc-100">{creditLineCount}</dd>
+              </>
+            ) : null}
+            {taxLineCount > 0 ? (
+              <>
+                <dt className="text-zinc-500">Tax lines</dt>
+                <dd className="text-right text-zinc-100">{taxLineCount}</dd>
+              </>
+            ) : null}
+            {returnLineCount > 0 ? (
+              <>
+                <dt className="text-zinc-500">Inventory returns</dt>
+                <dd className="text-right text-zinc-100">{returnLineCount}</dd>
+              </>
+            ) : null}
             <dt className="text-zinc-500">Inventory value being posted</dt>
-            <dd className="text-right text-zinc-100">{formatMoney(inventoryValue, currency)}</dd>
+            <dd className="text-right text-zinc-100">{hasInventoryChanges ? formatMoney(inventoryValue, currency) : "None"}</dd>
             <dt className="text-zinc-500">Receiving location(s)</dt>
             <dd className="text-right text-zinc-100">{locations.length > 0 ? locations.join(", ") : "—"}</dd>
           </dl>
@@ -124,7 +154,7 @@ export function SoleApproverPostModal({
 
         <label className="mt-4 flex items-start gap-2 rounded-lg border border-amber-800 bg-amber-950/20 p-3 text-sm text-amber-100">
           <input type="checkbox" checked={acknowledged} disabled={pending} onChange={(e) => setAcknowledged(e.target.checked)} className="mt-0.5" />
-          I understand I&apos;m overriding the second-manager check and posting this invoice to inventory on my own authority.
+          I understand I&apos;m overriding the second-manager check and posting this invoice{hasInventoryChanges ? " and its inventory changes" : ""} on my own authority.
         </label>
 
         {error ? <p className="mt-3 text-sm text-red-400">{error}</p> : null}
@@ -165,7 +195,7 @@ export function SoleApproverPostModal({
             disabled={!valid || pending}
             className="rounded-md border border-amber-500 bg-amber-500/10 px-5 py-2 text-sm font-bold text-amber-300 disabled:opacity-40"
           >
-            {pending ? "Posting…" : "Post to Inventory"}
+            {pending ? "Posting…" : confirmLabel}
           </button>
         </div>
       </div>

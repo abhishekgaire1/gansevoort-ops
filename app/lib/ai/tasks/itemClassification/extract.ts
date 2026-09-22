@@ -5,9 +5,9 @@ import { ITEM_CLASSIFICATION_INSTRUCTIONS } from "./instructions";
 import type { ClassificationCandidateContext, UnresolvedClassificationLine } from "./types";
 
 /** Serializes the org-wide candidate context (once) plus the unresolved
- * lines (each with its own org-scoped item shortlist) as the text content
- * part -- there is no file/image input for this task, only structured text
- * derived from already-persisted data. */
+ * lines (each with its own org-scoped item shortlist and quantities/
+ * amounts) as the text content part -- there is no file/image input for
+ * this task, only structured text derived from already-persisted data. */
 export async function classifyItemsRaw(
   provider: AIProvider,
   context: ClassificationCandidateContext,

@@ -21,12 +21,15 @@ const CANDIDATE_CONTEXT: ClassificationCandidateContext = {
     { id: "cat-dairy", name: "Dairy & Eggs" },
     { id: "cat-frozen", name: "Frozen Foods" },
   ],
+  vendor: { name: "Sysco", classification: "INVENTORY" },
   spendCategories: [
-    { id: "spend-produce", path: "Food & Beverage > Produce" },
-    { id: "spend-seafood", path: "Food & Beverage > Seafood" },
-    { id: "spend-dairy", path: "Food & Beverage > Dairy & Eggs" },
-    { id: "spend-frozen", path: "Food & Beverage > Frozen Foods" },
+    { id: "spend-produce", path: "Food & Beverage > Produce", description: null },
+    { id: "spend-seafood", path: "Food & Beverage > Seafood", description: null },
+    { id: "spend-dairy", path: "Food & Beverage > Dairy & Eggs", description: null },
+    { id: "spend-frozen", path: "Food & Beverage > Frozen Foods", description: null },
   ],
+  lineTreatments: [],
+  creditSubtypes: [],
   units: [
     { code: "LB", name: "Pound" },
     { code: "EACH", name: "Each" },
@@ -36,6 +39,9 @@ const CANDIDATE_CONTEXT: ClassificationCandidateContext = {
 
 function line(overrides: Partial<NormalizedItemClassificationLine> & { lineKey: string }): NormalizedItemClassificationLine {
   return {
+    proposedLineTreatment: null,
+    proposedCreditSubtype: null,
+    proposedDiscountScope: null,
     candidateItemId: null,
     proposedName: null,
     proposedDisposition: null,
@@ -47,6 +53,8 @@ function line(overrides: Partial<NormalizedItemClassificationLine> & { lineKey: 
     proposedFixedConversionFactor: null,
     confidence: null,
     reasoning: null,
+    evidence: [],
+    fieldsRequiringReview: [],
     ...overrides,
   };
 }

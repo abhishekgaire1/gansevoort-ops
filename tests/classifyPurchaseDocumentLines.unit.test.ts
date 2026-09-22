@@ -53,10 +53,20 @@ vi.mock("@/app/lib/itemMaster/resolveLineClassificationDeterministicRpc", () => 
 vi.mock("@/app/lib/itemMaster/recordAiSuggestedCandidateRpc", () => ({ recordAiSuggestedCandidateRpc: recordAiSuggestedCandidateRpcMock }));
 vi.mock("@/app/lib/itemMaster/recordAiItemProposalRpc", () => ({ recordAiItemProposalRpc: recordAiItemProposalRpcMock }));
 
+// Line-treatment model: the non-item writer and the vendor-rule lookup.
+const { recordAiLineTreatmentRpcMock, findVendorLineTreatmentRuleRpcMock } = vi.hoisted(() => ({
+  recordAiLineTreatmentRpcMock: vi.fn(),
+  findVendorLineTreatmentRuleRpcMock: vi.fn(),
+}));
+vi.mock("@/app/lib/purchaseDocuments/lineTreatmentRpcs", () => ({
+  recordAiLineTreatmentRpc: recordAiLineTreatmentRpcMock,
+  findVendorLineTreatmentRuleRpc: findVendorLineTreatmentRuleRpcMock,
+}));
+
 import { classifyPurchaseDocumentLines } from "@/app/lib/itemMaster/classifyPurchaseDocumentLines";
 
-const LINE_A = { lineKey: "line-a", vendorSku: "SKU-A", description: "Chicken Thigh", packageUnit: "CS", measuredUnit: "LB" };
-const LINE_B = { lineKey: "line-b", vendorSku: "SKU-B", description: "Napkins", packageUnit: "CS", measuredUnit: "EA" };
+const LINE_A = { lineKey: "line-a", vendorSku: "SKU-A", description: "Chicken Thigh", packageQuantity: 1, packageUnit: "CS", measuredQuantity: null, measuredUnit: "LB", unitPrice: 10, lineTotal: 10 };
+const LINE_B = { lineKey: "line-b", vendorSku: "SKU-B", description: "Napkins", packageQuantity: 1, packageUnit: "CS", measuredQuantity: null, measuredUnit: "EA", unitPrice: 10, lineTotal: 10 };
 
 function fakeSupabase() {
   const single = vi.fn().mockResolvedValue({ data: { vendor_id: "vendor-1" }, error: null });
@@ -80,8 +90,14 @@ function fakeSupabase() {
   const eqSpendOrg = vi.fn().mockReturnValue({ eq: eqSpendActive });
   const selectSpendCategories = vi.fn().mockReturnValue({ eq: eqSpendOrg });
 
+  const vendorMaybeSingle = vi.fn().mockResolvedValue({ data: { name: "Test Vendor", classification: "INVENTORY" }, error: null });
+  const eqVendorOrg = vi.fn().mockReturnValue({ maybeSingle: vendorMaybeSingle });
+  const eqVendorId = vi.fn().mockReturnValue({ eq: eqVendorOrg });
+  const selectVendors = vi.fn().mockReturnValue({ eq: eqVendorId });
+
   const from = vi.fn((table: string) => {
     if (table === "purchase_documents") return { select: selectPd };
+    if (table === "vendors") return { select: selectVendors };
     if (table === "units") return { select: selectUnits };
     if (table === "inventory_categories") return { select: selectCategories };
     if (table === "spend_categories") return { select: selectSpendCategories };
@@ -102,6 +118,8 @@ beforeEach(() => {
   resolveDeterministicRpcMock.mockReset().mockResolvedValue(undefined);
   recordAiSuggestedCandidateRpcMock.mockReset().mockResolvedValue(undefined);
   recordAiItemProposalRpcMock.mockReset().mockResolvedValue({ inventoryItemId: "new-item-1" });
+  recordAiLineTreatmentRpcMock.mockReset().mockResolvedValue({ classificationId: "cls-1", appliedTreatment: "EXPENSE" });
+  findVendorLineTreatmentRuleRpcMock.mockReset().mockResolvedValue(null);
   process.env.GEMINI_API_KEY = "test-key";
 });
 
@@ -148,7 +166,7 @@ describe("classifyPurchaseDocumentLines", () => {
     expect(finishClaimMock).toHaveBeenCalledWith(expect.anything(), { claimId: "claim-1", organizationId: "org-1", outcome: "SUCCEEDED" });
   });
 
-  it("sends only the deterministically-unresolved lines to AI, and records both a candidate match and a new-item proposal", async () => {
+  it("sends only the deterministically-unresolved lines to AI (with vendor + treatment vocabulary context), and routes an EXPENSE result to the treatment writer -- never to a new-item proposal", async () => {
     getLinesNeedingClassificationMock.mockResolvedValue([LINE_A, LINE_B]);
     tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
     resolveDeterministicMock.mockImplementation(async (_supabase, input: { vendorSku: string | null }) =>
@@ -156,7 +174,7 @@ describe("classifyPurchaseDocumentLines", () => {
     );
     runItemClassificationMock.mockResolvedValue({
       lines: [
-        { lineKey: "line-b", candidateItemId: null, proposedName: "Napkins", proposedDisposition: "NON_INVENTORY", proposedCategoryId: null, proposedSpendCategoryId: null, proposedBaseUnitCode: null, confidence: 0.4, reasoning: null },
+        { lineKey: "line-b", proposedLineTreatment: "EXPENSE", proposedCreditSubtype: null, proposedDiscountScope: null, candidateItemId: null, proposedName: null, proposedDisposition: "NON_INVENTORY", proposedCategoryId: null, proposedSpendCategoryId: "spend-1", proposedBaseUnitCode: null, confidence: 0.95, reasoning: "Untracked supply.", evidence: ["keyword NAPKINS"], fieldsRequiringReview: [] },
       ],
       issues: [],
       raw: {},
@@ -171,25 +189,91 @@ describe("classifyPurchaseDocumentLines", () => {
     expect(buildShortlistMock).toHaveBeenCalledWith(expect.anything(), "org-1", "Napkins");
     expect(runItemClassificationMock).toHaveBeenCalledWith(
       expect.anything(),
-      { inventoryCategories: [{ id: "cat-1", name: "Produce" }], spendCategories: [{ id: "spend-1", path: "Food & Beverage" }], units: [{ code: "LB", name: "Pound" }, { code: "EA", name: "Each" }, { code: "CS", name: "Case" }] },
-      [expect.objectContaining({ lineKey: "line-b" })],
+      expect.objectContaining({
+        vendor: { name: "Test Vendor", classification: "INVENTORY" },
+        inventoryCategories: [{ id: "cat-1", name: "Produce" }],
+        spendCategories: [{ id: "spend-1", path: "Food & Beverage", description: null }],
+        units: [{ code: "LB", name: "Pound" }, { code: "EA", name: "Each" }, { code: "CS", name: "Case" }],
+        lineTreatments: expect.arrayContaining([expect.objectContaining({ value: "CREDIT_RETURN" })]),
+        creditSubtypes: expect.arrayContaining([expect.objectContaining({ value: "RETURNABLE_CONTAINER_CREDIT" })]),
+      }),
+      [expect.objectContaining({ lineKey: "line-b", lineTotal: 10, unitPrice: 10, priorDecision: null })],
       expect.any(Set),
       "gemini-3.6-flash"
     );
 
-    expect(recordAiItemProposalRpcMock).toHaveBeenCalledWith(expect.anything(), {
+    expect(recordAiLineTreatmentRpcMock).toHaveBeenCalledWith(expect.anything(), {
       organizationId: "org-1",
       purchaseDocumentId: "pd-1",
       lineKey: "line-b",
-      proposedName: "Napkins",
-      proposedDisposition: "NON_INVENTORY",
-      proposedCategoryId: null,
-      proposedSpendCategoryId: null,
-      proposedBaseUnitCode: null,
-      aiConfidence: 0.4,
+      proposedTreatment: "EXPENSE",
+      proposedCreditSubtype: null,
+      proposedSpendCategoryId: "spend-1",
+      proposedDiscountScope: null,
+      confidence: 0.95,
+      reason: "Untracked supply.",
+      evidence: ["keyword NAPKINS"],
+      fieldsRequiringReview: [],
+      resolutionSource: "AI_SUGGESTED",
+      treatmentRuleId: null,
     });
+    expect(recordAiItemProposalRpcMock).not.toHaveBeenCalled();
     expect(recordAiSuggestedCandidateRpcMock).not.toHaveBeenCalled();
     expect(finishClaimMock).toHaveBeenCalledWith(expect.anything(), { claimId: "claim-1", organizationId: "org-1", outcome: "SUCCEEDED" });
+  });
+
+  it("a low-confidence (< 0.70) inventory guess never creates a pending item named after the description -- it lands UNRESOLVED via the treatment writer", async () => {
+    getLinesNeedingClassificationMock.mockResolvedValue([LINE_B]);
+    tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
+    resolveDeterministicMock.mockResolvedValue(null);
+    runItemClassificationMock.mockResolvedValue({
+      lines: [
+        { lineKey: "line-b", proposedLineTreatment: "INVENTORY_PURCHASE", proposedCreditSubtype: null, proposedDiscountScope: null, candidateItemId: null, proposedName: "Misc Chg Rtn 4", proposedDisposition: "INVENTORY", proposedCategoryId: null, proposedSpendCategoryId: null, proposedBaseUnitCode: null, confidence: 0.43, reasoning: "Unclear.", evidence: [], fieldsRequiringReview: ["treatment"] },
+      ],
+      issues: [],
+      raw: {},
+      model: "gemini-3.6-flash",
+      provider: "gemini",
+    });
+
+    await classifyPurchaseDocumentLines("pd-1", "org-1");
+
+    expect(recordAiItemProposalRpcMock).not.toHaveBeenCalled();
+    expect(recordAiLineTreatmentRpcMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lineKey: "line-b", proposedTreatment: "INVENTORY_PURCHASE", confidence: 0.43 }));
+  });
+
+  it("applies a vendor-specific prior decision before AI (Bartlett Dairy + SKU 99 -> returnable-container credit) and skips the AI call for that line", async () => {
+    const CASES_RETURNED = { lineKey: "line-r", vendorSku: "99", description: "CASES RETURNED", packageQuantity: 1, packageUnit: null, measuredQuantity: null, measuredUnit: null, unitPrice: -24, lineTotal: -24 };
+    getLinesNeedingClassificationMock.mockResolvedValue([CASES_RETURNED]);
+    tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
+    findVendorLineTreatmentRuleRpcMock.mockResolvedValue({ ruleId: "rule-1", lineTreatment: "CREDIT_RETURN", creditSubtype: "RETURNABLE_CONTAINER_CREDIT", spendCategoryId: null, discountScope: null, matchBasis: "VENDOR_SKU" });
+
+    await classifyPurchaseDocumentLines("pd-1", "org-1");
+
+    expect(recordAiLineTreatmentRpcMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lineKey: "line-r", proposedTreatment: "CREDIT_RETURN", proposedCreditSubtype: "RETURNABLE_CONTAINER_CREDIT", resolutionSource: "VENDOR_TREATMENT_RULE", treatmentRuleId: "rule-1", confidence: 1 }));
+    expect(resolveDeterministicMock).not.toHaveBeenCalled();
+    expect(runItemClassificationMock).not.toHaveBeenCalled();
+    expect(recordAiItemProposalRpcMock).not.toHaveBeenCalled();
+  });
+
+  it("never applies a prior decision that contradicts the current line's evidence (a credit rule on a positive amount) -- passes it to the AI as context instead", async () => {
+    const POSITIVE = { lineKey: "line-p", vendorSku: "99", description: "CASES RETURNED", packageQuantity: 1, packageUnit: null, measuredQuantity: null, measuredUnit: null, unitPrice: 24, lineTotal: 24 };
+    getLinesNeedingClassificationMock.mockResolvedValue([POSITIVE]);
+    tryClaimMock.mockResolvedValue({ claimId: "claim-1", status: "CLAIMED" });
+    resolveDeterministicMock.mockResolvedValue(null);
+    findVendorLineTreatmentRuleRpcMock.mockResolvedValue({ ruleId: "rule-1", lineTreatment: "CREDIT_RETURN", creditSubtype: "RETURNABLE_CONTAINER_CREDIT", spendCategoryId: null, discountScope: null, matchBasis: "VENDOR_SKU" });
+    runItemClassificationMock.mockResolvedValue({ lines: [], issues: [], raw: {}, model: "gemini-3.6-flash", provider: "gemini" });
+
+    await classifyPurchaseDocumentLines("pd-1", "org-1");
+
+    expect(recordAiLineTreatmentRpcMock).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resolutionSource: "VENDOR_TREATMENT_RULE" }));
+    expect(runItemClassificationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      [expect.objectContaining({ lineKey: "line-p", priorDecision: expect.objectContaining({ lineTreatment: "CREDIT_RETURN", matchBasis: "VENDOR_SKU" }) })],
+      expect.any(Set),
+      "gemini-3.6-flash"
+    );
   });
 
   it("records an AI-suggested existing-item candidate", async () => {

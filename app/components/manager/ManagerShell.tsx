@@ -149,6 +149,9 @@ function buildNav(isAdmin: boolean): NavItem[] {
         // not Admin-only configuration.
         { label: "Vendors", href: "/manager/admin/vendors", isActive: (p) => p.startsWith("/manager/admin/vendors") },
         { label: "Categories", href: "/manager/admin/categories", isActive: (p) => p.startsWith("/manager/admin/categories") },
+        // Line-treatment model: remembered vendor-specific classification
+        // decisions ("Matched previous decision") are Admin-editable here.
+        { label: "Line Treatment Rules", href: "/manager/admin/line-treatment-rules", isActive: (p) => p.startsWith("/manager/admin/line-treatment-rules") },
         // AI Configuration + Usage/Cost Tracking milestone: the
         // centralized control layer for provider/model decisions and the
         // Admin-only Usage & Cost view (Part 3/45) both live on this one

@@ -10,7 +10,7 @@ export interface PostPurchaseDocumentInventoryInput {
 }
 
 export interface PostPurchaseDocumentInventoryResult {
-  status: "POSTED" | "ALREADY_POSTED";
+  status: "POSTED" | "ALREADY_POSTED" | "NO_INVENTORY_CHANGES";
   postingId: string | null;
   postedLineCount: number;
   movementCount: number;
@@ -48,7 +48,7 @@ export async function postPurchaseDocumentInventoryRpc(
   }
 
   return {
-    status: row.out_status as "POSTED" | "ALREADY_POSTED",
+    status: row.out_status as "POSTED" | "ALREADY_POSTED" | "NO_INVENTORY_CHANGES",
     postingId: row.out_posting_id,
     postedLineCount: row.out_posted_line_count,
     movementCount: row.out_movement_count,

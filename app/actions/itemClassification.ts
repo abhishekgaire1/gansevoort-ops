@@ -21,6 +21,7 @@ import { resolveLineMismatchFields, resolveUnitCode } from "@/app/lib/purchaseDo
 import { resolveVendorPurchasePackages } from "@/app/lib/purchaseDocuments/resolveVendorPurchasePackage";
 import { amendmentDiff, type AmendmentDiffLine } from "@/app/lib/purchaseDocuments/lineProvenance";
 import { defaultDispositionForVendor } from "@/app/lib/itemMaster/defaultDispositionForVendor";
+import type { CreditSubtype, DiscountScope, LineTreatment } from "@/app/lib/purchaseDocuments/lineTreatment";
 
 type AuthFailure = { ok: false; reason: "not_authorized"; message: string };
 const NOT_AUTHORIZED: AuthFailure = { ok: false, reason: "not_authorized", message: "You must be signed in as a manager or admin." };
@@ -131,6 +132,41 @@ export interface LineClassificationRow {
    * shown in smaller text beside a "Changed in amendment" badge -- null
    * unless changedInAmendment is true. */
   previousOrderedSummary: string | null;
+  // ---- Line-treatment model (20260811100182) -- the authoritative
+  // operational classification; disposition above is derived from it.
+  lineTreatment: LineTreatment;
+  creditSubtype: CreditSubtype | null;
+  discountScope: DiscountScope | null;
+  discountRelatedLineKey: string | null;
+  unitPrice: number | null;
+  /** The written explanation/note (required for a catch-all category). */
+  explanation: string | null;
+  /** Whether the line's expense category is currently active (null when
+   * no category); a disabled category invalidates the line. */
+  spendCategoryActive: boolean | null;
+  spendCategoryRequiresExplanation: boolean;
+  spendCategoryName: string | null;
+  // Inventory return (CREDIT_RETURN / INVENTORY_RETURN)
+  returnQuantity: number | null;
+  returnUnitCode: string | null;
+  returnLocationId: string | null;
+  returnLocationName: string | null;
+  returnReason: string | null;
+  returnImpactAcknowledged: boolean;
+  /** Server-resolved base-unit quantity of the return (null = unit not
+   * configured for the item). */
+  returnBaseQuantity: number | null;
+  /** Server-resolved on-hand at the source location (null = not resolvable). */
+  returnOnHandQuantity: number | null;
+  // What the AI (or a matched vendor rule) proposed, verbatim -- kept even
+  // when the manager changed it, so the row can always say "AI proposed X".
+  aiProposedTreatment: LineTreatment | null;
+  aiProposedCreditSubtype: CreditSubtype | null;
+  aiProposedSpendCategoryId: string | null;
+  aiReason: string | null;
+  aiEvidence: string[];
+  aiReviewFields: string[];
+  treatmentRuleId: string | null;
 }
 
 export type GetPurchaseDocumentLineClassificationsResult = { ok: true; lines: LineClassificationRow[] } | AuthFailure;
@@ -147,14 +183,14 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
   const [{ data: lines }, { data: classifications }, { data: allUnits }, { data: purchaseDocument }] = await Promise.all([
     supabase
       .from("purchase_document_lines")
-      .select("line_key, line_number, vendor_sku, description, package_quantity, package_unit, measured_quantity, measured_unit, line_total")
+      .select("line_key, line_number, vendor_sku, description, package_quantity, package_unit, measured_quantity, measured_unit, unit_price, line_total")
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", auth.manager.organizationId)
       .order("line_number"),
     supabase
       .from("purchase_document_line_classifications")
       .select(
-        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, vendor_item_purchase_unit_id, resolved_by_app_user_id, resolved_at, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, base_unit_id, inventory_categories(name), units(code, name)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code))"
+        "id, line_key, status, disposition, resolution_source, ai_confidence, ai_proposed_purchase_unit, inventory_item_id, ai_suggested_inventory_item_id, spend_category_id, vendor_item_purchase_unit_id, resolved_by_app_user_id, resolved_at, line_treatment, credit_subtype, discount_scope, discount_related_line_key, return_quantity, return_unit_code, return_location_id, return_reason, return_impact_acknowledged, ai_proposed_treatment, ai_proposed_credit_subtype, ai_proposed_spend_category_id, ai_reason, ai_evidence, ai_review_fields, treatment_rule_id, explanation, inventory_items!purchase_document_line_classifications_item_org_fk(id, name, item_number, created_via, base_unit_id, inventory_categories(name), units(code, name)), ai_item:inventory_items!purchase_document_line_classifications_ai_item_org_fk(id, name, approval_status, disposition, category_id, spend_category_id, units(code))"
       )
       .eq("purchase_document_id", purchaseDocumentId)
       .eq("organization_id", auth.manager.organizationId),
@@ -186,6 +222,32 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
   }
 
   const classificationByLineKey = new Map((classifications ?? []).map((c) => [c.line_key as string, c]));
+
+  // Expense-category validity (an Admin disabling a category invalidates
+  // every dependent draft line) and return facts, batched: one category
+  // read, one location read, and the two server-side return helpers for
+  // the (rare) inventory-return lines only.
+  const { data: spendCategoryRows } = await supabase
+    .from("spend_categories")
+    .select("id, name, is_active, requires_explanation")
+    .eq("organization_id", auth.manager.organizationId);
+  const spendCategoryById = new Map((spendCategoryRows ?? []).map((sc) => [sc.id as string, sc]));
+  const returnLocationIds = Array.from(new Set((classifications ?? []).map((c) => c.return_location_id as string | null).filter((id): id is string => Boolean(id))));
+  const { data: returnLocationRows } = returnLocationIds.length > 0 ? await supabase.from("locations").select("id, name").in("id", returnLocationIds) : { data: [] };
+  const returnLocationNameById = new Map((returnLocationRows ?? []).map((l) => [l.id as string, l.name as string]));
+  const returnFactsByClassificationId = new Map<string, { baseQuantity: number | null; onHand: number | null }>();
+  for (const c of (classifications ?? []).filter((c) => c.credit_subtype === "INVENTORY_RETURN" && c.inventory_item_id && c.return_quantity !== null)) {
+    const [{ data: baseQty }, { data: onHand }] = await Promise.all([
+      supabase.rpc("line_return_base_quantity", { p_classification_id: c.id as string }),
+      c.return_location_id
+        ? supabase.rpc("inventory_location_item_balance", { p_organization_id: auth.manager.organizationId, p_inventory_item_id: c.inventory_item_id as string, p_location_id: c.return_location_id as string })
+        : Promise.resolve({ data: null }),
+    ]);
+    returnFactsByClassificationId.set(c.id as string, {
+      baseQuantity: baseQty === null || baseQty === undefined ? null : Number(baseQty),
+      onHand: onHand === null || onHand === undefined ? null : Number(onHand),
+    });
+  }
 
   // Redesign: "Confirmed by <name> · <time>" -- ONLY for a genuine manager
   // resolution (resolved_by_app_user_id set); a system auto-match
@@ -300,6 +362,30 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
         resolvedAt: null,
         changedInAmendment,
         previousOrderedSummary,
+        lineTreatment: "UNRESOLVED",
+        creditSubtype: null,
+        discountScope: null,
+        discountRelatedLineKey: null,
+        unitPrice: (line.unit_price as number | null) ?? null,
+        explanation: null,
+        spendCategoryActive: null,
+        spendCategoryRequiresExplanation: false,
+        spendCategoryName: null,
+        returnQuantity: null,
+        returnUnitCode: null,
+        returnLocationId: null,
+        returnLocationName: null,
+        returnReason: null,
+        returnImpactAcknowledged: false,
+        returnBaseQuantity: null,
+        returnOnHandQuantity: null,
+        aiProposedTreatment: null,
+        aiProposedCreditSubtype: null,
+        aiProposedSpendCategoryId: null,
+        aiReason: null,
+        aiEvidence: [],
+        aiReviewFields: [],
+        treatmentRuleId: null,
       };
     }
 
@@ -371,6 +457,30 @@ export async function getPurchaseDocumentLineClassifications(purchaseDocumentId:
       resolvedAt: c.resolved_at as string | null,
       changedInAmendment,
       previousOrderedSummary,
+      lineTreatment: ((c.line_treatment as string | null) ?? (disposition === "INVENTORY" ? "INVENTORY_PURCHASE" : disposition === "NON_INVENTORY" ? "EXPENSE" : "UNRESOLVED")) as LineTreatment,
+      creditSubtype: (c.credit_subtype as CreditSubtype | null) ?? null,
+      discountScope: (c.discount_scope as DiscountScope | null) ?? null,
+      discountRelatedLineKey: (c.discount_related_line_key as string | null) ?? null,
+      unitPrice: (line.unit_price as number | null) ?? null,
+      explanation: (c.explanation as string | null) ?? null,
+      spendCategoryActive: c.spend_category_id ? ((spendCategoryById.get(c.spend_category_id as string)?.is_active as boolean | undefined) ?? false) : null,
+      spendCategoryRequiresExplanation: c.spend_category_id ? ((spendCategoryById.get(c.spend_category_id as string)?.requires_explanation as boolean | undefined) ?? false) : false,
+      spendCategoryName: c.spend_category_id ? ((spendCategoryById.get(c.spend_category_id as string)?.name as string | undefined) ?? null) : null,
+      returnQuantity: c.return_quantity === null || c.return_quantity === undefined ? null : Number(c.return_quantity),
+      returnUnitCode: (c.return_unit_code as string | null) ?? null,
+      returnLocationId: (c.return_location_id as string | null) ?? null,
+      returnLocationName: c.return_location_id ? (returnLocationNameById.get(c.return_location_id as string) ?? null) : null,
+      returnReason: (c.return_reason as string | null) ?? null,
+      returnImpactAcknowledged: Boolean(c.return_impact_acknowledged),
+      returnBaseQuantity: returnFactsByClassificationId.get(c.id as string)?.baseQuantity ?? null,
+      returnOnHandQuantity: returnFactsByClassificationId.get(c.id as string)?.onHand ?? null,
+      aiProposedTreatment: (c.ai_proposed_treatment as LineTreatment | null) ?? null,
+      aiProposedCreditSubtype: (c.ai_proposed_credit_subtype as CreditSubtype | null) ?? null,
+      aiProposedSpendCategoryId: (c.ai_proposed_spend_category_id as string | null) ?? null,
+      aiReason: (c.ai_reason as string | null) ?? null,
+      aiEvidence: Array.isArray(c.ai_evidence) ? (c.ai_evidence as string[]) : [],
+      aiReviewFields: Array.isArray(c.ai_review_fields) ? (c.ai_review_fields as string[]) : [],
+      treatmentRuleId: (c.treatment_rule_id as string | null) ?? null,
       aiNewItemProposal: isNewProposal
         ? {
             disposition: defaultDispositionForVendor(documentVendorClassification, (aiItem?.disposition as "INVENTORY" | "NON_INVENTORY" | undefined) ?? null),

@@ -16,11 +16,14 @@ export type InventoryMovementType =
   | "COUNT_ADJUSTMENT_IN"
   | "COUNT_ADJUSTMENT_OUT"
   | "TRANSFER_IN"
-  | "TRANSFER_OUT";
+  | "TRANSFER_OUT"
+  | "INVENTORY_CORRECTION_IN"
+  | "INVENTORY_CORRECTION_OUT"
+  | "VENDOR_RETURN";
 
 export type ActivityDirection = "IN" | "OUT";
 
-const IN_MOVEMENT_TYPES = new Set<InventoryMovementType>(["PURCHASE_RECEIPT", "COUNT_ADJUSTMENT_IN", "TRANSFER_IN"]);
+const IN_MOVEMENT_TYPES = new Set<InventoryMovementType>(["PURCHASE_RECEIPT", "COUNT_ADJUSTMENT_IN", "TRANSFER_IN", "INVENTORY_CORRECTION_IN"]);
 
 export function directionForMovementType(movementType: InventoryMovementType): ActivityDirection {
   return IN_MOVEMENT_TYPES.has(movementType) ? "IN" : "OUT";

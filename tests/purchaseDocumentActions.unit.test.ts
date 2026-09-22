@@ -42,6 +42,9 @@ vi.mock("@/app/lib/purchaseDocuments/submitPurchaseDocumentForVerificationRpc", 
   submitPurchaseDocumentForVerificationRpc: submitMock,
 }));
 vi.mock("@/app/lib/purchaseDocuments/verifyPurchaseDocumentRpc", () => ({ verifyPurchaseDocumentRpc: verifyMock }));
+// Line-treatment model: submit first records the manager's acceptance of
+// high-confidence proposals (a separate RPC); stub it as a no-op here.
+vi.mock("@/app/lib/purchaseDocuments/lineTreatmentRpcs", () => ({ acceptAiAssignedLineClassificationsRpc: vi.fn(async () => 0) }));
 vi.mock("@/app/lib/purchaseDocuments/returnPurchaseDocumentToDraftRpc", () => ({ returnPurchaseDocumentToDraftRpc: returnMock }));
 vi.mock("@/app/lib/purchaseDocuments/initiateAmendmentRpc", () => ({ initiateAmendmentRpc: initiateAmendmentMock }));
 vi.mock("@/app/lib/purchaseDocuments/discardPurchaseDocumentDraftRpc", () => ({ discardPurchaseDocumentDraftRpc: discardMock }));

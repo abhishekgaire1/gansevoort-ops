@@ -42,8 +42,11 @@ import {
   SoleApproverReasonRequiredError,
   PriceReviewRequiredError,
   DeliveryConflictError,
-} from "@/app/lib/purchaseDocuments/errors";
+ UnresolvedLinesError } from "@/app/lib/purchaseDocuments/errors";
 import { InventoryPostingBlockedError, AmendmentLineageAlreadyPostedError, type InventoryPostingBlocker } from "@/app/lib/inventory/errors";
+import { acceptAiAssignedLineClassificationsRpc } from "@/app/lib/purchaseDocuments/lineTreatmentRpcs";
+import { reconcileTotals } from "@/app/lib/purchaseDocuments/totalsReconciliation";
+import type { LineTreatment } from "@/app/lib/purchaseDocuments/lineTreatment";
 import { isAmbiguousDeliveryLineage, AMBIGUOUS_DELIVERY_REASON } from "@/app/lib/purchaseDocuments/duplicateDelivery";
 import type { PurchaseDocumentHeaderDraft, PurchaseDocumentLine, PurchaseDocumentStatus, PurchaseDocumentType } from "@/app/lib/purchaseDocuments/types";
 
@@ -263,6 +266,15 @@ export async function submitPurchaseDocumentForVerification(
   }
 
   try {
+    // The manager's acceptance of every still-pending high-confidence
+    // ("AI assigned" / "Matched previous decision") proposal, recorded as
+    // their own audited decision before the completeness gate runs --
+    // the same acceptance the sole-approver RPC applies in-transaction.
+    await acceptAiAssignedLineClassificationsRpc(getServiceRoleClient(), {
+      organizationId: auth.manager.organizationId,
+      purchaseDocumentId,
+      appUserId: auth.manager.appUserId,
+    });
     const result = await submitPurchaseDocumentForVerificationRpc(getServiceRoleClient(), {
       purchaseDocumentId,
       organizationId: auth.manager.organizationId,
@@ -682,11 +694,15 @@ export type PostPurchaseDocumentSoleApproverResult =
       ok: true;
       status: string;
       verifiedAt: string;
-      postingStatus: "POSTED" | "ALREADY_POSTED";
+      postingStatus: "POSTED" | "ALREADY_POSTED" | "NO_INVENTORY_CHANGES";
       postedLineCount: number;
       inventoryValue: number;
       inventoryLineCount: number;
       expenseLineCount: number;
+      creditLineCount: number;
+      discountLineCount: number;
+      taxLineCount: number;
+      returnLineCount: number;
     }
   | { ok: false; reason: "not_authorized" | "not_eligible"; message: string }
   | { ok: false; reason: "reason_required"; message: string }
@@ -819,7 +835,7 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
 
   const { data: lineRows } = await supabase
     .from("purchase_document_lines")
-    .select("vendor_sku, description, package_quantity, package_unit, measured_quantity, measured_unit, unit_price, price_basis_unit, line_total")
+    .select("line_key, vendor_sku, description, package_quantity, package_unit, measured_quantity, measured_unit, unit_price, price_basis_unit, line_total")
     .eq("purchase_document_id", input.purchaseDocumentId)
     .eq("organization_id", auth.manager.organizationId);
 
@@ -848,7 +864,20 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
       rawLineText: null,
     })),
   });
-  if (draftFlags.some((f) => f.code === "TOTAL_MISMATCH" || f.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE")) {
+  // Treatment-aware totals: a tax/freight/credit/discount LINE is reconciled
+  // by its treatment (never double-counted against the header tax/fees) --
+  // the SAME reconciliation Review Invoice and Review & Post display.
+  const { data: treatmentRows } = await supabase
+    .from("purchase_document_line_classifications")
+    .select("line_key, line_treatment")
+    .eq("purchase_document_id", input.purchaseDocumentId)
+    .eq("organization_id", auth.manager.organizationId);
+  const treatmentByLineKey = new Map((treatmentRows ?? []).map((r) => [r.line_key as string, (r.line_treatment as LineTreatment | null) ?? "UNRESOLVED"]));
+  const treatmentAwareTotals = reconcileTotals(
+    (lineRows ?? []).map((line) => ({ treatment: treatmentByLineKey.get(line.line_key as string) ?? "UNRESOLVED", lineTotal: line.line_total as number | null })),
+    { tax: document.tax as number | null, fees: document.fees as number | null, total: document.total as number | null }
+  );
+  if (treatmentAwareTotals.reconciles === false || draftFlags.some((f) => f.code === "TOTAL_MAY_INCLUDE_ACCOUNT_BALANCE")) {
     return {
       ok: false,
       reason: "total_discrepancy",
@@ -875,8 +904,16 @@ export async function postPurchaseDocumentSoleApprover(input: PostPurchaseDocume
       inventoryValue: result.inventoryValue,
       inventoryLineCount: result.inventoryLineCount,
       expenseLineCount: result.expenseLineCount,
+      creditLineCount: result.creditLineCount,
+      discountLineCount: result.discountLineCount,
+      taxLineCount: result.taxLineCount,
+      returnLineCount: result.returnLineCount,
     };
   } catch (err) {
+    if (err instanceof UnresolvedLinesError) {
+      // An unresolved / unconfirmed / invalid line can never post (GA088).
+      return { ok: false, reason: "blocked", message: "Cannot post yet. Classify every invoice line in Review Invoice, then try again.", blockers: err.blockers };
+    }
     const isKnownInventoryError = err instanceof InventoryPostingBlockedError || err instanceof AmendmentLineageAlreadyPostedError;
     const isKnownRejection =
       isKnownInventoryError ||
